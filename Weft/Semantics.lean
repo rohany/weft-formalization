@@ -31,9 +31,11 @@ condition).
 * `read_noop` / `write_noop` — `read g; c ⤳ c` and `write g; c ⤳ c`; `read`/
   `write` are no-ops for the barrier semantics, merely advancing the program.
 * `arrive_configure` — first thread to register at an unconfigured barrier via
-  `arrive`: `B(b) = ([],[],⊥)`, set `B' = B[([], [id], n)/b]`, advance to `c`.
-* `arrive_register` — subsequent non-blocking arrive: `B(b) = (I,A,n)` with
-  `0 < |I|+|A| < n`, set `B' = B[(I, A::id, n)/b]`, advance to `c`.
+  `arrive`: `E(id) = true`, `B(b) = ([],[],⊥)`, set `B' = B[([], [id], n)/b]`,
+  advance to `c`. (The `E(id) = true` premise is explicit here, beyond the paper.)
+* `arrive_register` — subsequent non-blocking arrive: `E(id) = true`,
+  `B(b) = (I,A,n)` with `0 < |I|+|A| < n`, set `B' = B[(I, A::id, n)/b]`, advance
+  to `c`.
 * `sync_configure` — first thread to register at an unconfigured barrier via
   `sync`: `E(id) = true`, `E' = E[false/id]`, `B(b) = ([],[],⊥)`,
   `B' = B[([id], [], n)/b]`; control stays at `sync b n; c` (thread now blocked).
@@ -96,15 +98,21 @@ inductive ThreadStep : ThreadConfig → ThreadConfig → Prop where
   | write_noop {s : State} {i : ThreadId} {g : Loc} {c : Prog} :
       ThreadStep (.run s i (Cmd.write g :: c)) (.run s i c)
   /-- First thread to register at an unconfigured barrier `b` via `arrive`:
-  configure `b` with count `n`, add `id` to the arrived list, advance to `c`. -/
+  configure `b` with count `n`, add `id` to the arrived list, advance to `c`.
+  The enabledness premise `E(id) = true` is stronger than the paper, which leaves
+  it implicit (a thread reaching an `arrive` is necessarily enabled); we require
+  it explicitly, matching the `sync` rules. -/
   | arrive_configure {s : State} {i : ThreadId} {b : Barrier} {n : Nat} {c : Prog}
+      (he : s.E i = true)
       (hb : s.B b = BarrierState.unconfigured) :
       ThreadStep (.run s i (Cmd.arrive b n :: c))
         (.run { s with B := Function.update s.B b ⟨[], [i], some n⟩ } i c)
   /-- Subsequent non-blocking `arrive` at a configured, not-yet-full barrier:
-  add `id` to the arrived list, advance to `c`. -/
+  add `id` to the arrived list, advance to `c`. As in `arrive_configure`, the
+  enabledness premise `E(id) = true` is required explicitly, beyond the paper. -/
   | arrive_register {s : State} {i : ThreadId} {b : Barrier} {n : Nat} {c : Prog}
       {I A : List ThreadId}
+      (he : s.E i = true)
       (hb : s.B b = ⟨I, A, some n⟩)
       (hpos : 0 < I.length + A.length) (hlt : I.length + A.length < n) :
       ThreadStep (.run s i (Cmd.arrive b n :: c))
@@ -160,7 +168,6 @@ inductive ThreadStep : ThreadConfig → ThreadConfig → Prop where
 
 /-- The CTA-level small-step relation `E, B, T  ⤳  E', B', T'` of §3.3. -/
 inductive CTAStep : Config → Config → Prop where
-  /- CHECKED. -/
   /-- Interleaving: while every barrier is unconfigured or still under-registered,
   nondeterministically choose a thread and run it for one (non-error) thread step,
   splicing the resulting program and state back into the CTA. -/
@@ -170,7 +177,6 @@ inductive CTAStep : Config → Config → Prop where
                    ∃ I A n, s.B b = ⟨I, A, some n⟩ ∧ I.length + A.length < n)
       (hstep : ThreadStep (.run s i (T.prog i)) (.run s' i P')) :
       CTAStep (.run s T) (.run s' (T.set i hi P'))
-  /- CHECKED. -/
   /-- Recycle: when barrier `b` has registered exactly its expected count
   (`|I|+|A| = n`), wake every thread blocked on it (`E' = E[true/I]`), advance each
   such thread past its parked `sync b n`, and reset `b` to unconfigured. -/
@@ -182,11 +188,9 @@ inductive CTAStep : Config → Config → Prop where
         (.run { E := updateMapOn s.E I true,
                 B := Function.update s.B b BarrierState.unconfigured }
               (T.wake I))
-  /- CHECKED. -/
   /-- Termination: when every thread has reached `return`, the CTA is `done`. -/
   | done {s : State} {T : CTA} (hdone : CTA.IsDone T) :
       CTAStep (.run s T) (.done s)
-  /- CHECKED. -/
   /-- Error propagation: if any thread produces `err`, so does the whole CTA. This
   rule is independent of the barrier condition guarding `interleave`. -/
   | error {s : State} {T : CTA} {i : ThreadId} {P' : Prog}
