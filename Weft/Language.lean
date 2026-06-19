@@ -96,7 +96,7 @@ abbrev Prog := List Cmd
 It pairs a finite domain `ids` (the thread identifiers that exist — the `N`
 threads of the CTA, so `N = ids.card`) with a *total* program map `prog`, so
 lookups never fail (`prog i : Prog` always; a terminated thread maps to the empty
-program `[]`). The field `nil_of_not_mem` couples the two: outside `ids` the
+program `[]`). The field `nil_outside_ids` couples the two: outside `ids` the
 program is empty, i.e. the support of `prog` is contained in `ids`. Hence there
 are no "ghost" threads with work outside the domain, `ids` is the fixed set of
 the CTA's threads (a terminated thread stays in `ids` with `prog i = []`), and we
@@ -109,7 +109,7 @@ structure CTA where
   prog : ThreadId → Prog
   /-- Coupling invariant: a thread outside the domain has no program left, so
   every thread with remaining work is in `ids`. -/
-  nil_of_not_mem : ∀ i ∉ ids, prog i = []
+  nil_outside_ids : ∀ i ∉ ids, prog i = []
 
 namespace CTA
 
@@ -118,11 +118,11 @@ membership hypothesis `hi` is what lets us re-establish the coupling invariant. 
 def set (T : CTA) (i : ThreadId) (hi : i ∈ T.ids) (P : Prog) : CTA where
   ids := T.ids
   prog := Function.update T.prog i P
-  nil_of_not_mem := by
+  nil_outside_ids := by
     intro j hj
     have hji : j ≠ i := fun h => hj (h ▸ hi)
     rw [Function.update_of_ne hji]
-    exact T.nil_of_not_mem j hj
+    exact T.nil_outside_ids j hj
 
 /-- Wake the threads blocked at a recycling barrier: every thread in `I` drops its
 leading (parked `sync`) command, others are unchanged. The domain is preserved,
@@ -131,9 +131,9 @@ and the coupling holds because outside `ids` the program is already `[]` (and
 def wake (T : CTA) (I : List ThreadId) : CTA where
   ids := T.ids
   prog := fun j => if j ∈ I then (T.prog j).tail else T.prog j
-  nil_of_not_mem := by
+  nil_outside_ids := by
     intro j hj
-    have hnil : T.prog j = [] := T.nil_of_not_mem j hj
+    have hnil : T.prog j = [] := T.nil_outside_ids j hj
     by_cases h : j ∈ I <;> simp [h, hnil]
 
 end CTA

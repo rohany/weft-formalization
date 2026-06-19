@@ -190,7 +190,6 @@ inductive CTAStep : Config → Config → Prop where
   /-- Error propagation: if any thread produces `err`, so does the whole CTA. This
   rule is independent of the barrier condition guarding `interleave`. -/
   | error {s : State} {T : CTA} {i : ThreadId} {P' : Prog}
-      (hi : i ∈ T.ids)
       (hstep : ThreadStep (.run s i (T.prog i)) (.err i P')) :
       CTAStep (.run s T) (.err T)
 
