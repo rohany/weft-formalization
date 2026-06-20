@@ -102,7 +102,7 @@ inductive ThreadStep : ThreadConfig → ThreadConfig → Prop where
   The enabledness premise `E(id) = true` is stronger than the paper, which leaves
   it implicit (a thread reaching an `arrive` is necessarily enabled); we require
   it explicitly, matching the `sync` rules. -/
-  | arrive_configure {s : State} {i : ThreadId} {b : Barrier} {n : Nat} {c : Prog}
+  | arrive_configure {s : State} {i : ThreadId} {b : Barrier} {n : ℕ+} {c : Prog}
       (he : s.E i = true)
       (hb : s.B b = BarrierState.unconfigured) :
       ThreadStep (.run s i (Cmd.arrive b n :: c))
@@ -110,17 +110,17 @@ inductive ThreadStep : ThreadConfig → ThreadConfig → Prop where
   /-- Subsequent non-blocking `arrive` at a configured, not-yet-full barrier:
   add `id` to the arrived list, advance to `c`. As in `arrive_configure`, the
   enabledness premise `E(id) = true` is required explicitly, beyond the paper. -/
-  | arrive_register {s : State} {i : ThreadId} {b : Barrier} {n : Nat} {c : Prog}
+  | arrive_register {s : State} {i : ThreadId} {b : Barrier} {n : ℕ+} {c : Prog}
       {I A : List ThreadId}
       (he : s.E i = true)
       (hb : s.B b = ⟨I, A, some n⟩)
-      (hpos : 0 < I.length + A.length) (hlt : I.length + A.length < n) :
+      (hpos : 0 < I.length + A.length) (hlt : I.length + A.length < (n : Nat)) :
       ThreadStep (.run s i (Cmd.arrive b n :: c))
         (.run { s with B := Function.update s.B b ⟨I, i :: A, some n⟩ } i c)
   /-- First thread to register at an unconfigured barrier `b` via `sync`:
   configure `b` with count `n`, disable the thread (`E[false/id]`), add `id` to
   the synced list; control stays parked at `sync b n; c`. -/
-  | sync_configure {s : State} {i : ThreadId} {b : Barrier} {n : Nat} {c : Prog}
+  | sync_configure {s : State} {i : ThreadId} {b : Barrier} {n : ℕ+} {c : Prog}
       (he : s.E i = true)
       (hb : s.B b = BarrierState.unconfigured) :
       ThreadStep (.run s i (Cmd.sync b n :: c))
@@ -128,38 +128,38 @@ inductive ThreadStep : ThreadConfig → ThreadConfig → Prop where
                 B := Function.update s.B b ⟨[i], [], some n⟩ } i (Cmd.sync b n :: c))
   /-- Subsequent blocking `sync` at a configured, not-yet-full barrier: disable
   the thread, add `id` to the synced list; control stays parked at `sync b n; c`. -/
-  | sync_block {s : State} {i : ThreadId} {b : Barrier} {n : Nat} {c : Prog}
+  | sync_block {s : State} {i : ThreadId} {b : Barrier} {n : ℕ+} {c : Prog}
       {I A : List ThreadId}
       (he : s.E i = true)
       (hb : s.B b = ⟨I, A, some n⟩)
-      (hpos : 0 < I.length + A.length) (hlt : I.length + A.length < n) :
+      (hpos : 0 < I.length + A.length) (hlt : I.length + A.length < (n : Nat)) :
       ThreadStep (.run s i (Cmd.sync b n :: c))
         (.run { E := Function.update s.E i false,
                 B := Function.update s.B b ⟨i :: I, A, some n⟩ } i (Cmd.sync b n :: c))
   /-- Too many threads register at `b` via `sync` (`|I|+|A| = n`): step to `err`. -/
-  | sync_err_full {s : State} {i : ThreadId} {b : Barrier} {n : Nat} {c : Prog}
+  | sync_err_full {s : State} {i : ThreadId} {b : Barrier} {n : ℕ+} {c : Prog}
       {I A : List ThreadId}
       (he : s.E i = true)
       (hb : s.B b = ⟨I, A, some n⟩)
-      (hfull : I.length + A.length = n) :
+      (hfull : I.length + A.length = (n : Nat)) :
       ThreadStep (.run s i (Cmd.sync b n :: c)) (.err i (Cmd.sync b n :: c))
   /-- Thread-count mismatch on `b`: barrier expects `n` but `sync b m` has `n ≠ m`;
   step to `err`. -/
-  | sync_err_count {s : State} {i : ThreadId} {b : Barrier} {m n : Nat} {c : Prog}
+  | sync_err_count {s : State} {i : ThreadId} {b : Barrier} {m n : ℕ+} {c : Prog}
       {I A : List ThreadId}
       (he : s.E i = true)
       (hb : s.B b = ⟨I, A, some n⟩)
       (hne : n ≠ m) :
       ThreadStep (.run s i (Cmd.sync b m :: c)) (.err i (Cmd.sync b m :: c))
   /-- The `arrive` analogue of `sync_err_full` (identical, per the paper). -/
-  | arrive_err_full {s : State} {i : ThreadId} {b : Barrier} {n : Nat} {c : Prog}
+  | arrive_err_full {s : State} {i : ThreadId} {b : Barrier} {n : ℕ+} {c : Prog}
       {I A : List ThreadId}
       (he : s.E i = true)
       (hb : s.B b = ⟨I, A, some n⟩)
-      (hfull : I.length + A.length = n) :
+      (hfull : I.length + A.length = (n : Nat)) :
       ThreadStep (.run s i (Cmd.arrive b n :: c)) (.err i (Cmd.arrive b n :: c))
   /-- The `arrive` analogue of `sync_err_count` (identical, per the paper). -/
-  | arrive_err_count {s : State} {i : ThreadId} {b : Barrier} {m n : Nat} {c : Prog}
+  | arrive_err_count {s : State} {i : ThreadId} {b : Barrier} {m n : ℕ+} {c : Prog}
       {I A : List ThreadId}
       (he : s.E i = true)
       (hb : s.B b = ⟨I, A, some n⟩)
@@ -174,15 +174,15 @@ inductive CTAStep : Config → Config → Prop where
   | interleave {s s' : State} {T : CTA} {i : ThreadId} {P' : Prog}
       (hi : i ∈ T.ids)
       (hbar : ∀ b, s.B b = BarrierState.unconfigured ∨
-                   ∃ I A n, s.B b = ⟨I, A, some n⟩ ∧ I.length + A.length < n)
+                   ∃ I A n, s.B b = ⟨I, A, some n⟩ ∧ I.length + A.length < (n : Nat))
       (hstep : ThreadStep (.run s i (T.prog i)) (.run s' i P')) :
       CTAStep (.run s T) (.run s' (T.set i hi P'))
   /-- Recycle: when barrier `b` has registered exactly its expected count
   (`|I|+|A| = n`), wake every thread blocked on it (`E' = E[true/I]`), advance each
   such thread past its parked `sync b n`, and reset `b` to unconfigured. -/
-  | recycle {s : State} {T : CTA} {b : Barrier} {I A : List ThreadId} {n : Nat}
+  | recycle {s : State} {T : CTA} {b : Barrier} {I A : List ThreadId} {n : ℕ+}
       (hb : s.B b = ⟨I, A, some n⟩)
-      (hfull : I.length + A.length = n)
+      (hfull : I.length + A.length = (n : Nat))
       (hpark : ∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)) :
       CTAStep (.run s T)
         (.run { E := updateMapOn s.E I true,

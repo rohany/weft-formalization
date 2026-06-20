@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Rohan Yadav
 -/
 import Mathlib.Data.Finset.Basic
+import Mathlib.Data.PNat.Basic
 import Mathlib.Logic.Function.Basic
 
 /-!
@@ -70,11 +71,14 @@ inductive Cmd where
   /-- `write g`: write shared-memory location `g` (a no-op for barrier semantics). -/
   | write (g : Loc)
   /-- `arrive b n`: non-blocking registration at barrier `b`, which expects `n`
-  threads at this generation. -/
-  | arrive (b : Barrier) (n : Nat)
-  /-- `sync b n`: blocking synchronization at barrier `b`, which expects `n`
-  threads at this generation. -/
-  | sync (b : Barrier) (n : Nat)
+  threads at this generation. The count `n : ℕ+` is positive by construction: the
+  paper rejects `n = 0` in a preprocessing phase, and an `arrive b 0` would
+  configure a barrier that can never recycle. (`n` may still exceed the number of
+  threads — a thread can register at the same barrier multiple times.) -/
+  | arrive (b : Barrier) (n : ℕ+)
+  /-- `sync b n`: blocking synchronization at barrier `b`, which expects `n : ℕ+`
+  threads at this generation (positive by construction; see `arrive`). -/
+  | sync (b : Barrier) (n : ℕ+)
   deriving DecidableEq, Repr, Inhabited
 
 /-- A thread program `P`: straight-line code, a sequence of commands separated by
@@ -101,7 +105,8 @@ program is empty, i.e. the support of `prog` is contained in `ids`. Hence there
 are no "ghost" threads with work outside the domain, `ids` is the fixed set of
 the CTA's threads (a terminated thread stays in `ids` with `prog i = []`), and we
 can both read/update a thread by id and quantify over the real threads via
-`ids`. -/
+`ids`. A CTA has at least one thread (`ids_nonempty`), matching the paper's `N`
+threads. -/
 structure CTA where
   /-- The thread identifiers present in this CTA — its (finite) domain. -/
   ids : Finset ThreadId
@@ -110,6 +115,9 @@ structure CTA where
   /-- Coupling invariant: a thread outside the domain has no program left, so
   every thread with remaining work is in `ids`. -/
   nil_outside_ids : ∀ i ∉ ids, prog i = []
+  /-- A CTA has at least one thread — its domain is nonempty (`N ≥ 1` in the
+  paper). Preserved by every step, since `ids` never changes. -/
+  ids_nonempty : ids.Nonempty
 
 namespace CTA
 
@@ -123,6 +131,7 @@ def set (T : CTA) (i : ThreadId) (hi : i ∈ T.ids) (P : Prog) : CTA where
     have hji : j ≠ i := fun h => hj (h ▸ hi)
     rw [Function.update_of_ne hji]
     exact T.nil_outside_ids j hj
+  ids_nonempty := T.ids_nonempty
 
 /-- Wake the threads blocked at a recycling barrier: every thread in `I` drops its
 leading (parked `sync`) command, others are unchanged. The domain is preserved,
@@ -131,6 +140,7 @@ and the coupling holds because outside `ids` the program is already `[]` (and
 def wake (T : CTA) (I : List ThreadId) : CTA where
   ids := T.ids
   prog := fun j => if j ∈ I then (T.prog j).tail else T.prog j
+  ids_nonempty := T.ids_nonempty
   nil_outside_ids := by
     intro j hj
     have hnil : T.prog j = [] := T.nil_outside_ids j hj
@@ -149,7 +159,8 @@ def isSync : Cmd → Bool
 end Cmd
 
 /-- The standard CTA-wide barrier `__syncthreads()` is expressed as `sync 0 N`:
-a blocking sync across all `N` threads in the CTA on barrier `0`. -/
-def syncthreads (N : Nat) : Cmd := .sync 0 N
+a blocking sync on barrier `0` across all `N` threads of the CTA, where `N : ℕ+`
+is the (positive) expected thread count. -/
+def syncthreads (N : ℕ+) : Cmd := .sync 0 N
 
 end Weft

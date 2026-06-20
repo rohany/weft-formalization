@@ -55,8 +55,9 @@ structure BarrierState where
   synced : List ThreadId
   /-- `A`: threads that have arrived (non-blocking) at the barrier. -/
   arrived : List ThreadId
-  /-- `n`: the expected thread count; `none` denotes `⊥` (unconfigured). -/
-  count : Option Nat
+  /-- `n`: the expected thread count (`ℕ+`, positive when configured); `none`
+  denotes `⊥` (unconfigured). -/
+  count : Option ℕ+
   deriving DecidableEq, Repr, Inhabited
 
 namespace BarrierState

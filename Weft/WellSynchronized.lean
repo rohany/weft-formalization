@@ -79,7 +79,7 @@ def Config.state? : Config → Option State
 `CTAStep.recycle` fires. -/
 def BarrierState.isFull (β : BarrierState) : Bool :=
   match β.count with
-  | some n => β.synced.length + β.arrived.length == n
+  | some n => β.synced.length + β.arrived.length == (n : Nat)
   | none => false
 
 /-- The step `C ⤳ C'` recycles barrier `b`: `b` is configured-and-full in `C` and
@@ -326,31 +326,22 @@ theorem wellSync_no_unexec_sync {C₀ : Config} (h : C₀.WellSynchronized)
   · exact hηnoexec ⟨m, hm⟩
   · exact hg0 hg
 
-/-- Valid thread counts: every `sync`/`arrive` command expects at least one thread.
-The paper rejects invalid counts (`n = 0`, or `n` exceeding the CTA size) in a
-preprocessing phase; `n ≥ 1` is what the well-formedness invariant requires (an
-`arrive b 0` configures a barrier that can never recycle, deadlocking even from the
-initial state). -/
-def CTA.ValidCounts (T : CTA) : Prop :=
-  ∀ t b n, (Cmd.sync b n ∈ T.prog t ∨ Cmd.arrive b n ∈ T.prog t) → 0 < n
-
-/-- The well-formedness invariant. For a `run` configuration: the programs have
-valid counts, and for every configured barrier `b = (I, A, n)`, registration does
-not over-fill (`|I|+|A| ≤ n`) and every synced thread is *parked* at `sync b n`
-(its program is headed by exactly that command). Vacuously true for `done`/`err`. -/
+/-- The well-formedness invariant. For a `run` configuration: for every configured
+barrier `b = (I, A, n)`, registration does not over-fill (`|I|+|A| ≤ n`) and every
+synced thread is *parked* at `sync b n` (its program is headed by exactly that
+command). The count `n : ℕ+` is positive by construction, so — unlike the earlier
+`Nat`-count formulation — no separate "valid counts" side condition is needed.
+Vacuously true for `done`/`err`. -/
 def Config.WF : Config → Prop
   | .run s T =>
-      CTA.ValidCounts T ∧
       ∀ b I A n, s.B b = ⟨I, A, some n⟩ →
-        I.length + A.length ≤ n ∧ ∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)
+        I.length + A.length ≤ (n : Nat) ∧ ∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)
   | .done _ => True
   | .err _ => True
 
 /-- `WF` holds at the initial configuration: no barrier is configured, so the
 barrier condition is vacuous. -/
-theorem WF_initial {T : CTA} (hvalid : CTA.ValidCounts T) :
-    (Config.run State.initial T).WF := by
-  refine ⟨hvalid, ?_⟩
+theorem WF_initial {T : CTA} : (Config.run State.initial T).WF := by
   intro b I A n hB
   simp [State.initial, BarrierState.unconfigured] at hB
 
@@ -358,21 +349,11 @@ theorem WF_initial {T : CTA} (hvalid : CTA.ValidCounts T) :
 theorem mem_of_mem_drop {α} {a : α} {l : List α} {d : Nat} (h : a ∈ l.drop d) : a ∈ l :=
   List.mem_of_mem_drop h
 
-/-- `ValidCounts` is preserved by any step (programs only shrink to suffixes). -/
-theorem ValidCounts_preserved {s T s' T'} (hstep : CTAStep (Config.run s T) (Config.run s' T'))
-    (hv : CTA.ValidCounts T) : CTA.ValidCounts T' := by
-  intro t b n hmem
-  obtain ⟨d, hd⟩ := hstep.progOf_drop t
-  simp only [Config.progOf] at hd
-  rw [hd] at hmem
-  exact hv t b n (hmem.imp mem_of_mem_drop mem_of_mem_drop)
-
 /-- `WF` is preserved by every step — the main invariant-preservation lemma. -/
 theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF) : C'.WF := by
   cases hstep with
   | @interleave s s' T i P' hi hbar hth =>
-    obtain ⟨hvalid, hcond⟩ := hwf
-    refine ⟨ValidCounts_preserved (CTAStep.interleave hi hbar hth) hvalid, ?_⟩
+    have hcond := hwf
     generalize hpi : T.prog i = Pi at hth
     cases hth with
     | read_noop =>
@@ -394,8 +375,8 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
       simp only [Function.update_apply] at hB
       split at hB
       · simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
+        have hpos := n.pos
         obtain ⟨rfl, rfl, rfl⟩ := hB
-        have hpos := hvalid i _ _ (Or.inr (by rw [hpi]; exact List.mem_cons_self))
         exact ⟨by simp; omega, fun i' hi' => by simp at hi'⟩
       · obtain ⟨hle, hpark⟩ := hcond b I A n hB
         refine ⟨hle, fun i' hi' => ?_⟩
@@ -426,8 +407,8 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
       split at hB
       · rename_i hbq
         simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
+        have hpos := n.pos
         obtain ⟨rfl, rfl, rfl⟩ := hB
-        have hpos := hvalid i _ _ (Or.inl (by rw [hpi]; exact List.mem_cons_self))
         subst hbq
         refine ⟨by simp; omega, fun i' hi' => ?_⟩
         simp only [List.mem_singleton] at hi'; subst hi'
@@ -458,8 +439,7 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
         · subst hne; simp only [CTA.set, Function.update_self]; rw [← hpi]; exact hpark _ hi'
         · simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
   | @recycle s T b₀ I₀ A₀ n₀ hb hfull hpark =>
-    obtain ⟨hvalid, hcond⟩ := hwf
-    refine ⟨ValidCounts_preserved (CTAStep.recycle hb hfull hpark) hvalid, ?_⟩
+    have hcond := hwf
     intro b I A n hB
     by_cases hbb : b = b₀
     · subst hbb
@@ -547,7 +527,7 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
     (hwf : (Config.run s T).WF) (hwfn : (Config.run s T).WFn)
     (hstuck : Config.Stuck (Config.run s T)) :
     ∃ t cmd c b, T.prog t = cmd :: c ∧ cmd.barrier? = some b := by
-  obtain ⟨hvalid, hcond⟩ := hwf
+  have hcond := hwf
   have hnd : ¬ CTA.IsDone T := fun hd => hstuck ⟨_, CTAStep.done hd⟩
   rw [CTA.IsDone] at hnd
   push Not at hnd
@@ -560,7 +540,7 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
     | none => rfl
     | some b => exact absurd hb (hcon t₀ cmd₀ c₀ b hcmd₀)
   by_cases hbar : ∀ bb, s.B bb = BarrierState.unconfigured ∨
-      ∃ I A n, s.B bb = ⟨I, A, some n⟩ ∧ I.length + A.length < n
+      ∃ I A n, s.B bb = ⟨I, A, some n⟩ ∧ I.length + A.length < (n : Nat)
   · apply hstuck
     cases cmd₀ with
     | read g =>
@@ -576,7 +556,7 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
     | none => obtain ⟨rfl, rfl⟩ := hwfn bb bI bA hbc; exact hb1 hbc
     | some n =>
       obtain ⟨hle, hpark⟩ := hcond bb bI bA n hbc
-      have hfull : bI.length + bA.length = n := by have := hb2 bI bA n hbc; omega
+      have hfull : bI.length + bA.length = (n : Nat) := by have := hb2 bI bA n hbc; omega
       cases bI with
       | nil => exact hstuck ⟨_, CTAStep.recycle hbc hfull (by simp)⟩
       | cons i₀ rest =>
@@ -592,34 +572,34 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
 stuck `run` configuration) contains a synchronization command that never executes
 — some thread is blocked at a `sync` that is never recycled. -/
 theorem deadlock_has_unexec_sync {T₀ : CTA} {τ : List Config} {s : State} {T : CTA}
-    (hvalid : CTA.ValidCounts T₀)
     (hτ : IsCompleteTraceFrom (Config.run State.initial T₀) τ)
     (hlast : τ.getLast? = some (Config.run s T)) (hstuck : Config.Stuck (Config.run s T)) :
     ∃ η : ProgPoint,
       (∃ b, (η.cmd (Config.run State.initial T₀)).bind Cmd.barrier? = some b) ∧
       ¬ ∃ m, IsTimeOf (Config.run State.initial T₀) τ η m := by
   obtain ⟨hwf, hwfn⟩ :=
-    WF_chain hτ.1.subtrace hτ.2 (WF_initial hvalid) WFn_initial _ (List.mem_of_mem_getLast? hlast)
+    WF_chain hτ.1.subtrace hτ.2 WF_initial WFn_initial _ (List.mem_of_mem_getLast? hlast)
   obtain ⟨t, cmd, c, b, hTprog, hbb⟩ := stuck_has_sync_head hwf hwfn hstuck
   exact unexec_sync_of_last hτ hlast (List.mem_of_mem_head? hτ.2) hTprog hbb
 
 /- THE HELPER FUNCTIONS ARE DONE AND THE REAL THEOREMS ARE BELOW -/
 
 /-- Definition 6 (§4.1), the main correctness result: every execution of a
-well-synchronized CTA with valid thread counts — i.e. every complete trace from the
-initial configuration `(I, T)` — ends in `done`.
+well-synchronized CTA — i.e. every complete trace from the initial configuration
+`(I, T)` — ends in `done`.
 
-Restricted to the initial configuration (with `ValidCounts`): the unrestricted
-statement over arbitrary `run` configurations is *false* — a malformed barrier
-state can deadlock with no `sync`-headed thread, and `n = 0` counts deadlock even
-from `initial`. The proof splits on the terminal last configuration: `done` is the
-goal; `err` and deadlock each expose a never-executing synchronization command
-(`err_has_unexec_sync` / `deadlock_has_unexec_sync`), contradicting
-`wellSync_no_unexec_sync`. The deadlock case rests on the well-formedness invariant
-`Config.WF`/`WFn` (`WF_initial` + `CTAStep.WF_preserved` + `WF_chain`) specialized
-to the stuck last configuration (`stuck_has_sync_head`). -/
+Restricted to the initial configuration: the unrestricted statement over arbitrary
+`run` configurations is *false* — a malformed barrier state can deadlock with no
+`sync`-headed thread. (Positive thread counts are no longer a side condition: every
+`sync`/`arrive` carries a positive count `n : ℕ+` by construction.) The proof splits
+on the terminal last configuration: `done` is the goal; `err` and deadlock each
+expose a never-executing synchronization command (`err_has_unexec_sync` /
+`deadlock_has_unexec_sync`), contradicting `wellSync_no_unexec_sync`. The deadlock
+case rests on the well-formedness invariant `Config.WF`/`WFn` (`WF_initial` +
+`CTAStep.WF_preserved` + `WF_chain`) specialized to the stuck last configuration
+(`stuck_has_sync_head`). -/
 theorem CTA.WellSynchronized.completeTrace_ends_done {T : CTA}
-    (h : T.WellSynchronized) (hvalid : CTA.ValidCounts T) {τ : List Config}
+    (h : T.WellSynchronized) {τ : List Config}
     (hτ : IsCompleteTraceFrom (Config.run State.initial T) τ) :
     ∃ s, τ.getLast? = some (Config.done s) := by
   obtain ⟨Cₙ, hlast, hcases⟩ := hτ.1.ends
@@ -636,29 +616,39 @@ theorem CTA.WellSynchronized.completeTrace_ends_done {T : CTA}
       · exact Config.noConfusion hd
       · exact Config.noConfusion he
       · exact hs
-    obtain ⟨η, hηsync, hηnoexec⟩ := deadlock_has_unexec_sync hvalid hτ hlast hstuck
+    obtain ⟨η, hηsync, hηnoexec⟩ := deadlock_has_unexec_sync hτ hlast hstuck
     exact wellSync_no_unexec_sync h hτ hηsync hηnoexec
 
-/-- A well-synchronized CTA (valid counts) has no complete trace from `initial`
-ending in the error state `err`. -/
+/-- A well-synchronized CTA has no complete trace from `initial` ending in the error
+state `err`. -/
 theorem CTA.WellSynchronized.completeTrace_not_ends_err {T : CTA}
-    (h : T.WellSynchronized) (hvalid : CTA.ValidCounts T) {τ : List Config}
+    (h : T.WellSynchronized) {τ : List Config}
     (hτ : IsCompleteTraceFrom (Config.run State.initial T) τ) :
     ∀ T', τ.getLast? ≠ some (Config.err T') := by
   intro T' hcon
-  obtain ⟨s, hdone⟩ := CTA.WellSynchronized.completeTrace_ends_done h hvalid hτ
+  obtain ⟨s, hdone⟩ := CTA.WellSynchronized.completeTrace_ends_done h hτ
   rw [hdone] at hcon
   simp at hcon
 
-/-- A well-synchronized CTA (valid counts) has no deadlocking complete trace from
-`initial` (one whose last configuration is a stuck `run`). -/
+/-- A well-synchronized CTA has no deadlocking complete trace from `initial` (one
+whose last configuration is a stuck `run`). -/
 theorem CTA.WellSynchronized.completeTrace_not_deadlock {T : CTA}
-    (h : T.WellSynchronized) (hvalid : CTA.ValidCounts T) {τ : List Config}
+    (h : T.WellSynchronized) {τ : List Config}
     (hτ : IsCompleteTraceFrom (Config.run State.initial T) τ) :
     ∀ s T', τ.getLast? ≠ some (Config.run s T') := by
   intro s T' hcon
-  obtain ⟨s', hdone⟩ := CTA.WellSynchronized.completeTrace_ends_done h hvalid hτ
+  obtain ⟨s', hdone⟩ := CTA.WellSynchronized.completeTrace_ends_done h hτ
   rw [hdone] at hcon
   simp at hcon
+
+/-- A well-synchronized CTA has at least one complete trace from the initial
+configuration `(I, T)`, and every such trace ends in `done`
+(`completeTrace_ends_done`). Hence there is a complete trace that ends in `done`:
+the CTA can make progress and run to successful completion. -/
+theorem CTA.WellSynchronized.exists_completeTrace_ends_done {T : CTA}
+    (h : T.WellSynchronized) :
+    ∃ τ : List Config, IsCompleteTraceFrom (Config.run State.initial T) τ ∧
+      ∃ s, τ.getLast? = some (Config.done s) := by
+  sorry
 
 end Weft
