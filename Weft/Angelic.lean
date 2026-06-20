@@ -12,8 +12,8 @@ This file introduces the *sequential composition* `A ⨾ B` of two CTAs — each
 thread runs `A`'s program and then `B`'s — and states (without proof) the
 **angelic completion** property:
 
-> If `A` is well-synchronized and `A ⨾ B` is well-synchronized, then every complete
-> trace of `A` can be extended to a complete trace of `A ⨾ B`.
+> If `A` is well-synchronized and `A ⨾ B` is well-synchronized, then every successful
+> trace of `A` can be extended to a successful trace of `A ⨾ B`.
 
 Intuitively, no matter how the scheduler resolves the nondeterminism while running
 `A`, that partial execution is always a *prefix* of some successful run of the
@@ -93,16 +93,29 @@ def Config.seqLift (A B : CTA) : Config → Config
   | .err T   => .err (T.appendTail B)
 
 /-- **Angelic completion** (statement only). If `A` and the composition `A ⨾ B` are
-both well-synchronized, then every complete trace `t` of `A` is a prefix of some
-complete trace `t'` of `A ⨾ B`: any partial execution that runs `A` to completion can
-always be continued to a successful run of the whole composition. Here "`t` is a
-prefix of `t'`" means that lifting each `A`-configuration into `A ⨾ B`
-(`Config.seqLift`) yields an initial segment of `t'`. -/
+both well-synchronized, then every *successful* trace `t` of `A` (`IsSuccessfulTraceFrom`
+— a complete trace that runs `A` to `done`) is a prefix of some successful trace `t'`
+of `A ⨾ B`: any execution that runs `A` to completion can always be continued to a
+successful run of the whole composition. Here "`t` is a prefix of `t'`" means that
+lifting each `A`-configuration into `A ⨾ B` (`Config.seqLift`) yields an initial
+segment of `t'`.
+
+Why `t.dropLast` and not `t`. A successful trace of `A` ends `… ⤳ run s C ⤳ done s`,
+where the final step fires `CTAStep.done`, which requires `IsDone C` — every thread's
+program already empty. So the *last two* configurations of `t` are the all-empty
+`run s C` and the terminal marker `done s`. Both lift to the **same** `A ⨾ B`
+configuration `run s (… ⨾ B)` (programs `[] ++ B.prog i = B.prog i`, state `s`
+shared), so `t.map (Config.seqLift A B)` would end in a duplicated configuration —
+impossible as a prefix of a `CTAStep`-chain, which has no self-loop `C ⤳ C`. The
+mismatch is intrinsic: `done s` is `A`-specific bookkeeping ("the `A`-CTA finished"),
+but in `A ⨾ B` the CTA has *not* finished there — `B` runs on from exactly that
+all-empty-`A` configuration. Dropping `t`'s terminal `done` (`t.dropLast`) keeps
+precisely the part of `A`'s execution literally shared with `A ⨾ B`. -/
 theorem CTA.WellSynchronized.seq_angelic_prefix {A B : CTA} (hids : A.ids = B.ids)
     (hA : A.WellSynchronized) (hAB : (A.seq B hids).WellSynchronized) :
-    ∀ t, IsCompleteTraceFrom (Config.run State.initial A) t →
-      ∃ t', IsCompleteTraceFrom (Config.run State.initial (A.seq B hids)) t' ∧
-        t.map (Config.seqLift A B) <+: t' := by
+    ∀ t, IsSuccessfulTraceFrom (Config.run State.initial A) t →
+      ∃ t', IsSuccessfulTraceFrom (Config.run State.initial (A.seq B hids)) t' ∧
+        t.dropLast.map (Config.seqLift A B) <+: t' := by
   sorry
 
 end Weft
