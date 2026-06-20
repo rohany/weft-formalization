@@ -47,12 +47,14 @@ convention that unexecuted commands have generation `0`. On the memory commands
 
 ## Definitions 6 and 7 — well-synchronization
 
-A configuration `(s, T)` is *well-synchronized* (Def 7) if any two complete traces
-from it agree on the generation of every synchronization command, and that common
-generation is nonzero — i.e. every sync command executes, at a schedule-independent
-generation. A CTA `T` is well-synchronized (Def 6) when the configuration
-`(I, T)` is, where `I` is the initial state — the special case of Def 7 at
-`State.initial`.
+A configuration `(s, T)` is *well-synchronized* (Def 7) if it is a `run`
+configuration and any two complete traces from it agree on the generation of every
+synchronization command, that common generation being nonzero — i.e. every sync
+command executes, at a schedule-independent generation. The `run` requirement is
+essential: without it a terminal `err` configuration with no synchronization
+commands would be *vacuously* well-synchronized despite making no progress at all.
+A CTA `T` is well-synchronized (Def 6) when the configuration `(I, T)` is, where
+`I` is the initial state — the special case of Def 7 at `State.initial`.
 -/
 
 namespace Weft
@@ -122,12 +124,18 @@ def IsGenOf (C₀ : Config) (τ : List Config) (η : ProgPoint) (n : Nat) : Prop
     ((∃ m, IsTimeOf C₀ τ η m ∧ n = recycleCount b τ (m - 1) + 1) ∨
       (n = 0 ∧ ¬ ∃ m, IsTimeOf C₀ τ η m))
 
-/-- Definition 7 (§4.1). A configuration `C₀ = (s, T)` is *well-synchronized* if
-any two complete traces from it assign every synchronization command the same,
-nonzero generation: for all complete traces `τ₁ τ₂` from `C₀` and every program
-point `η` that is a synchronization command, there is a common `g ≠ 0` with
-`Gen(τ₁)(cη) = Gen(τ₂)(cη) = g`. -/
+/-- Definition 7 (§4.1). A configuration `C₀ = (s, T)` is *well-synchronized* if it
+is a `run` configuration and any two complete traces from it assign every
+synchronization command the same, nonzero generation: for all complete traces
+`τ₁ τ₂` from `C₀` and every program point `η` that is a synchronization command,
+there is a common `g ≠ 0` with `Gen(τ₁)(cη) = Gen(τ₂)(cη) = g`.
+
+The first conjunct requires `C₀` to be a `run` configuration (Def 7's `(s, T)`).
+Without it, a terminal `err` configuration with no synchronization commands would
+satisfy the rest vacuously and be "well-synchronized" while not even able to
+make progress. -/
 def Config.WellSynchronized (C₀ : Config) : Prop :=
+  (∃ s T, C₀ = Config.run s T) ∧
   ∀ τ₁ τ₂, IsCompleteTraceFrom C₀ τ₁ → IsCompleteTraceFrom C₀ τ₂ →
     ∀ η : ProgPoint, (∃ b, (η.cmd C₀).bind Cmd.barrier? = some b) →
       ∃ g, g ≠ 0 ∧ IsGenOf C₀ τ₁ η g ∧ IsGenOf C₀ τ₂ η g
@@ -136,5 +144,46 @@ def Config.WellSynchronized (C₀ : Config) : Prop :=
 `(I, T)` is — i.e. Definition 7 at the initial state `I = State.initial`. -/
 def CTA.WellSynchronized (T : CTA) : Prop :=
   Config.WellSynchronized (Config.run State.initial T)
+
+
+/-- If a configuration is well-synchronized, every complete trace from it ends in
+`done` (success). This strengthens `IsCompleteTrace.ends` — which only guarantees
+the last configuration is `done`, `err`, or a deadlock — to `done` alone. No
+separate "is a `run` configuration" hypothesis is needed: well-synchronization now
+entails it via its first conjunct (`h.1`).
+
+Proof strategy (per the spec): well-synchronization gives every synchronization
+command a nonzero generation, hence every sync command executes; a trace ending in
+`err` or a deadlock would contain a sync command that never executes, a
+contradiction. Completing it needs the operational-semantics meta-theory (a
+suffix/progress invariant for traces and an inversion of stuck/`err` configs) that
+is not yet built — outstanding. -/
+theorem Config.WellSynchronized.completeTrace_ends_done {C₀ : Config}
+    (h : C₀.WellSynchronized) {τ : List Config} (hτ : IsCompleteTraceFrom C₀ τ) :
+    ∃ s, τ.getLast? = some (Config.done s) := by
+  sorry
+
+/-- A well-synchronized configuration has no complete trace ending in the error
+state `err`. -/
+theorem Config.WellSynchronized.completeTrace_not_ends_err {C₀ : Config}
+    (h : C₀.WellSynchronized) {τ : List Config} (hτ : IsCompleteTraceFrom C₀ τ) :
+    ∀ T, τ.getLast? ≠ some (Config.err T) := by
+  sorry
+
+/-- A well-synchronized configuration has no deadlocking complete trace. A complete
+trace whose last configuration is a `run` is a deadlock (that configuration is
+stuck, by `IsCompleteTrace.ends`); none such exists. -/
+theorem Config.WellSynchronized.completeTrace_not_deadlock {C₀ : Config}
+    (h : C₀.WellSynchronized) {τ : List Config} (hτ : IsCompleteTraceFrom C₀ τ) :
+    ∀ s T, τ.getLast? ≠ some (Config.run s T) := by
+  sorry
+
+/-- Definition 6 case: every execution of a well-synchronized CTA — i.e. every
+complete trace from the initial configuration `(I, T)` — ends in `done`. -/
+theorem CTA.WellSynchronized.completeTrace_ends_done {T : CTA}
+    (h : T.WellSynchronized) {τ : List Config}
+    (hτ : IsCompleteTraceFrom (Config.run State.initial T) τ) :
+    ∃ s, τ.getLast? = some (Config.done s) := by
+  sorry
 
 end Weft
