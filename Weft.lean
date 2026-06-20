@@ -3,3 +3,4 @@ import Weft.Language
 import Weft.State
 import Weft.Semantics
 import Weft.Traces
+import Weft.WellSynchronized

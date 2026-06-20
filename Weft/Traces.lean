@@ -62,8 +62,9 @@ i.e. drops the head `cη`. For `read`/`write`/`arrive` this is the step that run
 the command; for `sync` the program only advances past the (parked) `sync` when
 the barrier is recycled, so `t` is the recycle step — this falls out
 automatically, since that head can only be dropped by `CTAStep.recycle`. We model
-`t(τ, η) = n` as `IsTimeOf C₀ τ η n` (a partial function: undefined when
-instruction `η` is never executed in `τ`).
+`t(τ, η) = n` as `IsTimeOf C₀ τ η n`, which carries `IsCompleteTraceFrom C₀ τ` as
+a premise so it stands on its own (a partial function: undefined when instruction
+`η` is never executed in `τ`).
 
 ## Definition 4 — sound and precise happens-before
 
@@ -139,17 +140,22 @@ structure ProgPoint where
 def ProgPoint.cmd (C₀ : Config) (η : ProgPoint) : Option Cmd :=
   (C₀.progOf η.thread)[η.idx]?
 
-/-- Definition 3 (§4.1). The time `t(τ, η) = n` of instruction `η` in a trace `τ`
-that starts from `C₀`: the `n`-th step of `τ` (the transition from configuration
+/-- Definition 3 (§4.1). The time `t(τ, η) = n` of instruction `η` in a complete
+trace `τ` from `C₀`: the `n`-th step of `τ` (the transition from configuration
 index `j = n-1` to `j+1`) executes instruction `η.idx` of thread `η.thread`,
 advancing its remaining program from `(C₀.progOf η.thread).drop η.idx` (which is
-`cη :: …`) to `(C₀.progOf η.thread).drop (η.idx + 1)`. The first conjunct requires
-the instruction to exist; without it an out-of-range index would spuriously match
-two `[]` programs. This is a partial function of `(C₀, τ, η)` — at most one `n`
+`cη :: …`) to `(C₀.progOf η.thread).drop (η.idx + 1)`.
+
+The `IsCompleteTraceFrom` premise makes the definition self-contained — time is
+only meaningful along an actual complete trace from `C₀` — so it can be used
+independently of `SoundAndPrecise`. The index guard requires the instruction to
+exist (without it an out-of-range index would spuriously match two `[]` programs).
+On such a trace this is a partial function of `(C₀, τ, η)` — at most one `n`
 satisfies it (the program only shrinks), and none does if `η` is never executed.
 For a `sync` the qualifying step is the barrier recycle, since only
 `CTAStep.recycle` can drop a parked `sync` head. -/
 def IsTimeOf (C₀ : Config) (τ : List Config) (η : ProgPoint) (n : Nat) : Prop :=
+  IsCompleteTraceFrom C₀ τ ∧
   η.idx < (C₀.progOf η.thread).length ∧
   ∃ j C C', n = j + 1 ∧
     τ[j]? = some C ∧ τ[j + 1]? = some C' ∧
