@@ -92,13 +92,160 @@ def Config.seqLift (A B : CTA) : Config → Config
   | .done s  => .run s (A.emptied.appendTail B)
   | .err T   => .err (T.appendTail B)
 
-/-- **Angelic completion** (statement only). If `A` and the composition `A ⨾ B` are
-both well-synchronized, then every *successful* trace `t` of `A` (`IsSuccessfulTraceFrom`
+/- CLAUDE: Place helper methods for proving the angelic prefix lemma between here: -/
+
+/-- Two CTAs are equal once their thread sets and program maps agree — the
+well-formedness fields are propositions, hence irrelevant. -/
+theorem CTA.ext {C₁ C₂ : CTA} (hids : C₁.ids = C₂.ids) (hprog : C₁.prog = C₂.prog) :
+    C₁ = C₂ := by
+  cases C₁; cases C₂; subst hids; subst hprog; rfl
+
+/-- The source of any `CTAStep` is a `run` configuration. -/
+theorem CTAStep.run_source {C C' : Config} (h : CTAStep C C') :
+    ∃ s T, C = Config.run s T := by
+  cases h <;> exact ⟨_, _, rfl⟩
+
+/-- A thread step is unaffected by program text appended *after* the part it
+touches: it acts only on the head command, so appending `Q` carries through. (Only
+the six non-error rules can occur, since the target is a `run` configuration.) -/
+theorem ThreadStep.appendProg {s s' : State} {i : ThreadId} {P P' Q : Prog}
+    (hstep : ThreadStep (.run s i P) (.run s' i P')) :
+    ThreadStep (.run s i (P ++ Q)) (.run s' i (P' ++ Q)) := by
+  cases hstep with
+  | read_noop => exact .read_noop
+  | write_noop => exact .write_noop
+  | arrive_configure he hb => exact .arrive_configure he hb
+  | arrive_register he hb hpos hlt => exact .arrive_register he hb hpos hlt
+  | sync_configure he hb => exact .sync_configure he hb
+  | sync_block he hb hpos hlt => exact .sync_block he hb hpos hlt
+
+/-- **Simulation.** A `run → run` CTA step (`interleave` or `recycle`) of `C` lifts
+to the same step of `C.appendTail B`: appending `B`'s not-yet-run programs changes
+neither the state nor the head commands, so the rule still fires. This is the
+engine behind angelic completion — running `A` inside `A ⨾ B` mirrors running `A`. -/
+theorem CTAStep.appendTail {s s' : State} {C C' : CTA} (B : CTA)
+    (hstep : CTAStep (Config.run s C) (Config.run s' C')) :
+    CTAStep (Config.run s (C.appendTail B)) (Config.run s' (C'.appendTail B)) := by
+  cases hstep with
+  | @interleave _ _ _ i P' hi hbar hth =>
+    have hi' : i ∈ (C.appendTail B).ids := Finset.mem_union_left _ hi
+    have hth' : ThreadStep (.run s i ((C.appendTail B).prog i)) (.run s' i (P' ++ B.prog i)) :=
+      hth.appendProg
+    have hCTA : (C.appendTail B).set i hi' (P' ++ B.prog i) = (C.set i hi P').appendTail B := by
+      apply CTA.ext
+      · rfl
+      · funext j
+        simp only [CTA.set, CTA.appendTail, Function.update_apply]
+        by_cases hj : j = i <;> simp [hj]
+    rw [← hCTA]
+    exact CTAStep.interleave hi' hbar hth'
+  | @recycle _ _ b I A n hb hfull hpark =>
+    have hpark' : ∀ j ∈ I, ((C.appendTail B).prog j).head? = some (Cmd.sync b n) := by
+      intro j hj
+      have hp := hpark j hj
+      change ((C.prog j) ++ B.prog j).head? = some (Cmd.sync b n)
+      cases hpj : C.prog j with
+      | nil => rw [hpj] at hp; simp at hp
+      | cons x xs => rw [hpj] at hp; simpa using hp
+    have hCTA : (C.appendTail B).wake I = (C.wake I).appendTail B := by
+      apply CTA.ext
+      · rfl
+      · funext j
+        by_cases hj : j ∈ I
+        · have hne : C.prog j ≠ [] := by
+            have := hpark j hj; intro h; rw [h] at this; simp at this
+          obtain ⟨x, xs, hxs⟩ := List.exists_cons_of_ne_nil hne
+          simp [CTA.wake, CTA.appendTail, hj, hxs]
+        · simp [CTA.wake, CTA.appendTail, hj]
+    rw [← hCTA]
+    exact CTAStep.recycle hb hfull hpark'
+
+/-- Every configuration of a chain except the last is a `run` configuration (it has
+a successor, and `CTAStep` sources are `run`). In particular this holds for every
+element of `l.dropLast`. -/
+theorem mem_dropLast_isRun : ∀ {l : List Config}, List.IsChain CTAStep l →
+    ∀ C ∈ l.dropLast, ∃ s T, C = Config.run s T := by
+  intro l
+  induction l with
+  | nil => intro _ C hC; simp at hC
+  | cons a rest ih =>
+    cases rest with
+    | nil => intro _ C hC; simp at hC
+    | cons b rest' =>
+      intro hl C hC
+      rw [List.isChain_cons_cons] at hl
+      rw [List.dropLast_cons_cons, List.mem_cons] at hC
+      rcases hC with rfl | hC'
+      · exact CTAStep.run_source hl.1
+      · exact ih hl.2 C hC'
+
+/-- Lifting a chain of `run` configurations through `Config.seqLift` (i.e. appending
+`B`) is again a chain, by the simulation lemma `CTAStep.appendTail`. -/
+theorem isChain_seqLift (A B : CTA) : ∀ {l : List Config},
+    (∀ C ∈ l, ∃ s T, C = Config.run s T) → List.IsChain CTAStep l →
+    List.IsChain CTAStep (l.map (Config.seqLift A B)) := by
+  intro l
+  induction l with
+  | nil => intro _ _; exact List.IsChain.nil
+  | cons a rest ih =>
+    intro hrun hl
+    cases rest with
+    | nil => simp
+    | cons b rest' =>
+      rw [List.isChain_cons_cons] at hl
+      obtain ⟨sa, Ca, rfl⟩ := hrun a (by simp)
+      obtain ⟨sb, Cb, rfl⟩ := hrun b (by simp)
+      rw [List.map_cons, List.map_cons, List.isChain_cons_cons]
+      refine ⟨CTAStep.appendTail B hl.1, ?_⟩
+      have := ih (fun C hC => hrun C (List.mem_cons_of_mem _ hC)) hl.2
+      rwa [List.map_cons] at this
+
+/-- The support invariant `barriersWithin S` propagates from the head of a chain to
+every configuration along it (it holds initially and is preserved by every step). -/
+theorem barriersWithin_chain (S : Finset Barrier) : ∀ {l : List Config} {C₀ : Config},
+    List.IsChain CTAStep l → l.head? = some C₀ → C₀.barriersWithin S →
+    ∀ C ∈ l, C.barriersWithin S := by
+  intro l
+  induction l with
+  | nil => intro C₀ _ hhead _ C hC; simp at hC
+  | cons a rest ih =>
+    intro C₀ hchain hhead hinv C hC
+    rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead
+    cases rest with
+    | nil => rw [List.mem_singleton] at hC; subst hC; exact hinv
+    | cons b rest' =>
+      rw [List.isChain_cons_cons] at hchain
+      rw [List.mem_cons] at hC
+      rcases hC with rfl | hC'
+      · exact hinv
+      · exact ih hchain.2 rfl (inv_preserved S hchain.1 hinv) C hC'
+
+/-- Under matching thread sets, the total append `A.appendTail B` *is* the genuine
+composition `A ⨾ B`. -/
+theorem CTA.appendTail_eq_seq {A B : CTA} (hids : A.ids = B.ids) :
+    A.appendTail B = A.seq B hids := by
+  apply CTA.ext
+  · change A.ids ∪ B.ids = A.ids
+    rw [← hids, Finset.union_self]
+  · rfl
+
+/- and here. -/
+
+/- ### This is the main theorem. -/
+
+/-- **Angelic completion** (the extension half). If the composition `A ⨾ B` is
+well-synchronized, then every *successful* trace `t` of `A` (`IsSuccessfulTraceFrom`
 — a complete trace that runs `A` to `done`) is a prefix of some successful trace `t'`
 of `A ⨾ B`: any execution that runs `A` to completion can always be continued to a
 successful run of the whole composition. Here "`t` is a prefix of `t'`" means that
 lifting each `A`-configuration into `A ⨾ B` (`Config.seqLift`) yields an initial
 segment of `t'`.
+
+This is a `∀`-statement over *given* successful traces of `A`, so it does **not**
+require `A` itself to be well-synchronized — only `A ⨾ B`. The companion existence
+fact, "a successful trace of `A` exists" (which is what needs `WS(A)`), is
+`CTA.WellSynchronized.exists_successfulTrace`; `seq_angelic_completion` below bundles
+the two.
 
 Why `t.dropLast` and not `t`. A successful trace of `A` ends `… ⤳ run s C ⤳ done s`,
 where the final step fires `CTAStep.done`, which requires `IsDone C` — every thread's
@@ -112,10 +259,113 @@ but in `A ⨾ B` the CTA has *not* finished there — `B` runs on from exactly t
 all-empty-`A` configuration. Dropping `t`'s terminal `done` (`t.dropLast`) keeps
 precisely the part of `A`'s execution literally shared with `A ⨾ B`. -/
 theorem CTA.WellSynchronized.seq_angelic_prefix {A B : CTA} (hids : A.ids = B.ids)
-    (hA : A.WellSynchronized) (hAB : (A.seq B hids).WellSynchronized) :
+    (hAB : (A.seq B hids).WellSynchronized) :
     ∀ t, IsSuccessfulTraceFrom (Config.run State.initial A) t →
       ∃ t', IsSuccessfulTraceFrom (Config.run State.initial (A.seq B hids)) t' ∧
         t.dropLast.map (Config.seqLift A B) <+: t' := by
-  sorry
+  intro t ht
+  -- Correspondence with the four-step pen-and-paper strategy:
+  --   Step 1 ("∃ a successful trace of A, because WS(A)") — NOT done here: this lemma
+  --     is `∀` over a *given* successful trace `t` of A, so it never produces one and
+  --     never needs `WS(A)`. Existence is factored into the separate lemma
+  --     `exists_successfulTrace`; `seq_angelic_completion` below composes the two.
+  --   Step 3 ("run that A-trace inside A ⨾ B") — see "Step 3" below: lift `t.dropLast`
+  --     by appending B (`Config.seqLift`); the simulation lemma `CTAStep.appendTail`
+  --     makes the lifted list `P` a genuine execution prefix of `A ⨾ B`.
+  --   Step 2 ("A ⨾ B also has completing traces") — see "Step 2" below: from the
+  --     reached configuration `C_star` ("A done, B poised") strong normalization
+  --     (`exists_completeTrace`) yields a complete continuation `τ` to glue onto `P`.
+  --   Step 4 ("AFSOC B cannot be completed ⇒ deadlock ⇒ contradicts WS(A ⨾ B)") —
+  --     DIVERGENCE (logically equivalent): instead of arguing by contradiction, we
+  --     observe the glued trace `t'` is a complete trace of `A ⨾ B` and apply
+  --     `completeTrace_ends_done` — the lemma that *every* complete trace of a WS
+  --     configuration is successful, which is exactly the fact your contradiction
+  --     appeals to. See "Step 4" below.
+  obtain ⟨⟨htIC, hthead⟩, s_d, ht_done⟩ := ht
+  -- `t` has length ≥ 2: it starts at `run init A` and ends at `done s_d`.
+  obtain ⟨c1, trest, rfl⟩ :
+      ∃ c1 trest, t = Config.run State.initial A :: c1 :: trest := by
+    rcases t with _ | ⟨c, _ | ⟨c1, tr⟩⟩
+    · simp at hthead
+    · simp only [List.head?_cons, Option.some.injEq] at hthead
+      simp only [List.getLast?_singleton, Option.some.injEq] at ht_done
+      rw [hthead] at ht_done; simp at ht_done
+    · simp only [List.head?_cons, Option.some.injEq] at hthead
+      subst hthead; exact ⟨c1, tr, rfl⟩
+  -- Step 3: "run the A-trace inside A ⨾ B". The lifted running prefix `P` is
+  -- `t.dropLast` with B appended to every config; `isChain_seqLift` (driven by the
+  -- simulation lemma `CTAStep.appendTail`) certifies it is a real A ⨾ B execution.
+  set P := (Config.run State.initial A :: c1 :: trest).dropLast.map (Config.seqLift A B) with hPdef
+  have hPchain : List.IsChain CTAStep P :=
+    isChain_seqLift A B (mem_dropLast_isRun htIC.subtrace) htIC.subtrace.dropLast
+  have hPne : P ≠ [] := by rw [hPdef]; simp
+  have hPhead : P.head? = some (Config.run State.initial (A.seq B hids)) := by
+    rw [hPdef, List.dropLast_cons_cons, List.map_cons, List.head?_cons,
+      Config.seqLift, CTA.appendTail_eq_seq hids]
+  -- `C_star` is the last configuration of `P` ("`A` done, `B` poised to start")
+  obtain ⟨C_star, hC_star⟩ : ∃ C, P.getLast? = some C := by
+    cases hPl : P.getLast? with
+    | none => rw [List.getLast?_eq_none_iff] at hPl; exact absurd hPl hPne
+    | some C => exact ⟨C, rfl⟩
+  have hC_starmem : C_star ∈ P := List.mem_of_getLast? hC_star
+  -- `C_star` satisfies the support invariant (it is reachable from `init (A ⨾ B)`)
+  have hbw : C_star.barriersWithin (A.seq B hids).barrierSet :=
+    barriersWithin_chain _ hPchain hPhead barriersWithin_initial C_star hC_starmem
+  -- Step 2: "A ⨾ B also has completing traces". From `C_star` ("A done, B poised")
+  -- strong normalization gives a complete continuation `τ` of the A ⨾ B run.
+  obtain ⟨τ, hτIC, hτhead⟩ :=
+    exists_completeTrace (A.seq B hids).barrierSet C_star hbw
+  obtain ⟨τtail, rfl⟩ : ∃ l, τ = C_star :: l := by
+    cases τ with
+    | nil => simp at hτhead
+    | cons a l =>
+      simp only [List.head?_cons, Option.some.injEq] at hτhead
+      subst hτhead; exact ⟨l, rfl⟩
+  have hτchain : List.IsChain CTAStep (C_star :: τtail) := hτIC.subtrace
+  rw [List.isChain_cons] at hτchain
+  -- glue: `t' = P ++ τtail`
+  -- (1) the glued list is a chain
+  have hchain' : List.IsChain CTAStep (P ++ τtail) := by
+    refine hPchain.append hτchain.2 ?_
+    intro x hx y hy
+    rw [hC_star, Option.mem_some_iff] at hx; subst hx
+    exact hτchain.1 y hy
+  -- `P ++ τtail` ends exactly where `τ` ends, via `P = P.dropLast ++ [C_star]`
+  have hsplit : P ++ τtail = P.dropLast ++ (C_star :: τtail) := by
+    have hgl : P.getLast hPne = C_star := by
+      have h := List.getLast?_eq_some_getLast hPne
+      rw [hC_star] at h; exact (Option.some.injEq _ _).mp h.symm
+    conv_lhs => rw [← List.dropLast_concat_getLast hPne, hgl]
+    simp
+  -- (2) the glued list ends in a terminal configuration (the same one `τ` does)
+  have hends' : ∃ Cₙ, (P ++ τtail).getLast? = some Cₙ ∧
+      ((∃ s, Cₙ = Config.done s) ∨ (∃ T, Cₙ = Config.err T) ∨ Config.Stuck Cₙ) := by
+    obtain ⟨Cₙ, hτlast, hterm⟩ := hτIC.ends
+    exact ⟨Cₙ, by rw [hsplit]; exact List.mem_getLast?_append_of_mem_getLast? hτlast, hterm⟩
+  -- (3) it starts at `init (A ⨾ B)`
+  have hhead' : (P ++ τtail).head? = some (Config.run State.initial (A.seq B hids)) := by
+    rw [List.head?_append_of_ne_nil _ hPne, hPhead]
+  have hICF : IsCompleteTraceFrom (Config.run State.initial (A.seq B hids)) (P ++ τtail) :=
+    ⟨⟨hchain', hends'⟩, hhead'⟩
+  -- Step 4: the glued trace `t' = P ++ τtail` is a complete trace of `A ⨾ B`. Rather
+  -- than assume-for-contradiction that it deadlocks, `completeTrace_ends_done hAB`
+  -- (every complete trace of the WS configuration `A ⨾ B` ends in `done`) gives
+  -- directly that `t'` is successful; and `P` — i.e. `t.dropLast.map seqLift` — is a
+  -- prefix of it by construction.
+  exact ⟨P ++ τtail, ⟨hICF, completeTrace_ends_done hAB hICF⟩, List.prefix_append P τtail⟩
+
+/-- **Angelic completion** (existence and extension). If `A` and `A ⨾ B` are both
+well-synchronized, then there *is* a successful trace `t` of `A`, and it is a prefix
+of a successful trace `t'` of `A ⨾ B`. This is the headline result: it composes
+`exists_successfulTrace` (which uses `WS(A)` to produce `t`) with `seq_angelic_prefix`
+(which uses `WS(A ⨾ B)` to extend it). -/
+theorem CTA.WellSynchronized.seq_angelic_completion {A B : CTA} (hids : A.ids = B.ids)
+    (hA : A.WellSynchronized) (hAB : (A.seq B hids).WellSynchronized) :
+    ∃ t t', IsSuccessfulTraceFrom (Config.run State.initial A) t ∧
+            IsSuccessfulTraceFrom (Config.run State.initial (A.seq B hids)) t' ∧
+            t.dropLast.map (Config.seqLift A B) <+: t' := by
+  obtain ⟨t, ht⟩ := hA.exists_successfulTrace
+  obtain ⟨t', ht', hpre⟩ := seq_angelic_prefix hids hAB t ht
+  exact ⟨t, t', ht, ht', hpre⟩
 
 end Weft
