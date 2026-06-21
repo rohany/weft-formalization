@@ -670,7 +670,9 @@ The argument is by contradiction: if `b` were never recycled, its *arrival poten
 (`barrierPotential_conservation`) pins the number of threads finally arrived at `b` to
 `arrivers(I ^ k) b ≥ arrival-count(b)` (`arrivalCount_le_pow_arrivers`), while the
 final `done` step's premise and the count-consistency invariant (`bcount_chain`) force
-that number strictly below `arrival-count(b)` — a contradiction. -/
+that number strictly below `arrival-count(b)` — a contradiction.
+NOTE (rohany): This is an important, top-level theorem.
+ -/
 theorem Config.WellSynchronized.pow_barriers_advance {I : CTA}
     (h : I.ConsistentArrivalCounts) {s : State} {b : Barrier}
     (hwf : (Config.run s (I ^ I.loopK h)).WF)
