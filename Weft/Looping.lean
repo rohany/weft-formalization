@@ -157,4 +157,28 @@ barrier is referenced with a single arrival count. The proof is threaded into
 noncomputable def CTA.loopK (I : CTA) (h : I.ConsistentArrivalCounts) : Nat :=
   I.barriers.lcm fun b => loopFactor (I.arrivers b) (I.arrivalCount h b)
 
+/-!
+## Theorem 1 (§1): barriers advance over a complete run
+
+A piece of Theorem 1: with `k = I.loopK` the §1 iteration count, if `I ^ k` is
+well-synchronized from a state `s`, then every barrier the loop body uses advances
+its generation at least once over a complete trace starting at `s`. We phrase
+"generation increased by at least one" as `1 ≤ recycleCount b τ …`, since each
+recycle of `b` along `τ` increments `b`'s generation by exactly one
+(`recycleCount b τ (τ.length - 1)` counts the recycles of `b` over all of `τ`'s
+steps), and "barriers used by `I ^ k`" as `b ∈ (I ^ k).barrierSet`.
+-/
+
+/-- **Theorem 1 (partial).** Let `k = I.loopK h` be the §1 iteration count (for a
+consistency witness `h`). If `I ^ k` is well-synchronized from a state `s`, then along
+any successful trace `τ` of `I ^ k` starting at `s`, every barrier `b` used by `I ^ k`
+is recycled at least once — its generation increases by at least one. -/
+theorem Config.WellSynchronized.pow_barriers_advance {I : CTA}
+    (h : I.ConsistentArrivalCounts) {s : State}
+    (hWS : (Config.run s (I ^ I.loopK h)).WellSynchronized) {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) τ)
+    {b : Barrier} (hb : b ∈ (I ^ I.loopK h).barrierSet) :
+    1 ≤ recycleCount b τ (τ.length - 1) := by
+  sorry
+
 end Weft
