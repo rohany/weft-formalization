@@ -5,3 +5,4 @@ import Weft.Semantics
 import Weft.Traces
 import Weft.WellSynchronized
 import Weft.Angelic
+import Weft.Looping
