@@ -336,205 +336,200 @@ theorem wellSync_no_unexec_sync {C₀ : Config} (h : C₀.WellSynchronized)
   · exact hηnoexec ⟨m, hm⟩
   · exact hg0 hg
 
-/-- The well-formedness invariant. For a `run` configuration: for every configured
-barrier `b = (I, A, n)`, registration does not over-fill (`|I|+|A| ≤ n`) and every
-synced thread is *parked* at `sync b n` (its program is headed by exactly that
-command). The count `n : ℕ+` is positive by construction, so — unlike the earlier
-`Nat`-count formulation — no separate "valid counts" side condition is needed.
-Vacuously true for `done`/`err`. -/
+/-- The well-formedness invariant for a `run` configuration, a single predicate
+covering every barrier. For each barrier `b`:
+
+* if it is **configured** (`s.B b = ⟨I, A, some n⟩`), registration does not over-fill
+  (`|I|+|A| ≤ n`) and every synced thread is *parked* at `sync b n` (its program is
+  headed by exactly that command); and
+* if it is **unconfigured** (`s.B b = ⟨I, A, none⟩`), its registration lists are
+  empty (ruling out a malformed `⟨I, A, none⟩` with threads registered).
+
+The count `n : ℕ+` is positive by construction, so — unlike the earlier `Nat`-count
+formulation — no separate "valid counts" side condition is needed. Vacuously true for
+`done`/`err`. -/
 def Config.WF : Config → Prop
   | .run s T =>
-      ∀ b I A n, s.B b = ⟨I, A, some n⟩ →
-        I.length + A.length ≤ (n : Nat) ∧ ∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)
+      (∀ b I A n, s.B b = ⟨I, A, some n⟩ →
+          I.length + A.length ≤ (n : Nat) ∧ ∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)) ∧
+      (∀ b I A, s.B b = ⟨I, A, none⟩ → I = [] ∧ A = [])
   | .done _ => True
   | .err _ => True
 
 /-- `WF` holds at the initial configuration: no barrier is configured, so the
-barrier condition is vacuous. -/
+configured-barrier condition is vacuous and every barrier is the empty unconfigured
+state. -/
 theorem WF_initial {T : CTA} : (Config.run State.initial T).WF := by
-  intro b I A n hB
-  simp [State.initial, BarrierState.unconfigured] at hB
+  refine ⟨fun b I A n hB => ?_, fun b I A hB => ?_⟩
+  · simp [State.initial, BarrierState.unconfigured] at hB
+  · simp only [State.initial, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
+    exact ⟨hB.1.symm, hB.2.1.symm⟩
 
 /-- A command in a tail/`drop` of a program was in the program. -/
 theorem mem_of_mem_drop {α} {a : α} {l : List α} {d : Nat} (h : a ∈ l.drop d) : a ∈ l :=
   List.mem_of_mem_drop h
 
-/-- `WF` is preserved by every step — the main invariant-preservation lemma. -/
+/-- `WF` is preserved by every step — the main invariant-preservation lemma. Both
+conjuncts (the configured-barrier and unconfigured-barrier conditions) are
+re-established after each step. -/
 theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF) : C'.WF := by
   cases hstep with
   | @interleave s s' T i P' hi hbar hth =>
-    have hcond := hwf
+    obtain ⟨hcond, hcondn⟩ := hwf
     generalize hpi : T.prog i = Pi at hth
-    cases hth with
-    | read_noop =>
-      intro b I A n hB
-      obtain ⟨hle, hpark⟩ := hcond b I A n hB
-      refine ⟨hle, fun i' hi' => ?_⟩
-      have hne : i' ≠ i := by
-        rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
-      simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
-    | write_noop =>
-      intro b I A n hB
-      obtain ⟨hle, hpark⟩ := hcond b I A n hB
-      refine ⟨hle, fun i' hi' => ?_⟩
-      have hne : i' ≠ i := by
-        rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
-      simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
-    | arrive_configure he hb =>
-      intro b I A n hB
-      simp only [Function.update_apply] at hB
-      split at hB
-      · simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
-        have hpos := n.pos
-        obtain ⟨rfl, rfl, rfl⟩ := hB
-        exact ⟨by simp; omega, fun i' hi' => by simp at hi'⟩
-      · obtain ⟨hle, hpark⟩ := hcond b I A n hB
+    refine ⟨?_, ?_⟩
+    · cases hth with
+      | read_noop =>
+        intro b I A n hB
+        obtain ⟨hle, hpark⟩ := hcond b I A n hB
         refine ⟨hle, fun i' hi' => ?_⟩
         have hne : i' ≠ i := by
           rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
         simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
-    | arrive_register he hb hpos hlt =>
-      intro b I A n hB
-      simp only [Function.update_apply] at hB
-      split at hB
-      · rename_i hbq
-        simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
-        obtain ⟨rfl, rfl, rfl⟩ := hB
-        obtain ⟨_, hcpark⟩ := hcond _ _ _ _ hb
-        subst hbq
-        refine ⟨by simp only [List.length_cons]; omega, fun i' hi' => ?_⟩
-        have hne : i' ≠ i := by
-          rintro rfl; have := hcpark i' hi'; rw [hpi] at this; simp at this
-        simp only [CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
-      · obtain ⟨hle, hpark⟩ := hcond b I A n hB
+      | write_noop =>
+        intro b I A n hB
+        obtain ⟨hle, hpark⟩ := hcond b I A n hB
         refine ⟨hle, fun i' hi' => ?_⟩
         have hne : i' ≠ i := by
           rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
         simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
-    | sync_configure he hb =>
-      intro b I A n hB
-      simp only [Function.update_apply] at hB
-      split at hB
-      · rename_i hbq
-        simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
-        have hpos := n.pos
-        obtain ⟨rfl, rfl, rfl⟩ := hB
-        subst hbq
-        refine ⟨by simp; omega, fun i' hi' => ?_⟩
-        simp only [List.mem_singleton] at hi'; subst hi'
-        simp only [CTA.set, Function.update_self, List.head?_cons]
-      · obtain ⟨hle, hpark⟩ := hcond b I A n hB
-        refine ⟨hle, fun i' hi' => ?_⟩
-        by_cases hne : i' = i
-        · subst hne; simp only [CTA.set, Function.update_self]; rw [← hpi]; exact hpark _ hi'
-        · simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
-    | sync_block he hb hpos hlt =>
-      intro b I A n hB
-      simp only [Function.update_apply] at hB
-      split at hB
-      · rename_i hbq
-        simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
-        obtain ⟨rfl, rfl, rfl⟩ := hB
-        obtain ⟨_, hcpark⟩ := hcond _ _ _ _ hb
-        subst hbq
-        refine ⟨by simp only [List.length_cons]; omega, fun i' hi' => ?_⟩
-        rcases List.mem_cons.mp hi' with rfl | hi'
-        · simp only [CTA.set, Function.update_self, List.head?_cons]
-        · by_cases hne : i' = i
-          · subst hne; simp only [CTA.set, Function.update_self, List.head?_cons]
-          · simp only [CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
-      · obtain ⟨hle, hpark⟩ := hcond b I A n hB
-        refine ⟨hle, fun i' hi' => ?_⟩
-        by_cases hne : i' = i
-        · subst hne; simp only [CTA.set, Function.update_self]; rw [← hpi]; exact hpark _ hi'
-        · simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | arrive_configure he hb =>
+        intro b I A n hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
+          have hpos := n.pos
+          obtain ⟨rfl, rfl, rfl⟩ := hB
+          exact ⟨by simp; omega, fun i' hi' => by simp at hi'⟩
+        · obtain ⟨hle, hpark⟩ := hcond b I A n hB
+          refine ⟨hle, fun i' hi' => ?_⟩
+          have hne : i' ≠ i := by
+            rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+          simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | arrive_register he hb hpos hlt =>
+        intro b I A n hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · rename_i hbq
+          simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
+          obtain ⟨rfl, rfl, rfl⟩ := hB
+          obtain ⟨_, hcpark⟩ := hcond _ _ _ _ hb
+          subst hbq
+          refine ⟨by simp only [List.length_cons]; omega, fun i' hi' => ?_⟩
+          have hne : i' ≠ i := by
+            rintro rfl; have := hcpark i' hi'; rw [hpi] at this; simp at this
+          simp only [CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
+        · obtain ⟨hle, hpark⟩ := hcond b I A n hB
+          refine ⟨hle, fun i' hi' => ?_⟩
+          have hne : i' ≠ i := by
+            rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+          simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | sync_configure he hb =>
+        intro b I A n hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · rename_i hbq
+          simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
+          have hpos := n.pos
+          obtain ⟨rfl, rfl, rfl⟩ := hB
+          subst hbq
+          refine ⟨by simp; omega, fun i' hi' => ?_⟩
+          simp only [List.mem_singleton] at hi'; subst hi'
+          simp only [CTA.set, Function.update_self, List.head?_cons]
+        · obtain ⟨hle, hpark⟩ := hcond b I A n hB
+          refine ⟨hle, fun i' hi' => ?_⟩
+          by_cases hne : i' = i
+          · subst hne; simp only [CTA.set, Function.update_self]; rw [← hpi]; exact hpark _ hi'
+          · simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | sync_block he hb hpos hlt =>
+        intro b I A n hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · rename_i hbq
+          simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
+          obtain ⟨rfl, rfl, rfl⟩ := hB
+          obtain ⟨_, hcpark⟩ := hcond _ _ _ _ hb
+          subst hbq
+          refine ⟨by simp only [List.length_cons]; omega, fun i' hi' => ?_⟩
+          rcases List.mem_cons.mp hi' with rfl | hi'
+          · simp only [CTA.set, Function.update_self, List.head?_cons]
+          · by_cases hne : i' = i
+            · subst hne; simp only [CTA.set, Function.update_self, List.head?_cons]
+            · simp only [CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
+        · obtain ⟨hle, hpark⟩ := hcond b I A n hB
+          refine ⟨hle, fun i' hi' => ?_⟩
+          by_cases hne : i' = i
+          · subst hne; simp only [CTA.set, Function.update_self]; rw [← hpi]; exact hpark _ hi'
+          · simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+    · cases hth with
+      | read_noop => exact hcondn
+      | write_noop => exact hcondn
+      | arrive_configure he hb =>
+        intro b I A hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hcondn b I A hB
+      | arrive_register he hb hpos hlt =>
+        intro b I A hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hcondn b I A hB
+      | sync_configure he hb =>
+        intro b I A hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hcondn b I A hB
+      | sync_block he hb hpos hlt =>
+        intro b I A hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hcondn b I A hB
   | @recycle s T b₀ I₀ A₀ n₀ hb hfull hpark =>
-    have hcond := hwf
-    intro b I A n hB
-    by_cases hbb : b = b₀
-    · subst hbb
-      simp only [Function.update_self, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
-      exact absurd hB.2.2 (by simp)
-    · simp only [Function.update_of_ne hbb] at hB
-      obtain ⟨hle, hpk⟩ := hcond b I A n hB
-      refine ⟨hle, fun i' hi' => ?_⟩
-      have hni : i' ∉ I₀ := by
-        intro hmem
-        have h1 := hpark i' hmem
-        have h2 := hpk i' hi'
-        rw [h1] at h2; simp only [Option.some.injEq, Cmd.sync.injEq] at h2; exact hbb h2.1.symm
-      simp only [CTA.wake, if_neg hni]; exact hpk i' hi'
+    obtain ⟨hcond, hcondn⟩ := hwf
+    refine ⟨?_, ?_⟩
+    · intro b I A n hB
+      by_cases hbb : b = b₀
+      · subst hbb
+        simp only [Function.update_self, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
+        exact absurd hB.2.2 (by simp)
+      · simp only [Function.update_of_ne hbb] at hB
+        obtain ⟨hle, hpk⟩ := hcond b I A n hB
+        refine ⟨hle, fun i' hi' => ?_⟩
+        have hni : i' ∉ I₀ := by
+          intro hmem
+          have h1 := hpark i' hmem
+          have h2 := hpk i' hi'
+          rw [h1] at h2; simp only [Option.some.injEq, Cmd.sync.injEq] at h2; exact hbb h2.1.symm
+        simp only [CTA.wake, if_neg hni]; exact hpk i' hi'
+    · intro b I A hB
+      by_cases hbb : b = b₀
+      · subst hbb
+        simp only [Function.update_self, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
+        exact ⟨hB.1.symm, hB.2.1.symm⟩
+      · simp only [Function.update_of_ne hbb] at hB; exact hcondn b I A hB
   | @done s T hdone _ => trivial
   | @error s T i P' hth => trivial
 
-/-- Auxiliary invariant: an *unconfigured* barrier (count `none`) has empty lists.
-This rules out malformed `⟨I, A, none⟩` with nonempty `I`/`A`. -/
-def Config.WFn : Config → Prop
-  | .run s _ => ∀ b I A, s.B b = ⟨I, A, none⟩ → I = [] ∧ A = []
-  | _ => True
-
-theorem WFn_initial {T : CTA} : (Config.run State.initial T).WFn := by
-  intro b I A hB
-  simp only [State.initial, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
-  exact ⟨hB.1.symm, hB.2.1.symm⟩
-
-theorem CTAStep.WFn_preserved {C C' : Config} (hstep : CTAStep C C') (hwfn : C.WFn) : C'.WFn := by
-  cases hstep with
-  | @interleave s s' T i P' hi hbar hth =>
-    generalize hpi : T.prog i = Pi at hth
-    cases hth with
-    | read_noop => exact hwfn
-    | write_noop => exact hwfn
-    | arrive_configure he hb =>
-      intro b I A hB; simp only [Function.update_apply] at hB; split at hB
-      · simp at hB
-      · exact hwfn b I A hB
-    | arrive_register he hb hpos hlt =>
-      intro b I A hB; simp only [Function.update_apply] at hB; split at hB
-      · simp at hB
-      · exact hwfn b I A hB
-    | sync_configure he hb =>
-      intro b I A hB; simp only [Function.update_apply] at hB; split at hB
-      · simp at hB
-      · exact hwfn b I A hB
-    | sync_block he hb hpos hlt =>
-      intro b I A hB; simp only [Function.update_apply] at hB; split at hB
-      · simp at hB
-      · exact hwfn b I A hB
-  | @recycle s T b₀ I₀ A₀ n₀ hb hfull hpark =>
-    intro b I A hB
-    by_cases hbb : b = b₀
-    · subst hbb
-      simp only [Function.update_self, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
-      exact ⟨hB.1.symm, hB.2.1.symm⟩
-    · simp only [Function.update_of_ne hbb] at hB; exact hwfn b I A hB
-  | @done s T hdone _ => trivial
-  | @error s T i P' hth => trivial
-
-/-- `WF` and `WFn` propagate along a chain from a well-formed head to every config. -/
+/-- `WF` propagates along a chain from a well-formed head to every configuration. -/
 theorem WF_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
-    τ.head? = some C₀ → C₀.WF → C₀.WFn → ∀ C ∈ τ, C.WF ∧ C.WFn := by
+    τ.head? = some C₀ → C₀.WF → ∀ C ∈ τ, C.WF := by
   intro τ
   induction τ with
-  | nil => intro C₀ _ hhead _ _ _ _; simp at hhead
+  | nil => intro C₀ _ hhead _ _ _; simp at hhead
   | cons a rest ih =>
-    intro C₀ hchain hhead hwf hwfn C hC
+    intro C₀ hchain hhead hwf C hC
     rw [List.head?_cons, Option.some.injEq] at hhead
     subst hhead
     cases rest with
-    | nil => rw [List.mem_singleton] at hC; subst hC; exact ⟨hwf, hwfn⟩
+    | nil => rw [List.mem_singleton] at hC; subst hC; exact hwf
     | cons b t' =>
       rw [List.isChain_cons_cons] at hchain
       obtain ⟨hab, hbt⟩ := hchain
       rw [List.mem_cons] at hC
       rcases hC with rfl | hC'
-      · exact ⟨hwf, hwfn⟩
-      · exact ih hbt rfl (hab.WF_preserved hwf) (hab.WFn_preserved hwfn) C hC'
+      · exact hwf
+      · exact ih hbt rfl (hab.WF_preserved hwf) C hC'
 
 /-- A stuck `run` configuration (well-formed) has a thread headed by a
 synchronization command — a thread parked at a `sync`, or one about to register. -/
 theorem stuck_has_sync_head {s : State} {T : CTA}
-    (hwf : (Config.run s T).WF) (hwfn : (Config.run s T).WFn)
+    (hwf : (Config.run s T).WF)
     (hstuck : Config.Stuck (Config.run s T)) :
     ∃ t cmd c b, T.prog t = cmd :: c ∧ cmd.barrier? = some b := by
   by_contra hcon
@@ -547,9 +542,9 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
     intro bb
     obtain ⟨bI, bA, bcnt, hbc⟩ : ∃ bI bA bcnt, s.B bb = ⟨bI, bA, bcnt⟩ := ⟨_, _, _, rfl⟩
     cases bcnt with
-    | none => obtain ⟨rfl, rfl⟩ := hwfn bb bI bA hbc; exact Or.inl hbc
+    | none => obtain ⟨rfl, rfl⟩ := hwf.2 bb bI bA hbc; exact Or.inl hbc
     | some n =>
-      obtain ⟨hle, hpark⟩ := hwf bb bI bA n hbc
+      obtain ⟨hle, hpark⟩ := hwf.1 bb bI bA n hbc
       rcases lt_or_eq_of_le hle with hlt | heq
       · exact Or.inr ⟨bI, bA, n, hbc, hlt⟩
       · exfalso
@@ -594,48 +589,50 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
     | sync b n => simp [Cmd.barrier?] at hbar0
     | arrive b n => simp [Cmd.barrier?] at hbar0
 
-/-- A complete trace from the initial configuration that ends in a deadlock (a
-stuck `run` configuration) contains a synchronization command that never executes
-— some thread is blocked at a `sync` that is never recycled. -/
-theorem deadlock_has_unexec_sync {T₀ : CTA} {τ : List Config} {s : State} {T : CTA}
-    (hτ : IsCompleteTraceFrom (Config.run State.initial T₀) τ)
+/-- A complete trace from a *well-formed* `run` configuration that ends in a deadlock
+(a stuck `run` configuration) contains a synchronization command that never executes
+— some thread is blocked at a `sync` that is never recycled. The well-formedness of
+the start configuration (`hC₀wf`) propagates along the trace (`WF_chain`) to the stuck
+last configuration, which then exposes a `sync`-headed thread
+(`stuck_has_sync_head`). -/
+theorem deadlock_has_unexec_sync {C₀ : Config} {τ : List Config} {s : State} {T : CTA}
+    (hτ : IsCompleteTraceFrom C₀ τ) (hC₀wf : C₀.WF)
     (hlast : τ.getLast? = some (Config.run s T)) (hstuck : Config.Stuck (Config.run s T)) :
     ∃ η : ProgPoint,
-      (∃ b, (η.cmd (Config.run State.initial T₀)).bind Cmd.barrier? = some b) ∧
-      ¬ ∃ m, IsTimeOf (Config.run State.initial T₀) τ η m := by
-  obtain ⟨hwf, hwfn⟩ :=
-    WF_chain hτ.1.subtrace hτ.2 WF_initial WFn_initial _ (List.mem_of_mem_getLast? hlast)
-  obtain ⟨t, cmd, c, b, hTprog, hbb⟩ := stuck_has_sync_head hwf hwfn hstuck
+      (∃ b, (η.cmd C₀).bind Cmd.barrier? = some b) ∧
+      ¬ ∃ m, IsTimeOf C₀ τ η m := by
+  have hwf := WF_chain hτ.1.subtrace hτ.2 hC₀wf _ (List.mem_of_mem_getLast? hlast)
+  obtain ⟨t, cmd, c, b, hTprog, hbb⟩ := stuck_has_sync_head hwf hstuck
   exact unexec_sync_of_last hτ hlast (List.mem_of_mem_head? hτ.2) hTprog hbb
 
 /- THE HELPER FUNCTIONS ARE DONE AND THE REAL THEOREMS ARE BELOW -/
 
 /- ### IMPORTANT THEOREMs: Well Synchronized Configurations Terminate Cleanly -/
 
-/-- Definition 6 (§4.1), the main correctness result: every execution of a
-well-synchronized CTA — i.e. every complete trace from the initial configuration
-`(I, T)` — ends in `done`.
+/-- Definition 6 (§4.1), the main correctness result, for an arbitrary *well-formed*
+start configuration: every complete trace from a well-synchronized, well-formed `run`
+configuration `(s₀, T₀)` ends in `done`.
 
-Restricted to the initial configuration: the unrestricted statement over arbitrary
-`run` configurations is *false* — a malformed barrier state can deadlock with no
-`sync`-headed thread. (Positive thread counts are no longer a side condition: every
-`sync`/`arrive` carries a positive count `n : ℕ+` by construction.) The proof splits
-on the terminal last configuration: `done` is the goal; `err` and deadlock each
-expose a never-executing synchronization command (`err_has_unexec_sync` /
-`deadlock_has_unexec_sync`), contradicting `wellSync_no_unexec_sync`. The deadlock
-case rests on the well-formedness invariant `Config.WF`/`WFn` (`WF_initial` +
-`CTAStep.WF_preserved` + `WF_chain`) specialized to the stuck last configuration
-(`stuck_has_sync_head`). -/
-theorem CTA.WellSynchronized.completeTrace_ends_done {T : CTA}
-    (h : T.WellSynchronized) {τ : List Config}
-    (hτ : IsCompleteTraceFrom (Config.run State.initial T) τ) :
+The well-formedness hypothesis `hwf` is essential — without it a malformed barrier
+state can deadlock with no `sync`-headed thread, and the conclusion fails. It holds
+for free at the initial configuration (`WF_initial`), which gives the
+`CTA.WellSynchronized` corollary below. The proof splits on the terminal last
+configuration: `done` is the goal; `err` and deadlock each expose a never-executing
+synchronization command (`err_has_unexec_sync` / `deadlock_has_unexec_sync`),
+contradicting `wellSync_no_unexec_sync`. The deadlock case rests on the
+well-formedness invariant `Config.WF` (`hwf` + `CTAStep.WF_preserved` + `WF_chain`)
+specialized to the stuck last configuration (`stuck_has_sync_head`). -/
+theorem Config.WellSynchronized.completeTrace_ends_done {s₀ : State} {T₀ : CTA}
+    (h : (Config.run s₀ T₀).WellSynchronized)
+    (hwf : (Config.run s₀ T₀).WF) {τ : List Config}
+    (hτ : IsCompleteTraceFrom (Config.run s₀ T₀) τ) :
     ∃ s, τ.getLast? = some (Config.done s) := by
   obtain ⟨Cₙ, hlast, hcases⟩ := hτ.1.ends
   cases Cₙ with
   | done s => exact ⟨s, hlast⟩
   | err T' =>
     exfalso
-    obtain ⟨η, hηsync, hηnoexec⟩ := err_has_unexec_sync hτ ⟨State.initial, T, rfl⟩ hlast
+    obtain ⟨η, hηsync, hηnoexec⟩ := err_has_unexec_sync hτ ⟨s₀, T₀, rfl⟩ hlast
     exact wellSync_no_unexec_sync h hτ hηsync hηnoexec
   | run s T' =>
     exfalso
@@ -644,8 +641,18 @@ theorem CTA.WellSynchronized.completeTrace_ends_done {T : CTA}
       · exact Config.noConfusion hd
       · exact Config.noConfusion he
       · exact hs
-    obtain ⟨η, hηsync, hηnoexec⟩ := deadlock_has_unexec_sync hτ hlast hstuck
+    obtain ⟨η, hηsync, hηnoexec⟩ := deadlock_has_unexec_sync hτ hwf hlast hstuck
     exact wellSync_no_unexec_sync h hτ hηsync hηnoexec
+
+/-- Definition 6 (§4.1) at the initial configuration: every complete trace of a
+well-synchronized CTA ends in `done`. A corollary of the well-formed-configuration
+version `Config.WellSynchronized.completeTrace_ends_done`, since `WF` holds
+initially. -/
+theorem CTA.WellSynchronized.completeTrace_ends_done {T : CTA}
+    (h : T.WellSynchronized) {τ : List Config}
+    (hτ : IsCompleteTraceFrom (Config.run State.initial T) τ) :
+    ∃ s, τ.getLast? = some (Config.done s) :=
+  Config.WellSynchronized.completeTrace_ends_done h WF_initial hτ
 
 /-- A well-synchronized CTA has no complete trace from `initial` ending in the error
 state `err`. -/
