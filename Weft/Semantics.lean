@@ -188,8 +188,16 @@ inductive CTAStep : Config → Config → Prop where
         (.run { E := updateMapOn s.E I true,
                 B := Function.update s.B b BarrierState.unconfigured }
               (T.wake I))
-  /-- Termination: when every thread has reached `return`, the CTA is `done`. -/
-  | done {s : State} {T : CTA} (hdone : CTA.IsDone T) :
+  /-- Termination: when every thread has reached `return`, the CTA is `done` —
+  *provided* no barrier is left completed-but-not-recycled. The premise `hnofull`
+  requires every configured barrier to be strictly under-full (`|I|+|A| < n`): a
+  barrier that has reached its expected count must be recycled (`CTAStep.recycle`,
+  always available for a full barrier) before the CTA may terminate, so completed
+  barriers always advance their generation and return to the unconfigured state
+  rather than being torn down full. (Under-full barriers, whose generation never
+  completes, may remain at termination.) -/
+  | done {s : State} {T : CTA} (hdone : CTA.IsDone T)
+      (hnofull : ∀ b I A n, s.B b = ⟨I, A, some n⟩ → I.length + A.length < (n : Nat)) :
       CTAStep (.run s T) (.done s)
   /-- Error propagation: if any thread produces `err`, so does the whole CTA. This
   rule is independent of the barrier condition guarding `interleave`. -/

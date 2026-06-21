@@ -188,7 +188,7 @@ theorem CTAStep.progOf_drop {C C' : Config} (hstep : CTAStep C C') (t : ThreadId
       by_cases h : t ∈ I
       · exact ⟨1, by simp [Config.progOf, CTA.wake, h, List.drop_one]⟩
       · exact ⟨0, by simp [Config.progOf, CTA.wake, h]⟩
-  | @done s T hdone =>
+  | @done s T hdone _ =>
       exact ⟨(T.prog t).length, by simp [Config.progOf, List.drop_length]⟩
   | @error s T i P' hstep =>
       exact ⟨0, by simp [Config.progOf]⟩
@@ -464,7 +464,7 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
         have h2 := hpk i' hi'
         rw [h1] at h2; simp only [Option.some.injEq, Cmd.sync.injEq] at h2; exact hbb h2.1.symm
       simp only [CTA.wake, if_neg hni]; exact hpk i' hi'
-  | @done s T hdone => trivial
+  | @done s T hdone _ => trivial
   | @error s T i P' hth => trivial
 
 /-- Auxiliary invariant: an *unconfigured* barrier (count `none`) has empty lists.
@@ -508,7 +508,7 @@ theorem CTAStep.WFn_preserved {C C' : Config} (hstep : CTAStep C C') (hwfn : C.W
       simp only [Function.update_self, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
       exact ⟨hB.1.symm, hB.2.1.symm⟩
     · simp only [Function.update_of_ne hbb] at hB; exact hwfn b I A hB
-  | @done s T hdone => trivial
+  | @done s T hdone _ => trivial
   | @error s T i P' hth => trivial
 
 /-- `WF` and `WFn` propagate along a chain from a well-formed head to every config. -/
@@ -537,21 +537,55 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
     (hwf : (Config.run s T).WF) (hwfn : (Config.run s T).WFn)
     (hstuck : Config.Stuck (Config.run s T)) :
     ∃ t cmd c b, T.prog t = cmd :: c ∧ cmd.barrier? = some b := by
-  have hcond := hwf
-  have hnd : ¬ CTA.IsDone T := fun hd => hstuck ⟨_, CTAStep.done hd⟩
-  rw [CTA.IsDone] at hnd
-  push Not at hnd
-  obtain ⟨t₀, ht₀ids, ht₀ne⟩ := hnd
-  obtain ⟨cmd₀, c₀, hcmd₀⟩ := List.exists_cons_of_ne_nil ht₀ne
   by_contra hcon
   push Not at hcon
-  have hbar0 : cmd₀.barrier? = none := by
-    cases hb : cmd₀.barrier? with
-    | none => rfl
-    | some b => exact absurd hb (hcon t₀ cmd₀ c₀ b hcmd₀)
-  by_cases hbar : ∀ bb, s.B bb = BarrierState.unconfigured ∨
-      ∃ I A n, s.B bb = ⟨I, A, some n⟩ ∧ I.length + A.length < (n : Nat)
-  · apply hstuck
+  -- No barrier is left *full*: every barrier is unconfigured or strictly under-full.
+  -- A full barrier would either let `recycle` fire (its synced list empty, or its
+  -- parked threads are `sync`-headed — both contradict stuckness/`hcon`).
+  have hbar : ∀ bb, s.B bb = BarrierState.unconfigured ∨
+      ∃ I A n, s.B bb = ⟨I, A, some n⟩ ∧ I.length + A.length < (n : Nat) := by
+    intro bb
+    obtain ⟨bI, bA, bcnt, hbc⟩ : ∃ bI bA bcnt, s.B bb = ⟨bI, bA, bcnt⟩ := ⟨_, _, _, rfl⟩
+    cases bcnt with
+    | none => obtain ⟨rfl, rfl⟩ := hwfn bb bI bA hbc; exact Or.inl hbc
+    | some n =>
+      obtain ⟨hle, hpark⟩ := hwf bb bI bA n hbc
+      rcases lt_or_eq_of_le hle with hlt | heq
+      · exact Or.inr ⟨bI, bA, n, hbc, hlt⟩
+      · exfalso
+        cases bI with
+        | nil => exact hstuck ⟨_, CTAStep.recycle hbc heq (by simp)⟩
+        | cons i₀ rest =>
+          have hpk := hpark i₀ (by simp)
+          cases hp : T.prog i₀ with
+          | nil => rw [hp] at hpk; simp at hpk
+          | cons x t =>
+            rw [hp] at hpk
+            simp only [List.head?_cons, Option.some.injEq] at hpk
+            exact hcon i₀ x t bb hp (by rw [hpk]; rfl)
+  -- Since no barrier is full, the `done` rule's premise `hnofull` holds.
+  have hnofull : ∀ b I A n, s.B b = ⟨I, A, some n⟩ → I.length + A.length < (n : Nat) := by
+    intro b I A n hb
+    rcases hbar b with hu | ⟨I', A', n', hb', hlt⟩
+    · rw [hb] at hu; simp [BarrierState.unconfigured] at hu
+    · rw [hb] at hb'
+      simp only [BarrierState.mk.injEq, Option.some.injEq] at hb'
+      obtain ⟨rfl, rfl, rfl⟩ := hb'
+      exact hlt
+  -- If the CTA is done, `done` fires; otherwise a thread is headed by a
+  -- (non-barrier, by `hcon`) command, so `interleave` fires. Either contradicts
+  -- stuckness.
+  by_cases hd : CTA.IsDone T
+  · exact hstuck ⟨_, CTAStep.done hd hnofull⟩
+  · rw [CTA.IsDone] at hd
+    push Not at hd
+    obtain ⟨t₀, ht₀ids, ht₀ne⟩ := hd
+    obtain ⟨cmd₀, c₀, hcmd₀⟩ := List.exists_cons_of_ne_nil ht₀ne
+    have hbar0 : cmd₀.barrier? = none := by
+      cases hb : cmd₀.barrier? with
+      | none => rfl
+      | some b => exact absurd hb (hcon t₀ cmd₀ c₀ b hcmd₀)
+    apply hstuck
     cases cmd₀ with
     | read g =>
       exact ⟨_, CTAStep.interleave ht₀ids hbar (by rw [hcmd₀]; exact ThreadStep.read_noop)⟩
@@ -559,24 +593,6 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
       exact ⟨_, CTAStep.interleave ht₀ids hbar (by rw [hcmd₀]; exact ThreadStep.write_noop)⟩
     | sync b n => simp [Cmd.barrier?] at hbar0
     | arrive b n => simp [Cmd.barrier?] at hbar0
-  · push Not at hbar
-    obtain ⟨bb, hb1, hb2⟩ := hbar
-    obtain ⟨bI, bA, bcnt, hbc⟩ : ∃ bI bA bcnt, s.B bb = ⟨bI, bA, bcnt⟩ := ⟨_, _, _, rfl⟩
-    cases bcnt with
-    | none => obtain ⟨rfl, rfl⟩ := hwfn bb bI bA hbc; exact hb1 hbc
-    | some n =>
-      obtain ⟨hle, hpark⟩ := hcond bb bI bA n hbc
-      have hfull : bI.length + bA.length = (n : Nat) := by have := hb2 bI bA n hbc; omega
-      cases bI with
-      | nil => exact hstuck ⟨_, CTAStep.recycle hbc hfull (by simp)⟩
-      | cons i₀ rest =>
-        have hpk := hpark i₀ (by simp)
-        cases hp : T.prog i₀ with
-        | nil => rw [hp] at hpk; simp at hpk
-        | cons x t =>
-          rw [hp] at hpk
-          simp only [List.head?_cons, Option.some.injEq] at hpk
-          exact hcon i₀ x t bb hp (by rw [hpk]; rfl)
 
 /-- A complete trace from the initial configuration that ends in a deadlock (a
 stuck `run` configuration) contains a synchronization command that never executes
@@ -852,7 +868,7 @@ theorem step_decreases (S : Finset Barrier) {C C' : Config}
     (hstep : CTAStep C C') (hinv : C.barriersWithin S) :
     C'.cfgMeasure S < C.cfgMeasure S := by
   cases hstep with
-  | @done s T hdone => simp only [Config.cfgMeasure]; omega
+  | @done s T hdone _ => simp only [Config.cfgMeasure]; omega
   | @error s T i P' hth => simp only [Config.cfgMeasure]; omega
   | @interleave s s' T i P' hi hbar hth =>
     obtain ⟨hcfg, hmen⟩ := hinv
@@ -920,7 +936,7 @@ theorem inv_preserved (S : Finset Barrier) {C C' : Config}
     (hstep : CTAStep C C') (hinv : C.barriersWithin S) :
     C'.barriersWithin S := by
   cases hstep with
-  | @done s T hdone => trivial
+  | @done s T hdone _ => trivial
   | @error s T i P' hth => trivial
   | @interleave s s' T i P' hi hbar hth =>
     obtain ⟨hcfg, hmen⟩ := hinv
