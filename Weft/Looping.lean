@@ -1287,40 +1287,247 @@ theorem Config.WellSynchronized.pow_barriers_advance_count {I : CTA}
   rw [← I.arrivers_pow b k, hq, Nat.mul_div_cancel_left _ hnbpos, hqR]
 
 /-!
-## Theorem 1 (§1): barriers are restored over a complete run
+## Theorem 1 (§1): arrived counts are restored over a complete run
 
 Companion to `pow_barriers_advance`. That theorem shows every loop barrier's
-*generation* advances over the §1 unrolling; this one shows that, generation aside,
-the unrolling leaves every barrier exactly where it started: the final `done` state
-`s_d` is barrier-equivalent to the start state `s` (`State.BEquiv`).
+*generation* advances over the §1 unrolling; this one shows that, generation aside, the
+run leaves every barrier with the same number of *arrived* threads it started with
+(`State.ArrivedCountEquiv`). Only the arrived *count* is restored: a complete run drains
+every syncer (none can be parked at `done`) and may leave a barrier freshly recycled, so
+neither the synced count, the configured/unconfigured status, nor thread identities are
+preserved.
 -/
 
-/-- **Theorem 1 (partial, barriers restored).** Let `k = I.loopK h` be the §1
-iteration count. Running `I ^ k` from a well-formed state `s` over any successful
-trace `τ` (ending in `Config.done s_d`) returns every barrier to a state *equivalent*
-to its start state: `s_d.BEquiv s`, i.e. for every barrier `b`, the synced and arrived
-lists of `s_d.B b` are permutations of those of `s.B b` and the counts agree.
+/-- For a **referenced** barrier `b` that is not full at entry, a complete `I ^ k` run
+returns it to its entry arrived count. This is the conservation-and-divisibility core (the
+same `hAeq` step proved inside `pow_barriers_advance_count`): the total arrivals
+`k · arrivers(b)` are a multiple of `arrival-count(b)`, and both arrived lengths are below
+it, so they must be equal. -/
+theorem arrivedLen_preserved {I : CTA} (h : I.ConsistentArrivalCounts) {s : State}
+    {b : Barrier} (hwf : (Config.run s (I ^ I.loopK h)).WF)
+    (hfull : (s.B b).isFull = false) {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) τ)
+    (hb : b ∈ (I ^ I.loopK h).barrierSet)
+    {s_d : State} (hlast : τ.getLast? = some (Config.done s_d)) :
+    (s_d.B b).arrived.length = (s.B b).arrived.length := by
+  have hb0 := Config.WellSynchronized.headCount_consistent_of_successful h hwf hfull hτ hb
+  obtain ⟨⟨⟨hchain, _hends⟩, hhead⟩, _⟩ := hτ
+  set k := I.loopK h with hk
+  set nb := I.arrivalCount h b with hnb
+  have hbI : b ∈ I.barriers := by
+    rw [CTA.barrierSet, Finset.mem_biUnion] at hb
+    obtain ⟨i, hi, hbi'⟩ := hb
+    rw [List.mem_toFinset, List.mem_filterMap] at hbi'
+    obtain ⟨c, hc, hcb⟩ := hbi'
+    have hcI : c ∈ I.prog i := I.mem_pow_prog hc
+    have hi' : i ∈ I.ids := by rw [← CTA.pow_ids I k]; exact hi
+    obtain ⟨n, hbref⟩ : ∃ n, Cmd.barrierRef c = some (b, n) := by
+      cases c with
+      | read g => simp [Cmd.barrier?] at hcb
+      | write g => simp [Cmd.barrier?] at hcb
+      | arrive b' n => simp only [Cmd.barrier?, Option.some.injEq] at hcb; subst hcb; exact ⟨n, rfl⟩
+      | sync b' n => simp only [Cmd.barrier?, Option.some.injEq] at hcb; subst hcb; exact ⟨n, rfl⟩
+    rw [CTA.barriers, Finset.mem_biUnion]
+    exact ⟨i, hi', List.mem_toFinset.mpr
+      (List.mem_map.mpr ⟨(b, n), List.mem_filterMap.mpr ⟨c, hcI, hbref⟩, rfl⟩)⟩
+  have hnbpos : 0 < nb := I.arrivalCount_pos h hbI
+  have hdvd : nb ∣ (I ^ k).arrivers b := I.arrivalCount_dvd_pow_arrivers h hbI
+  have hno_err : ∀ C ∈ τ, ∀ T, C ≠ Config.err T := by
+    intro C hC T hCerr
+    have hτne : τ ≠ [] := by rintro rfl; simp at hhead
+    rw [← List.dropLast_append_getLast hτne, List.mem_append, List.mem_singleton] at hC
+    rcases hC with hCd | hCl
+    · obtain ⟨s', T', hrun⟩ := mem_dropLast_isRun hchain C hCd
+      rw [hCerr] at hrun; exact Config.noConfusion hrun
+    · rw [List.getLast?_eq_some_getLast hτne, Option.some.injEq] at hlast
+      rw [hlast, hCerr] at hCl; exact Config.noConfusion hCl
+  have hcmd_all : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+, Cmd.barrierRef c = some (b, m) →
+      (m : Nat) = nb := by
+    intro C hC i c hc m hbref
+    have hc0 : c ∈ (Config.run s (I ^ k)).progOf i :=
+      (progOf_suffix_head hchain hhead C hC i).subset hc
+    have hc1 : c ∈ (I ^ k).prog i := by simpa [Config.progOf] using hc0
+    have hcI : c ∈ I.prog i := I.mem_pow_prog hc1
+    have hi : i ∈ I.ids := by
+      by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
+    rw [hnb]; exact (h.choose_spec i hi c hcI b m hbref).symm
+  have hcount_all := bcount_chain hchain hhead
+    (by intro n' hn'; exact hb0 n' (by simpa only [Config.bcount] using hn')) hcmd_all
+  have hBI_all := blockInv_chain hchain hhead
+    (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'; exact hwf.2.2)
+  have hcons := barrierPotential_with_recycles (b := b) (nb := nb) hchain hhead hlast hno_err
+    hcount_all hBI_all
+  have hC₀pot : (Config.run s (I ^ k)).barrierPotential b
+      = (s.B b).arrived.length + (I ^ k).arrivers b := by
+    simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, CTA.arrivers]
+  have hdonepot : (Config.done s_d).barrierPotential b = (s_d.B b).arrived.length := by
+    simp [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount]
+  rw [hC₀pot, hdonepot] at hcons
+  have hA0 : (s.B b).arrived.length < nb := by
+    by_cases hcfg : (s.B b).count = none
+    · have heq : s.B b = ⟨(s.B b).synced, (s.B b).arrived, none⟩ := by rw [← hcfg]
+      have harr0 := (hwf.2.1 b (s.B b).synced (s.B b).arrived heq).2
+      rw [harr0]; simpa using hnbpos
+    · obtain ⟨n', hn'⟩ := Option.ne_none_iff_exists'.mp hcfg
+      have heq : s.B b = ⟨(s.B b).synced, (s.B b).arrived, some n'⟩ := by rw [← hn']
+      have hnn := hb0 n' hn'
+      have hle := (hwf.1 b (s.B b).synced (s.B b).arrived n' heq).1
+      have hne2 : (s.B b).synced.length + (s.B b).arrived.length ≠ (n' : Nat) := by
+        intro he; rw [heq] at hfull; simp [BarrierState.isFull, he] at hfull
+      omega
+  have hAd : (s_d.B b).arrived.length < nb := by
+    obtain ⟨y, hy_mem, hy_step⟩ : ∃ y ∈ τ, CTAStep y (Config.done s_d) := by
+      rcases getLast_has_pred_mem hchain hlast with hh | hp
+      · rw [hhead] at hh; exact absurd hh (by simp)
+      · exact hp
+    have hwf_y : y.WF := WF_chain hchain hhead hwf y hy_mem
+    cases hy_step with
+    | @done sd T' hdone hnofull =>
+      by_cases hcfg : (s_d.B b).count = none
+      · have heq : s_d.B b = ⟨(s_d.B b).synced, (s_d.B b).arrived, none⟩ := by rw [← hcfg]
+        have harr0 := (hwf_y.2.1 b (s_d.B b).synced (s_d.B b).arrived heq).2
+        rw [harr0]; simpa using hnbpos
+      · obtain ⟨n', hn'⟩ := Option.ne_none_iff_exists'.mp hcfg
+        have heq : s_d.B b = ⟨(s_d.B b).synced, (s_d.B b).arrived, some n'⟩ := by rw [← hn']
+        have hnn := (hcount_all (Config.done s_d) (List.mem_of_mem_getLast? hlast)) n'
+          (by simp only [Config.bcount]; exact hn')
+        have hlt2 := hnofull b (s_d.B b).synced (s_d.B b).arrived n' heq
+        omega
+  obtain ⟨q, hq⟩ := hdvd
+  rw [hq] at hcons
+  have e : ((s.B b).arrived.length + nb * q) % nb
+      = ((s_d.B b).arrived.length + nb * recycleCount b τ (τ.length - 1)) % nb := by rw [hcons]
+  rwa [Nat.add_mul_mod_self_left, Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hA0,
+    Nat.mod_eq_of_lt hAd, eq_comm] at e
 
-Equivalence (`State.BEquiv` / `BarrierState.Equiv`) rather than equality is the right
-statement because `arrive`/`sync` *prepend* to the registration lists (`i :: A`), so a
-thread that recycles out and re-registers over the `k` iterations can reappear at a
-different position in the list even though the multiset of registered threads — and
-hence the barrier's behaviour — is unchanged. The claim holds even when barriers
-already have threads registered at `s` (the "tangle" of a non-initial start state),
-subject to `hfull`: no barrier is full at entry. A full entry generation is forced to
-`recycle` immediately and so cannot persist to the end, which would make the final,
-necessarily under-full, state inequivalent to it — hence the restriction.
+/-- A barrier that **no command references** and that is not full at entry has its state
+frozen by every step: a registration happens only at the executed command's barrier
+(which is `≠ b`, since no command mentions `b`), and a recycle of `b` would need `b` full
+(contradicting `hfullβ`). The unreferenced-barrier analogue of `bstate_frozen_step`. -/
+theorem bstate_unref_step {b : Barrier} {β : BarrierState} (hfullβ : β.isFull = false)
+    {C C' : Config} (hstep : CTAStep C C')
+    (hC : ∀ s', C.state? = some s' → s'.B b = β)
+    (hcmd : ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+, Cmd.barrierRef c ≠ some (b, m)) :
+    ∀ s', C'.state? = some s' → s'.B b = β := by
+  intro s' hs'
+  cases hstep with
+  | @interleave s s'' T i P' hi hbar hth =>
+    have hCb : s.B b = β := hC s rfl
+    simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+    generalize hpi : T.prog i = Pi at hth
+    cases hth with
+    | read_noop => exact hCb
+    | write_noop => exact hCb
+    | arrive_configure he hb0 =>
+      rename_i b₀ n
+      have hbb : b ≠ b₀ := fun heq => by
+        subst heq
+        exact hcmd i (Cmd.arrive b n)
+          (by simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
+      simp only [Function.update_of_ne hbb]; exact hCb
+    | arrive_register he hb0 hpos hlt =>
+      rename_i b₀ n I A
+      have hbb : b ≠ b₀ := fun heq => by
+        subst heq
+        exact hcmd i (Cmd.arrive b n)
+          (by simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
+      simp only [Function.update_of_ne hbb]; exact hCb
+    | sync_configure he hb0 =>
+      rename_i b₀ n c
+      have hbb : b ≠ b₀ := fun heq => by
+        subst heq
+        exact hcmd i (Cmd.sync b n)
+          (by simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
+      simp only [Function.update_of_ne hbb]; exact hCb
+    | sync_block he hb0 hpos hlt =>
+      rename_i b₀ n c I A
+      have hbb : b ≠ b₀ := fun heq => by
+        subst heq
+        exact hcmd i (Cmd.sync b n)
+          (by simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
+      simp only [Function.update_of_ne hbb]; exact hCb
+  | @recycle s T b₀ I₀ A₀ n₀ hb hfullr hpark =>
+    have hCb : s.B b = β := hC s rfl
+    simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+    have hbb : b ≠ b₀ := by
+      intro heq; subst heq
+      have hβeq : β = ⟨I₀, A₀, some n₀⟩ := hCb.symm.trans hb
+      rw [hβeq] at hfullβ
+      simp [BarrierState.isFull, hfullr] at hfullβ
+    simp only [Function.update_of_ne hbb]; exact hCb
+  | @done s T hdone hnofull =>
+    simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+    exact hC s rfl
+  | @error s T i P' hth => simp [Config.state?] at hs'
+
+/-- Iterating `bstate_unref_step`: an unreferenced, not-full barrier stays frozen at every
+configuration of a chain whose commands never mention it. -/
+theorem bstate_unref_chain {b : Barrier} {β : BarrierState} (hfullβ : β.isFull = false) :
+    ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ → τ.head? = some C₀ →
+      (∀ s', C₀.state? = some s' → s'.B b = β) →
+      (∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+, Cmd.barrierRef c ≠ some (b, m)) →
+      ∀ C ∈ τ, ∀ s', C.state? = some s' → s'.B b = β := by
+  intro τ
+  induction τ with
+  | nil => intro C₀ _ hhead; simp at hhead
+  | cons a rest ih =>
+    intro C₀ hchain hhead hC₀ hcmd C hC
+    rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead
+    cases rest with
+    | nil => rw [List.mem_singleton] at hC; subst hC; exact hC₀
+    | cons b₁ rest' =>
+      rw [List.isChain_cons_cons] at hchain
+      obtain ⟨hstep, hchain'⟩ := hchain
+      have hb1 := bstate_unref_step hfullβ hstep hC₀ (hcmd a (by simp))
+      rw [List.mem_cons] at hC
+      rcases hC with rfl | hC'
+      · exact hC₀
+      · exact ih hchain' rfl hb1 (fun C hC'' => hcmd C (List.mem_cons_of_mem _ hC'')) C hC'
+
+/-- **Theorem 1 (partial, arrived counts restored).** Let `k = I.loopK h` be the §1
+iteration count. Over any successful trace `τ` of `I ^ k` from a well-formed state `s` in
+which no barrier is full, every barrier ends the run (`Config.done s_d`) with the same
+number of *arrived* threads it started with: `s_d.ArrivedCountEquiv s`. For a referenced
+barrier this is the conservation/divisibility core (`arrivedLen_preserved`); an
+unreferenced barrier is never touched, so its whole state is frozen.
 NOTE (rohany): This is an important top-level theorem. -/
 theorem Config.WellSynchronized.pow_barriers_restored {I : CTA}
     (h : I.ConsistentArrivalCounts) {s : State}
     (hwf : (Config.run s (I ^ I.loopK h)).WF)
-    -- avoids the full-at-entry case (see `headCount_consistent_of_successful`): a full
-    -- barrier is forced to `recycle` away, so the final (under-full) state could not be
-    -- equivalent to a full entry state.
     (hfull : ∀ b, (s.B b).isFull = false) {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) τ)
     {s_d : State} (hlast : τ.getLast? = some (Config.done s_d)) :
-    s_d.BEquiv s := by
-  sorry
+    s_d.ArrivedCountEquiv s := by
+  intro b
+  by_cases hb : b ∈ (I ^ I.loopK h).barrierSet
+  · -- referenced barrier: conservation + divisibility pin the arrived count
+    exact arrivedLen_preserved h hwf (hfull b) hτ hb hlast
+  · -- unreferenced barrier: nothing ever touches `b`, so its state is frozen
+    set k := I.loopK h with hk
+    obtain ⟨⟨⟨hchain, _hends⟩, hhead⟩, _⟩ := hτ
+    have hcmd : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+, Cmd.barrierRef c ≠ some (b, m) := by
+      intro C hC i c hc m hbref
+      apply hb
+      have hc0 : c ∈ (Config.run s (I ^ k)).progOf i :=
+        (progOf_suffix_head hchain hhead C hC i).subset hc
+      have hc1 : c ∈ (I ^ k).prog i := by simpa [Config.progOf] using hc0
+      have hbar : Cmd.barrier? c = some b := by
+        cases c with
+        | read g => simp [Cmd.barrierRef] at hbref
+        | write g => simp [Cmd.barrierRef] at hbref
+        | arrive b' n =>
+          simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbref
+          simp only [Cmd.barrier?, hbref.1]
+        | sync b' n =>
+          simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbref
+          simp only [Cmd.barrier?, hbref.1]
+      have hi : i ∈ (I ^ k).ids := by
+        by_contra hni; rw [(I ^ k).nil_outside_ids i hni] at hc1; simp at hc1
+      rw [CTA.barrierSet, Finset.mem_biUnion]
+      exact ⟨i, hi, List.mem_toFinset.mpr (List.mem_filterMap.mpr ⟨c, hc1, hbar⟩)⟩
+    have hfrozen := bstate_unref_chain (hfull b) hchain hhead
+      (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'; rfl)
+      hcmd (Config.done s_d) (List.mem_of_mem_getLast? hlast) s_d rfl
+    rw [hfrozen]
 
 end Weft
