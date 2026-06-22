@@ -68,6 +68,47 @@ def unconfigured : BarrierState := ⟨[], [], none⟩
 /-- A barrier is configured once its thread count has been set (i.e. `n ≠ ⊥`). -/
 def isConfigured (β : BarrierState) : Bool := β.count.isSome
 
+/-- Two barrier states are **equivalent** when they agree up to reordering of the
+synced and arrived lists (and have the same thread count). Because `arrive`/`sync`
+*prepend* to these lists (`i :: A`), their order merely records execution order,
+which is immaterial to the barrier's behaviour; this relation quotients that out.
+It is exactly multiset equality of the two lists (`Multiset.coe_eq_coe`), but stated
+on the underlying `List` representation so the existing list-based development is
+left untouched. -/
+def Equiv (β₁ β₂ : BarrierState) : Prop :=
+  List.Perm β₁.synced β₂.synced ∧ List.Perm β₁.arrived β₂.arrived ∧
+    β₁.count = β₂.count
+
+@[refl]
+theorem Equiv.refl (β : BarrierState) : β.Equiv β :=
+  ⟨List.Perm.refl _, List.Perm.refl _, rfl⟩
+
+theorem Equiv.rfl {β : BarrierState} : β.Equiv β := Equiv.refl β
+
+theorem Equiv.symm {β₁ β₂ : BarrierState} (h : β₁.Equiv β₂) : β₂.Equiv β₁ :=
+  ⟨h.1.symm, h.2.1.symm, h.2.2.symm⟩
+
+theorem Equiv.trans {β₁ β₂ β₃ : BarrierState}
+    (h₁ : β₁.Equiv β₂) (h₂ : β₂.Equiv β₃) : β₁.Equiv β₃ :=
+  ⟨h₁.1.trans h₂.1, h₁.2.1.trans h₂.2.1, h₁.2.2.trans h₂.2.2⟩
+
+theorem Equiv.isEquivalence : Equivalence BarrierState.Equiv :=
+  ⟨Equiv.refl, fun h => h.symm, fun h₁ h₂ => h₁.trans h₂⟩
+
+instance : Setoid BarrierState := ⟨BarrierState.Equiv, Equiv.isEquivalence⟩
+
+/-- Equivalent barrier states have the same number of synced threads. -/
+theorem Equiv.synced_length_eq {β₁ β₂ : BarrierState} (h : β₁.Equiv β₂) :
+    β₁.synced.length = β₂.synced.length := h.1.length_eq
+
+/-- Equivalent barrier states have the same number of arrived threads. -/
+theorem Equiv.arrived_length_eq {β₁ β₂ : BarrierState} (h : β₁.Equiv β₂) :
+    β₁.arrived.length = β₂.arrived.length := h.2.1.length_eq
+
+/-- Equivalent barrier states have the same thread count. -/
+theorem Equiv.count_eq {β₁ β₂ : BarrierState} (h : β₁.Equiv β₂) :
+    β₁.count = β₂.count := h.2.2
+
 end BarrierState
 
 /-- A state `s` of a CTA: the enabled map `E` and the barrier map `B`. -/
@@ -92,6 +133,26 @@ barrier is unconfigured (`B(b) = ([], [], ⊥)`). -/
 def initial : State where
   E := fun _ => true
   B := fun _ => BarrierState.unconfigured
+
+/-- Two states are **barrier-equivalent** when their barrier maps agree, barrier by
+barrier, up to reordering of the synced/arrived lists (`BarrierState.Equiv`). This
+captures "the barriers are back where they started" without pinning the execution
+order of the registered threads. (It says nothing about the enabled map `E`; pair it
+with `s₁.E = s₂.E` where the enabled map matters too.) -/
+def BEquiv (s₁ s₂ : State) : Prop := ∀ b, (s₁.B b).Equiv (s₂.B b)
+
+@[refl]
+theorem BEquiv.refl (s : State) : s.BEquiv s := fun b => BarrierState.Equiv.refl _
+
+theorem BEquiv.symm {s₁ s₂ : State} (h : s₁.BEquiv s₂) : s₂.BEquiv s₁ :=
+  fun b => (h b).symm
+
+theorem BEquiv.trans {s₁ s₂ s₃ : State}
+    (h₁ : s₁.BEquiv s₂) (h₂ : s₂.BEquiv s₃) : s₁.BEquiv s₃ :=
+  fun b => (h₁ b).trans (h₂ b)
+
+theorem BEquiv.isEquivalence : Equivalence State.BEquiv :=
+  ⟨BEquiv.refl, fun h => h.symm, fun h₁ h₂ => h₁.trans h₂⟩
 
 end State
 
