@@ -161,10 +161,14 @@ theorem mem_transClosure_imp_transGen {α : Type*} [DecidableEq α] (R : Finset 
   intro a b h
   exact key R.card a b h
 
--- TODO(proof): the converse `Relation.TransGen … → (a, b) ∈ transClosure R` (needed
--- for `happensBefore_precise`) still requires justifying the `R.card`-rounds
--- saturation bound (a simple path uses ≤ `|R|` edges, so the fixpoint is reached
--- within `R.card` rounds).
+-- TODO(proof): the converse `Relation.TransGen … → (a, b) ∈ transClosure R`. This is
+-- the `→` half of `happensBefore_iff_mem` (completeness of the executable `Finset`);
+-- the `←` half and all of Lemma 1 only use the forward direction above, so nothing
+-- currently depends on it. It reduces to showing `addStep^[R.card] R` is a fixpoint,
+-- which needs the diameter bound: every `TransGen` pair has a *simple* path, whose
+-- edges are distinct elements of `R`, hence `≤ R.card` of them — so `R.card`
+-- saturation rounds suffice. Formalizing that bound (minimal-length chain ⟹ `Nodup`
+-- ⟹ `≤ R.card` edges) is a self-contained graph-theory lemma, deferred.
 
 /-! ## Figure 4 (`WELLSYNC`)
 
@@ -331,6 +335,40 @@ def CheckWellSynchronized (T : CTA) (τ : List Config) :
           | none => true
     | _ => true
   (ok, hb)
+
+/-- The happens-before relation of Figure 4, as a *relation* on program points (the
+object Definition 4 / Lemma 1 talk about), rather than as the executable `Finset`
+returned by `CheckWellSynchronized`. It is the **reflexive**-transitive closure of
+the static edge set `initRelation T τ`, via the canonical `Relation.ReflTransGen`.
+
+Reflexivity is not cosmetic: Definition 4 (`SoundAndPrecise`) uses `≤`, so at
+`η₁ = η₂` the timing side is unconditionally true (`IsTimeOf.unique`) and a
+sound-and-precise relation *must* relate every point to itself. The executable
+`(CheckWellSynchronized T τ).2 = transClosure (initRelation T τ)` is the irreflexive
+`Relation.TransGen` part (a finite set, so it cannot carry the diagonal of the
+infinite `ProgPoint`); `happensBefore` adds the diagonal back. The two agree off the
+diagonal — see `happensBefore_iff_mem`. -/
+def happensBefore (T : CTA) (τ : List Config) : ProgPoint → ProgPoint → Prop :=
+  Relation.ReflTransGen (fun a b => (a, b) ∈ initRelation T τ)
+
+/-- `(CheckWellSynchronized T τ).2` is, by definition, the `Finset` transitive closure
+of `initRelation T τ`. -/
+theorem snd_checkWellSynchronized (T : CTA) (τ : List Config) :
+    (CheckWellSynchronized T τ).2 = transClosure (initRelation T τ) := rfl
+
+/-- **Soundness of the executable relation w.r.t. `happensBefore`** (the easy `←`
+half of `happensBefore_iff_mem`): every pair the algorithm reports — and every
+diagonal pair — is a genuine `happensBefore` pair. The diagonal is
+`Relation.ReflTransGen.refl`; an `(a,b) ∈ transClosure` pair is a `Relation.TransGen`
+chain (`mem_transClosure_imp_transGen`), hence a `Relation.ReflTransGen` one. The
+reverse inclusion (completeness of the `Finset`) is the `transClosure` converse still
+open below, and is *not* needed by any result in this file. -/
+theorem happensBefore_of_mem {T : CTA} {τ : List Config} {a b : ProgPoint}
+    (h : a = b ∨ (a, b) ∈ (CheckWellSynchronized T τ).2) : happensBefore T τ a b := by
+  rcases h with rfl | h
+  · exact Relation.ReflTransGen.refl
+  · rw [snd_checkWellSynchronized] at h
+    exact (mem_transClosure_imp_transGen (initRelation T τ) h).to_reflTransGen
 
 /-- `pointTime` computes the time `t(τ, η)`: if `η` executes at step `m` in a
 complete trace from `(I, T)`, then `pointTime T τ η = some m`. (The matcher returns
@@ -518,58 +556,65 @@ theorem initRelation_src_timed {T : CTA} {τ : List Config}
   obtain ⟨_, hdone⟩ := CTA.WellSynchronized.completeTrace_ends_done hws hτ'
   exact exists_time_of_ends_done hτ' hdone ((mem_progPoints_iff T a).mp ha).2
 
-/-- Soundness half of Lemma 1: every edge `(η₁, η₂)` of the computed happens-before
-relation is a *genuine* ordering — in every complete trace from `(I, T)`, `η₁`
-executes no later than `η₂`. (Per the paper: direct, because there is no
+/-- Soundness half of Lemma 1: every pair `(η₁, η₂)` of the happens-before relation
+`happensBefore T τ` is a *genuine* ordering — in every complete trace from `(I, T)`,
+`η₁` executes no later than `η₂`. (Per the paper: direct, because there is no
 out-of-order execution within a thread and well-synchronization fixes barrier
-generations across all traces.) This is the `→` direction of `SoundAndPrecise`. -/
+generations across all traces.) This is the `→` direction of `SoundAndPrecise`.
+
+Proved by induction on the reflexive-transitive chain: the reflexive base is the
+trivial `η₁ = η₂` case (equal times, `IsTimeOf.unique`); each appended edge is sound
+(`initRelation_edge_sound`), and the intermediate node executes
+(`initRelation_src_timed`), so `≤` chains. -/
 theorem happensBefore_sound {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hws : T.WellSynchronized) {η₁ η₂ : ProgPoint}
-    (hR : (η₁, η₂) ∈ (CheckWellSynchronized T τ).2) :
+    (hR : happensBefore T τ η₁ η₂) :
     ∀ τ', IsCompleteTraceFrom (Config.run State.initial T) τ' →
       ∀ n₁ n₂, IsTimeOf (Config.run State.initial T) τ' η₁ n₁ →
         IsTimeOf (Config.run State.initial T) τ' η₂ n₂ → n₁ ≤ n₂ := by
-  -- The closure membership is a `Relation.TransGen` chain of `initRelation` edges.
-  have hR' : (η₁, η₂) ∈ transClosure (initRelation T τ) := hR
-  have hTG : Relation.TransGen (fun a b => (a, b) ∈ initRelation T τ) η₁ η₂ :=
-    mem_transClosure_imp_transGen (initRelation T τ) hR'
-  clear hR hR'
   intro τ' hτ'
-  -- Induct on the chain: each single edge is sound (`initRelation_edge_sound`); for a
-  -- composite, the intermediate node executes (`initRelation_src_timed`) so `≤` chains.
-  induction hTG with
-  | single hedge => exact initRelation_edge_sound hτ hws hedge τ' hτ'
+  induction hR with
+  | refl => intro n₁ n₂ h1 h2; exact le_of_eq (IsTimeOf.unique h1 h2)
   | tail _hab hbc ih =>
       intro n₁ nc ht₁ htc
       obtain ⟨nb, htb⟩ := initRelation_src_timed hws hbc hτ'
       exact le_trans (ih n₁ nb ht₁ htb)
         (initRelation_edge_sound hτ hws hbc τ' hτ' nb nc htb htc)
 
-/-- Preciseness half of Lemma 1: the computed happens-before relation captures
-*every* genuine ordering — if `η₁` executes no later than `η₂` in every complete
-trace from `(I, T)`, then `(η₁, η₂)` is an edge of `R`. (Per the paper: by induction
-on program size, since the tuples in `R` are the only ordering restrictions the
-semantics imposes.) This is the `←` direction of `SoundAndPrecise`. -/
+/-- Preciseness half of Lemma 1: the happens-before relation captures *every* genuine
+ordering — if `η₁` executes no later than `η₂` in every complete trace from `(I, T)`,
+then `happensBefore T τ η₁ η₂` holds. (Per the paper: by induction on program size,
+since the tuples in `R` are the only ordering restrictions the semantics imposes.)
+This is the `←` direction of `SoundAndPrecise`.
+
+The reflexive corner `η₁ = η₂` is `Relation.ReflTransGen.refl`. The genuine content
+is the `η₁ ≠ η₂` case: there one must produce an actual `Relation.TransGen` chain of
+`initRelation` edges, i.e. show that any ordering *not* forced by `R` is violated by
+some schedule (the paper's adversarial-schedule construction). That step is the one
+remaining `sorry`. -/
 theorem happensBefore_precise {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hws : T.WellSynchronized) {η₁ η₂ : ProgPoint}
     (hle : ∀ τ', IsCompleteTraceFrom (Config.run State.initial T) τ' →
       ∀ n₁ n₂, IsTimeOf (Config.run State.initial T) τ' η₁ n₁ →
         IsTimeOf (Config.run State.initial T) τ' η₂ n₂ → n₁ ≤ n₂) :
-    (η₁, η₂) ∈ (CheckWellSynchronized T τ).2 := by
-  sorry
+    happensBefore T τ η₁ η₂ := by
+  by_cases hη : η₁ = η₂
+  · -- reflexive corner: every point is happens-before itself
+    subst hη; exact Relation.ReflTransGen.refl
+  · -- the genuine, schedule-construction content (distinct program points)
+    sorry
 
 /-- **Lemma 1.** For a well-synchronized configuration `(I, T)`, the static
-happens-before relation constructed in Figure 4 — `(CheckWellSynchronized T τ).2`,
-viewed as a relation on program points — is sound and precise in the sense of
-Definition 4 (`Weft.SoundAndPrecise`). Assembled from the two directions
+happens-before relation constructed in Figure 4 — `happensBefore T τ`, the
+reflexive-transitive closure of `initRelation T τ` — is sound and precise in the
+sense of Definition 4 (`Weft.SoundAndPrecise`). Assembled from the two directions
 `happensBefore_sound` and `happensBefore_precise`. -/
 theorem soundAndPrecise_happensBefore {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hws : T.WellSynchronized) :
-    SoundAndPrecise (Config.run State.initial T)
-      (fun η₁ η₂ => (η₁, η₂) ∈ (CheckWellSynchronized T τ).2) := by
+    SoundAndPrecise (Config.run State.initial T) (happensBefore T τ) := by
   intro η₁ η₂
   exact ⟨happensBefore_sound hτ hws, happensBefore_precise hτ hws⟩
 
