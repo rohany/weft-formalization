@@ -245,42 +245,21 @@ theorem soundAndPrecise_happensBefore {T : CTA} {τ : List Config}
   intro η₁ η₂
   exact ⟨happensBefore_sound hτ hws, happensBefore_precise hτ hws⟩
 
--- These theorems might not actually be what I want.
+/-! ## Theorem 1 — soundness of `CheckWellSynchronized`
 
-/-! ## Soundness and preciseness (Definitions 9–10)
+The paper's **Theorem 1**: a successful run of the check witnesses
+well-synchronization. The paper proves it by induction on the suffixes of the
+`done`-reaching execution — *not* via Lemma 1, which would be circular (only
+well-synchronized configurations are known to have a sound `R`, yet here `R` is what
+we use to conclude well-synchronization). Stated here as a stub. -/
 
--- The two core lemmas tying the *checker* `CheckWellSynchronized` to the
--- *specification* `CTA.WellSynchronized` (Definition 6). Both assume the algorithm's
--- standing precondition that `τ` is a successful trace from `(I, T)` — Figure 4's
--- `τ ≡ (I, T), …, (F, done)`, i.e. `IsSuccessfulTraceFrom` (such a `τ` exists once `T`
--- is well-synchronized, by `CTA.WellSynchronized.exists_successfulTrace`). Stated here
--- as stubs; the proofs are future work and both rest on the `transClosure` correctness
--- `TODO` above (relating the closure to `Relation.TransGen`). -/
-
--- /-- **Soundness (Definition 9): `D(T) ⇒ Ψ(T)`, no false positives.** If
--- `CheckWellSynchronized` accepts a CTA `T` on a successful trace `τ` from `(I, T)`,
--- then `T` really is well-synchronized: the static happens-before relation the
--- algorithm builds is restrictive enough that no schedule can pair the
--- synchronizations up differently from `Gen(τ)`.
--- NOTE (rohany): This is a core theorem.
---  -/
--- theorem CheckWellSynchronized_sound {T : CTA} {τ : List Config}
---     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
---     (hcheck : (CheckWellSynchronized T τ).1 = true) :
---     T.WellSynchronized := by
---   sorry
-
--- /-- **Preciseness / completeness (Definition 10): `¬D(T) ⇒ ¬Ψ(T)`, no false
--- negatives.** If `T` is well-synchronized then `CheckWellSynchronized` accepts it on
--- any successful trace `τ` from `(I, T)`. Stated in the equivalent positive direction
--- `Ψ(T) ⇒ D(T)`; the Definition 10 contrapositive is
--- `(CheckWellSynchronized T τ).1 = false → ¬ T.WellSynchronized`.
--- NOTE (rohany): This is a core theorem.
--- -/
--- theorem CheckWellSynchronized_precise {T : CTA} {τ : List Config}
---     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
---     (hws : T.WellSynchronized) :
---     (CheckWellSynchronized T τ).1 = true := by
---   sorry
+/-- **Theorem 1.** If `τ` is a complete trace from `(I, T)` ending in `done`
+(`τ ≡ (I, T) ⤳* (F, done)`) and `CheckWellSynchronized T τ` returns `true`, then `T`
+is well-synchronized. -/
+theorem wellSynchronized_of_check {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hcheck : (CheckWellSynchronized T τ).1 = true) :
+    T.WellSynchronized := by
+  sorry
 
 end Weft
