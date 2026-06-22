@@ -1009,23 +1009,42 @@ theorem wellSynchronized_of_check {T : CTA} {τ : List Config}
 
 /-! ## Theorem 2 — completeness of `CheckWellSynchronized`
 
-The paper's **Theorem 2** (the converse of Theorem 1): the check never rejects a
-genuinely well-synchronized CTA (`T.WellSynchronized → (CheckWellSynchronized T τ).1 =
-true`). Stated below in the equivalent contrapositive direction — a configuration that
-is *not* well-synchronized always fails the check. (Per the paper, this follows from
-the preciseness half of Lemma 1
-(`happensBefore_precise`): a missing happens-before edge witnesses a schedule that
-reorders the synchronizations, so the pairwise check in Step 3 of Figure 4 must find
-some unordered `(generation k, generation k+1)` barrier pair and return `false`.)
+The paper's **Theorem 2**, the converse of Theorem 1: the check never rejects a
+genuinely well-synchronized CTA. Equivalently — the form stated below — *if the check
+returns `false`, the CTA is not well-synchronized*. "Completeness of WELLSYNC follows
+because well-synchronized programs have a precise `R`": this `false → ¬WS` form is the
+contrapositive of `T.WellSynchronized → (CheckWellSynchronized T τ).1 = true`, and it is
+that contrapositive's `hws : T.WellSynchronized` hypothesis (introduced by
+`by_contra`) that makes the preciseness half of Lemma 1 (`happensBefore_precise`)
+available — preciseness needs well-synchronization, so only this direction can use it
+(the converse `¬WS → false` is the contrapositive of Theorem 1's *soundness*, proved
+there by induction, *not* via Lemma 1).
+
+Proof route. Assume `T.WellSynchronized`; show the Step-3 check passes (so it cannot be
+`false`). For each flagged pair — a generation-`k` `sync` `c1` on `b` and a
+generation-`k+1` barrier op `c2` on `b` with in-thread predecessor `c3` — we must show
+`(c1, c3) ∈ (CheckWellSynchronized T τ).2 = transClosure (initRelation T τ)`. Beyond
+`happensBefore_precise`, this rests on two facts not yet available in this file:
+
+  * **a per-thread generation lemma** — a thread that reaches a generation-`k+1` op on
+    `b` has a generation-`k` `sync` on `b` at an *earlier* index; that earlier `sync`
+    executes at the unique `k`-th recycle of `b` (simultaneously with `c1`) and, by
+    program order, sits at or before `c3`. This yields `c1 ≤ c3` in *every* complete
+    trace — exactly the hypothesis `happensBefore_precise` consumes to deliver
+    `happensBefore T τ c1 c3`.
+  * **the `Prop`→`Finset` converse** of `mem_transClosure_imp_transGen` (the open TODO
+    above) — to turn that `happensBefore T τ c1 c3` into the `Finset` membership the
+    `decide` in Step 3 tests.
+
 Stated here as a stub. -/
 
 /-- **Theorem 2 (completeness).** If `τ` is a complete trace from `(I, T)` ending in
-`done` (`τ ≡ (I, T) ⤳* (F, done)`) and `T` is *not* well-synchronized, then
-`CheckWellSynchronized T τ` returns `false`. -/
-theorem check_false_of_not_wellSynchronized {T : CTA} {τ : List Config}
+`done` (`τ ≡ (I, T) ⤳* (F, done)`) and `CheckWellSynchronized T τ` returns `false`,
+then `T` is *not* well-synchronized. -/
+theorem not_wellSynchronized_of_check_false {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
-    (hns : ¬ T.WellSynchronized) :
-    (CheckWellSynchronized T τ).1 = false := by
+    (hcheck : (CheckWellSynchronized T τ).1 = false) :
+    ¬ T.WellSynchronized := by
   sorry
 
 end Weft
