@@ -758,4 +758,35 @@ theorem Config.WellSynchronized.pow_barriers_advance {I : CTA}
       have hlt2 := hnofull b (s_d.B b).synced (s_d.B b).arrived n' heq
       omega
 
+/-!
+## Theorem 1 (§1): barriers are restored over a complete run
+
+Companion to `pow_barriers_advance`. That theorem shows every loop barrier's
+*generation* advances over the §1 unrolling; this one shows that, generation aside,
+the unrolling leaves every barrier exactly where it started: the final `done` state
+`s_d` is barrier-equivalent to the start state `s` (`State.BEquiv`).
+-/
+
+/-- **Theorem 1 (partial, barriers restored).** Let `k = I.loopK h` be the §1
+iteration count. Running `I ^ k` from a well-formed state `s` over any successful
+trace `τ` (ending in `Config.done s_d`) returns every barrier to a state *equivalent*
+to its start state: `s_d.BEquiv s`, i.e. for every barrier `b`, the synced and arrived
+lists of `s_d.B b` are permutations of those of `s.B b` and the counts agree.
+
+Equivalence (`State.BEquiv` / `BarrierState.Equiv`) rather than equality is the right
+statement because `arrive`/`sync` *prepend* to the registration lists (`i :: A`), so a
+thread that recycles out and re-registers over the `k` iterations can reappear at a
+different position in the list even though the multiset of registered threads — and
+hence the barrier's behaviour — is unchanged. Unlike `pow_barriers_advance` there is
+no `hb0` hypothesis: the claim holds even when `b` already has threads registered at
+`s` (the "tangle" of a non-initial start state).
+NOTE (rohany): This is an important top-level theorem. -/
+theorem Config.WellSynchronized.pow_barriers_restored {I : CTA}
+    (h : I.ConsistentArrivalCounts) {s : State}
+    (hwf : (Config.run s (I ^ I.loopK h)).WF) {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) τ)
+    {s_d : State} (hlast : τ.getLast? = some (Config.done s_d)) :
+    s_d.BEquiv s := by
+  sorry
+
 end Weft
