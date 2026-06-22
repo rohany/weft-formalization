@@ -268,7 +268,7 @@ theorem loopFactor_mul_ge {a c : Nat} (ha : 0 < a) (hc : 0 < c) :
 /-- In each `loopFactor` case, the arrival count `c` *exactly divides* one factor's worth
 of arrivals: `c ∣ loopFactor a c * a`. (Sharpens `loopFactor_mul_ge` from `≤` to `∣`.) This
 is what makes the total arrivals over `loopK` iterations a whole number of generations. -/
-theorem loopFactor_mul_dvd {a c : Nat} (ha : 0 < a) (hc : 0 < c) :
+theorem loopFactor_mul_dvd {a c : Nat} (_ : 0 < a) (_ : 0 < c) :
     c ∣ loopFactor a c * a := by
   unfold loopFactor
   split_ifs with h1 h2 h3
@@ -698,8 +698,9 @@ theorem barrierPotential_recycle_eq {s : State} {T : CTA} {b : Barrier}
     (hb : s.B b = ⟨I₀, A₀, some n₀⟩) (hfull : I₀.length + A₀.length = (n₀ : Nat))
     (hpark : ∀ i ∈ I₀, (T.prog i).head? = some (Cmd.sync b n₀)) (hnd : I₀.Nodup) :
     (Config.run s T).barrierPotential b
-      = (Config.run (⟨updateMapOn s.E I₀ true,
-            Function.update s.B b BarrierState.unconfigured⟩ : State) (T.wake I₀)).barrierPotential b
+      = (Config.run
+            (⟨updateMapOn s.E I₀ true, Function.update s.B b BarrierState.unconfigured⟩ : State)
+            (T.wake I₀)).barrierPotential b
         + (n₀ : Nat) := by
   have hsub : ∀ i ∈ I₀, i ∈ T.ids := by
     intro i hi
@@ -943,7 +944,6 @@ step, no `arrive/sync` on `b` can succeed against a wrong count (`arrive_err_cou
 (arrival-count b)` to reach `done` errs unless the count already matches. -/
 theorem Config.WellSynchronized.headCount_consistent_of_successful {I : CTA}
     (h : I.ConsistentArrivalCounts) {s : State} {b : Barrier}
-    (hwf : (Config.run s (I ^ I.loopK h)).WF)
     -- avoids the full-at-entry case: a full `b` forces an immediate `recycle` that
     -- erases its (possibly mismatched) count before any command tests it.
     (hfull : (s.B b).isFull = false) {τ : List Config}
@@ -1054,8 +1054,7 @@ The argument is by contradiction: if `b` were never recycled, its *arrival poten
 `arrivers(I ^ k) b ≥ arrival-count(b)` (`arrivalCount_le_pow_arrivers`), while the
 final `done` step's premise and the count-consistency invariant (`bcount_chain`) force
 that number strictly below `arrival-count(b)` — a contradiction.
-NOTE (rohany): This is an important, top-level theorem.
- -/
+NOTE (rohany): This is an important, top-level theorem. -/
 theorem Config.WellSynchronized.pow_barriers_advance {I : CTA}
     (h : I.ConsistentArrivalCounts) {s : State} {b : Barrier}
     (hwf : (Config.run s (I ^ I.loopK h)).WF)
@@ -1068,7 +1067,7 @@ theorem Config.WellSynchronized.pow_barriers_advance {I : CTA}
     1 ≤ recycleCount b τ (τ.length - 1) := by
   -- the head count of `b` is pinned to its arrival count by the successful (err-free) run
   have hb0 : ∀ n', (s.B b).count = some n' → (n' : Nat) = I.arrivalCount h b :=
-    Config.WellSynchronized.headCount_consistent_of_successful h hwf hfull hτ hb
+    Config.WellSynchronized.headCount_consistent_of_successful h hfull hτ hb
   set k := I.loopK h with hk
   by_contra hcon
   rw [Nat.not_le, Nat.lt_one_iff] at hcon
@@ -1185,7 +1184,7 @@ theorem Config.WellSynchronized.pow_barriers_advance_count {I : CTA}
     (hb : b ∈ (I ^ I.loopK h).barrierSet) :
     recycleCount b τ (τ.length - 1) = I.loopK h * I.arrivers b / I.arrivalCount h b := by
   -- head count of `b` is its arrival count (from the successful, err-free run)
-  have hb0 := Config.WellSynchronized.headCount_consistent_of_successful h hwf hfull hτ hb
+  have hb0 := Config.WellSynchronized.headCount_consistent_of_successful h hfull hτ hb
   obtain ⟨⟨⟨hchain, _hends⟩, hhead⟩, s_d, hlast⟩ := hτ
   set k := I.loopK h with hk
   set nb := I.arrivalCount h b with hnb
@@ -1310,7 +1309,7 @@ theorem arrivedLen_preserved {I : CTA} (h : I.ConsistentArrivalCounts) {s : Stat
     (hb : b ∈ (I ^ I.loopK h).barrierSet)
     {s_d : State} (hlast : τ.getLast? = some (Config.done s_d)) :
     (s_d.B b).arrived.length = (s.B b).arrived.length := by
-  have hb0 := Config.WellSynchronized.headCount_consistent_of_successful h hwf hfull hτ hb
+  have hb0 := Config.WellSynchronized.headCount_consistent_of_successful h hfull hτ hb
   obtain ⟨⟨⟨hchain, _hends⟩, hhead⟩, _⟩ := hτ
   set k := I.loopK h with hk
   set nb := I.arrivalCount h b with hnb
