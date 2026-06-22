@@ -265,6 +265,18 @@ theorem loopFactor_mul_ge {a c : Nat} (ha : 0 < a) (hc : 0 < c) :
     simp only [Nat.mul_one] at h2
     omega
 
+/-- In each `loopFactor` case, the arrival count `c` *exactly divides* one factor's worth
+of arrivals: `c ∣ loopFactor a c * a`. (Sharpens `loopFactor_mul_ge` from `≤` to `∣`.) This
+is what makes the total arrivals over `loopK` iterations a whole number of generations. -/
+theorem loopFactor_mul_dvd {a c : Nat} (ha : 0 < a) (hc : 0 < c) :
+    c ∣ loopFactor a c * a := by
+  unfold loopFactor
+  split_ifs with h1 h2 h3
+  · rw [one_mul, h1]
+  · rw [Nat.div_mul_cancel h2]
+  · rw [one_mul]; exact h3
+  · exact Dvd.dvd.mul_right (Nat.dvd_lcm_right a c) a
+
 /-- The factor `f(b)` divides `k = loopK` (it is one of the LCM's arguments). -/
 theorem CTA.loopFactor_dvd_loopK (I : CTA) (h : I.ConsistentArrivalCounts) {b : Barrier}
     (hb : b ∈ I.barriers) :
@@ -293,6 +305,19 @@ theorem CTA.arrivalCount_le_pow_arrivers (I : CTA) (h : I.ConsistentArrivalCount
       ≤ loopFactor (I.arrivers b) (I.arrivalCount h b) * I.arrivers b := loopFactor_mul_ge ha hc
     _ ≤ I.loopK h * I.arrivers b := Nat.mul_le_mul hfle (le_refl _)
     _ = (I ^ I.loopK h).arrivers b := (I.arrivers_pow b (I.loopK h)).symm
+
+/-- **Step 2′.** The total arrivals over `k = loopK` iterations are an exact multiple of
+the arrival count: `arrival-count(b) ∣ arrivers(I ^ k)(b)`. Since `arrivers(I ^ k) b =
+k * arrivers(b)` and `f(b) ∣ k` with `arrival-count(b) ∣ f(b) * arrivers(b)`, the count
+divides the total. This is the divisibility that makes the recycle count come out exact. -/
+theorem CTA.arrivalCount_dvd_pow_arrivers (I : CTA) (h : I.ConsistentArrivalCounts)
+    {b : Barrier} (hb : b ∈ I.barriers) :
+    I.arrivalCount h b ∣ (I ^ I.loopK h).arrivers b := by
+  have ha : 0 < I.arrivers b := I.arrivers_pos hb
+  have hc : 0 < I.arrivalCount h b := I.arrivalCount_pos h hb
+  obtain ⟨t, ht⟩ := I.loopFactor_dvd_loopK h hb
+  rw [I.arrivers_pow b (I.loopK h), ht, Nat.mul_right_comm]
+  exact (loopFactor_mul_dvd ha hc).mul_right t
 
 /-!
 ## Step 3 of Theorem 1: the arrival potential is conserved without recycling
@@ -658,6 +683,142 @@ recycle of `b` along `τ` increments `b`'s generation by exactly one
 steps), and "barriers used by `I ^ k`" as `b ∈ (I ^ k).barrierSet`.
 -/
 
+/-- A *full* barrier state is not the unconfigured state (its count is `some _`). -/
+theorem BarrierState.isFull_ne_unconfigured {β : BarrierState} (h : β.isFull = true) :
+    β ≠ BarrierState.unconfigured := by
+  intro he; rw [he] at h; simp [BarrierState.isFull, BarrierState.unconfigured] at h
+
+/-- **The recycle drop.** Recycling a *duplicate-free* full barrier `b` (count `n₀`)
+lowers `b`'s arrival potential by exactly `n₀`: the `A₀` arrived registrations are
+cleared and the `I₀` woken threads each drop their parked `sync b n₀` command, and
+`|I₀| + |A₀| = n₀`. Duplicate-freeness (`hnd`) is what makes the woken-thread command
+drop equal to `I₀.length` rather than the number of *distinct* woken ids. -/
+theorem barrierPotential_recycle_eq {s : State} {T : CTA} {b : Barrier}
+    {I₀ A₀ : List ThreadId} {n₀ : ℕ+}
+    (hb : s.B b = ⟨I₀, A₀, some n₀⟩) (hfull : I₀.length + A₀.length = (n₀ : Nat))
+    (hpark : ∀ i ∈ I₀, (T.prog i).head? = some (Cmd.sync b n₀)) (hnd : I₀.Nodup) :
+    (Config.run s T).barrierPotential b
+      = (Config.run (⟨updateMapOn s.E I₀ true,
+            Function.update s.B b BarrierState.unconfigured⟩ : State) (T.wake I₀)).barrierPotential b
+        + (n₀ : Nat) := by
+  have hsub : ∀ i ∈ I₀, i ∈ T.ids := by
+    intro i hi
+    by_contra hni
+    have hh := hpark i hi
+    rw [T.nil_outside_ids i hni] at hh; simp at hh
+  have hcard : (T.ids.filter (· ∈ I₀)).card = I₀.length := by
+    have hset : T.ids.filter (· ∈ I₀) = I₀.toFinset := by
+      apply Finset.ext; intro x
+      simp only [Finset.mem_filter, List.mem_toFinset]
+      exact ⟨fun h => h.2, fun h => ⟨hsub x h, h⟩⟩
+    rw [hset, List.toFinset_card_of_nodup hnd]
+  have key : ∀ j ∈ T.ids,
+      ((T.prog j).filterMap Cmd.barrierRef).countP (fun r => r.1 == b)
+        = ((if j ∈ I₀ then (T.prog j).tail else T.prog j).filterMap Cmd.barrierRef).countP
+            (fun r => r.1 == b) + (if j ∈ I₀ then 1 else 0) := by
+    intro j _
+    by_cases hj : j ∈ I₀
+    · rw [if_pos hj, if_pos hj]
+      have hh := hpark j hj
+      have hjne : T.prog j ≠ [] := fun hnil => by rw [hnil] at hh; simp at hh
+      obtain ⟨x, tl, hxtl⟩ := List.exists_cons_of_ne_nil hjne
+      rw [hxtl] at hh ⊢
+      rw [List.head?_cons, Option.some.injEq] at hh; subst hh
+      rw [List.tail_cons,
+        List.filterMap_cons_some (show Cmd.barrierRef (Cmd.sync b n₀) = some (b, n₀) from rfl),
+        List.countP_cons]
+      simp
+    · rw [if_neg hj, if_neg hj]; simp
+  simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, hb,
+    Function.update_self, BarrierState.unconfigured, List.length_nil, Nat.zero_add, CTA.wake]
+  rw [Finset.sum_congr rfl key, Finset.sum_add_distrib, ← Finset.card_filter, hcard]
+  omega
+
+/-- **Per-step potential accounting.** Each step lowers `b`'s arrival potential by `nb`
+if it recycles `b`, and by `0` otherwise. Non-recycle steps conserve it
+(`barrierPotential_step`); a recycle of `b` drops it by its count `n₀ = nb`
+(`barrierPotential_recycle_eq`, with duplicate-freeness supplied by `BlockInv`). All
+other constructors cannot make `stepRecyclesBarrier b` true (`interleave`/`done` leave no
+barrier full, a recycle of `b' ≠ b` leaves `b` non-unconfigured). -/
+theorem barrierPotential_step_count {b : Barrier} {nb : Nat} {C C' : Config}
+    (hstep : CTAStep C C') (hne : ∀ T, C' ≠ Config.err T)
+    (hcount : ∀ n', C.bcount b = some n' → (n' : Nat) = nb)
+    (hBI : ∀ s, C.state? = some s → s.BlockInv) :
+    C.barrierPotential b
+      = C'.barrierPotential b + (if stepRecyclesBarrier b C C' = true then nb else 0) := by
+  by_cases hrec : stepRecyclesBarrier b C C' = true
+  · rw [if_pos hrec]
+    cases hstep with
+    | @interleave s s' T i P' hi hbar hth =>
+      exfalso
+      have hfalse : (s.B b).isFull = false := by
+        rcases hbar b with h | ⟨I, A, n, h, hlt⟩
+        · rw [h]; rfl
+        · rw [h]; simp only [BarrierState.isFull]; exact beq_false_of_ne (Nat.ne_of_lt hlt)
+      simp [stepRecyclesBarrier, Config.state?, hfalse] at hrec
+    | @recycle s T b₀ I₀ A₀ n₀ hb hfull hpark =>
+      by_cases hbb : b = b₀
+      · subst hbb
+        have hnd : I₀.Nodup := by have h := (hBI s rfl).1 b; rwa [hb] at h
+        have hn0 : (n₀ : Nat) = nb := hcount n₀ (by simp only [Config.bcount, hb])
+        rw [← hn0]; exact barrierPotential_recycle_eq hb hfull hpark hnd
+      · exfalso
+        simp only [stepRecyclesBarrier, Config.state?, Function.update_of_ne hbb,
+          Bool.and_eq_true] at hrec
+        exact BarrierState.isFull_ne_unconfigured hrec.1 (of_decide_eq_true hrec.2)
+    | @done s T hdone hnofull =>
+      exfalso
+      simp only [stepRecyclesBarrier, Config.state?, Bool.and_eq_true] at hrec
+      exact BarrierState.isFull_ne_unconfigured hrec.1 (of_decide_eq_true hrec.2)
+    | @error s T i P' hth => exact absurd rfl (hne T)
+  · rw [Bool.not_eq_true] at hrec
+    rw [if_neg (by rw [hrec]; simp), barrierPotential_step hstep hrec hne, Nat.add_zero]
+
+/-- Head recurrence for `recycleCount` over a two-or-more-element chain: the recycles in
+`a :: b₁ :: rest'` are the first step `a ⤳ b₁` plus the recycles in `b₁ :: rest'`. -/
+theorem recycleCount_cons_cons (b : Barrier) (a b₁ : Config) (rest' : List Config) :
+    recycleCount b (a :: b₁ :: rest') ((a :: b₁ :: rest').length - 1)
+      = (if stepRecyclesBarrier b a b₁ = true then 1 else 0)
+        + recycleCount b (b₁ :: rest') ((b₁ :: rest').length - 1) := by
+  simp only [recycleCount, List.length_cons, Nat.add_sub_cancel]
+  rw [List.range_succ_eq_map, List.countP_cons, List.countP_map, Nat.add_comm]
+  congr 1
+
+/-- **Recycle-counting conservation.** Generalizing `barrierPotential_conservation` to
+runs that *do* recycle `b`: along an err-free chain whose `b`-counts are all `nb` and
+whose states satisfy `BlockInv`, the head's arrival potential exceeds the last's by
+exactly `nb` per recycle of `b`. Summed from the per-step accounting
+(`barrierPotential_step_count`) via the `recycleCount` head recurrence. -/
+theorem barrierPotential_with_recycles {b : Barrier} {nb : Nat} :
+    ∀ {τ : List Config} {C₀ Cn : Config}, List.IsChain CTAStep τ →
+      τ.head? = some C₀ → τ.getLast? = some Cn →
+      (∀ C ∈ τ, ∀ T, C ≠ Config.err T) →
+      (∀ C ∈ τ, ∀ n', C.bcount b = some n' → (n' : Nat) = nb) →
+      (∀ C ∈ τ, ∀ s, C.state? = some s → s.BlockInv) →
+      C₀.barrierPotential b = Cn.barrierPotential b + nb * recycleCount b τ (τ.length - 1) := by
+  intro τ
+  induction τ with
+  | nil => intro C₀ Cn _ hhead _ _ _ _; simp at hhead
+  | cons a rest ih =>
+    intro C₀ Cn hchain hhead hlast hne hcount hBI
+    rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead
+    cases rest with
+    | nil =>
+      rw [List.getLast?_singleton, Option.some.injEq] at hlast; subst hlast
+      simp [recycleCount]
+    | cons b₁ rest' =>
+      rw [List.isChain_cons_cons] at hchain
+      obtain ⟨hstep, hchain'⟩ := hchain
+      have hlast' : (b₁ :: rest').getLast? = some Cn := by rwa [List.getLast?_cons_cons] at hlast
+      have hstepc := barrierPotential_step_count (b := b) (nb := nb) hstep
+        (fun T => hne b₁ (by simp) T) (hcount a (by simp)) (hBI a (by simp))
+      have ihr := ih hchain' rfl hlast'
+        (fun C hC => hne C (List.mem_cons_of_mem _ hC))
+        (fun C hC => hcount C (List.mem_cons_of_mem _ hC))
+        (fun C hC => hBI C (List.mem_cons_of_mem _ hC))
+      rw [recycleCount_cons_cons, hstepc, ihr, Nat.mul_add]
+      split_ifs <;> omega
+
 /-- One step keeps `b`'s barrier state *frozen* at a configured, **not-full** value
 `⟨I₀, A₀, some n₀⟩` whose count `n₀` does **not** match `nb`, given that every
 `b`-command of the source uses count `nb`. Such a `b` can never be touched: a recycle
@@ -979,7 +1140,7 @@ theorem Config.WellSynchronized.pow_barriers_advance {I : CTA}
   | @done sd T' hdone hnofull =>
     by_cases hcfg : (s_d.B b).count = none
     · have heq : s_d.B b = ⟨(s_d.B b).synced, (s_d.B b).arrived, none⟩ := by rw [← hcfg]
-      have harr0 := (hwf_y.2 b (s_d.B b).synced (s_d.B b).arrived heq).2
+      have harr0 := (hwf_y.2.1 b (s_d.B b).synced (s_d.B b).arrived heq).2
       rw [harr0] at harr; simp at harr; omega
     · obtain ⟨n', hn'⟩ := Option.ne_none_iff_exists'.mp hcfg
       have heq : s_d.B b = ⟨(s_d.B b).synced, (s_d.B b).arrived, some n'⟩ := by rw [← hn']
@@ -996,17 +1157,20 @@ is **not full**, every barrier `b` used by the loop is recycled *exactly*
 that amount.
 
 As in `pow_barriers_advance`, no "`b` unconfigured" assumption is made — `b` may already
-be registered at `s`, subject only to `hfull` (`b` is not full at entry). Here `hfull`
-is doubly necessary: besides pinning the head count (via
-`headCount_consistent_of_successful`), it rules out a *full* entry generation, which
-would force one extra recycle before the loop even begins and throw the exact count off
-by one. Arrival-potential conservation pins the *new* arrivals on `b` to
-`arrivers(I ^ k) b = k * arrivers(b)` (`arrivers` is additive over `⨾`), and each recycle
-consumes exactly `arrival-count(b)` of them. Any threads already registered at `s` are
-returned to an equivalent state by the end of the run (`pow_barriers_restored`), so the
-starting and ending residues cancel and the recycle count is the exact quotient
-regardless of the initial residue. `pow_barriers_advance` is the `1 ≤ ·` corollary via
-`Nat.one_le_div_iff` together with `arrivalCount_le_pow_arrivers`.
+be registered at `s`, subject only to `hfull` (`b` is not full at entry). `hfull` is doubly
+necessary: it pins the head count (via `headCount_consistent_of_successful`) and rules out
+a *full* entry generation, which would force one extra recycle before the loop even begins.
+Duplicate-freeness of the synced lists — needed so each recycle consumes exactly
+`arrival-count(b)` registrations (`barrierPotential_with_recycles`) — comes from `hwf`,
+since the blocking invariant `s.BlockInv` is now part of well-formedness.
+
+The proof: arrival-potential conservation-with-recycles gives
+`|arrived(s)| + arrivers(I ^ k) b = |arrived(s_d)| + arrival-count(b) · R` where `R` is the
+recycle count. Since `arrival-count(b) ∣ arrivers(I ^ k) b`
+(`arrivalCount_dvd_pow_arrivers`) and both arrived-list lengths are `< arrival-count(b)`
+(entry not full; exit under-full at `done`), the residues cancel modulo the count and
+`R = arrivers(I ^ k) b / arrival-count(b) = k · arrivers(b) / arrival-count(b)`.
+`pow_barriers_advance` is the `1 ≤ ·` corollary via `Nat.one_le_div_iff`.
 NOTE (rohany): This is an important, top-level theorem.
 -/
 theorem Config.WellSynchronized.pow_barriers_advance_count {I : CTA}
@@ -1020,7 +1184,107 @@ theorem Config.WellSynchronized.pow_barriers_advance_count {I : CTA}
     (hτ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) τ)
     (hb : b ∈ (I ^ I.loopK h).barrierSet) :
     recycleCount b τ (τ.length - 1) = I.loopK h * I.arrivers b / I.arrivalCount h b := by
-  sorry
+  -- head count of `b` is its arrival count (from the successful, err-free run)
+  have hb0 := Config.WellSynchronized.headCount_consistent_of_successful h hwf hfull hτ hb
+  obtain ⟨⟨⟨hchain, _hends⟩, hhead⟩, s_d, hlast⟩ := hτ
+  set k := I.loopK h with hk
+  set nb := I.arrivalCount h b with hnb
+  -- `b ∈ I.barriers`
+  have hbI : b ∈ I.barriers := by
+    rw [CTA.barrierSet, Finset.mem_biUnion] at hb
+    obtain ⟨i, hi, hbi'⟩ := hb
+    rw [List.mem_toFinset, List.mem_filterMap] at hbi'
+    obtain ⟨c, hc, hcb⟩ := hbi'
+    have hcI : c ∈ I.prog i := I.mem_pow_prog hc
+    have hi' : i ∈ I.ids := by rw [← CTA.pow_ids I k]; exact hi
+    obtain ⟨n, hbref⟩ : ∃ n, Cmd.barrierRef c = some (b, n) := by
+      cases c with
+      | read g => simp [Cmd.barrier?] at hcb
+      | write g => simp [Cmd.barrier?] at hcb
+      | arrive b' n => simp only [Cmd.barrier?, Option.some.injEq] at hcb; subst hcb; exact ⟨n, rfl⟩
+      | sync b' n => simp only [Cmd.barrier?, Option.some.injEq] at hcb; subst hcb; exact ⟨n, rfl⟩
+    rw [CTA.barriers, Finset.mem_biUnion]
+    exact ⟨i, hi', List.mem_toFinset.mpr
+      (List.mem_map.mpr ⟨(b, n), List.mem_filterMap.mpr ⟨c, hcI, hbref⟩, rfl⟩)⟩
+  have hnbpos : 0 < nb := I.arrivalCount_pos h hbI
+  have hdvd : nb ∣ (I ^ k).arrivers b := I.arrivalCount_dvd_pow_arrivers h hbI
+  -- err-freeness, command-consistency, and the chain hypotheses
+  have hno_err : ∀ C ∈ τ, ∀ T, C ≠ Config.err T := by
+    intro C hC T hCerr
+    have hτne : τ ≠ [] := by rintro rfl; simp at hhead
+    rw [← List.dropLast_append_getLast hτne, List.mem_append, List.mem_singleton] at hC
+    rcases hC with hCd | hCl
+    · obtain ⟨s', T', hrun⟩ := mem_dropLast_isRun hchain C hCd
+      rw [hCerr] at hrun; exact Config.noConfusion hrun
+    · rw [List.getLast?_eq_some_getLast hτne, Option.some.injEq] at hlast
+      rw [hlast, hCerr] at hCl; exact Config.noConfusion hCl
+  have hcmd_all : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+, Cmd.barrierRef c = some (b, m) →
+      (m : Nat) = nb := by
+    intro C hC i c hc m hbref
+    have hc0 : c ∈ (Config.run s (I ^ k)).progOf i :=
+      (progOf_suffix_head hchain hhead C hC i).subset hc
+    have hc1 : c ∈ (I ^ k).prog i := by simpa [Config.progOf] using hc0
+    have hcI : c ∈ I.prog i := I.mem_pow_prog hc1
+    have hi : i ∈ I.ids := by
+      by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
+    rw [hnb]; exact (h.choose_spec i hi c hcI b m hbref).symm
+  have hcount_all := bcount_chain hchain hhead
+    (by intro n' hn'; exact hb0 n' (by simpa only [Config.bcount] using hn')) hcmd_all
+  -- the blocking invariant is now part of well-formedness (`hwf.2.2`)
+  have hBI_all := blockInv_chain hchain hhead
+    (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'; exact hwf.2.2)
+  -- conservation with recycles
+  have hcons := barrierPotential_with_recycles (b := b) (nb := nb) hchain hhead hlast hno_err
+    hcount_all hBI_all
+  have hC₀pot : (Config.run s (I ^ k)).barrierPotential b
+      = (s.B b).arrived.length + (I ^ k).arrivers b := by
+    simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, CTA.arrivers]
+  have hdonepot : (Config.done s_d).barrierPotential b = (s_d.B b).arrived.length := by
+    simp [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount]
+  rw [hC₀pot, hdonepot] at hcons
+  -- both arrived lengths are below the arrival count
+  have hA0 : (s.B b).arrived.length < nb := by
+    by_cases hcfg : (s.B b).count = none
+    · have heq : s.B b = ⟨(s.B b).synced, (s.B b).arrived, none⟩ := by rw [← hcfg]
+      have harr0 := (hwf.2.1 b (s.B b).synced (s.B b).arrived heq).2
+      rw [harr0]; simpa using hnbpos
+    · obtain ⟨n', hn'⟩ := Option.ne_none_iff_exists'.mp hcfg
+      have heq : s.B b = ⟨(s.B b).synced, (s.B b).arrived, some n'⟩ := by rw [← hn']
+      have hnn := hb0 n' hn'
+      have hle := (hwf.1 b (s.B b).synced (s.B b).arrived n' heq).1
+      have hne2 : (s.B b).synced.length + (s.B b).arrived.length ≠ (n' : Nat) := by
+        intro he; rw [heq] at hfull; simp [BarrierState.isFull, he] at hfull
+      omega
+  have hAd : (s_d.B b).arrived.length < nb := by
+    obtain ⟨y, hy_mem, hy_step⟩ : ∃ y ∈ τ, CTAStep y (Config.done s_d) := by
+      rcases getLast_has_pred_mem hchain hlast with hh | hp
+      · rw [hhead] at hh; exact absurd hh (by simp)
+      · exact hp
+    have hwf_y : y.WF := WF_chain hchain hhead hwf y hy_mem
+    cases hy_step with
+    | @done sd T' hdone hnofull =>
+      by_cases hcfg : (s_d.B b).count = none
+      · have heq : s_d.B b = ⟨(s_d.B b).synced, (s_d.B b).arrived, none⟩ := by rw [← hcfg]
+        have harr0 := (hwf_y.2.1 b (s_d.B b).synced (s_d.B b).arrived heq).2
+        rw [harr0]; simpa using hnbpos
+      · obtain ⟨n', hn'⟩ := Option.ne_none_iff_exists'.mp hcfg
+        have heq : s_d.B b = ⟨(s_d.B b).synced, (s_d.B b).arrived, some n'⟩ := by rw [← hn']
+        have hnn := (hcount_all (Config.done s_d) (List.mem_of_mem_getLast? hlast)) n'
+          (by simp only [Config.bcount]; exact hn')
+        have hlt2 := hnofull b (s_d.B b).synced (s_d.B b).arrived n' heq
+        omega
+  -- the recycle count is the exact quotient
+  obtain ⟨q, hq⟩ := hdvd
+  rw [hq] at hcons
+  have hAeq : (s.B b).arrived.length = (s_d.B b).arrived.length := by
+    have e : ((s.B b).arrived.length + nb * q) % nb
+        = ((s_d.B b).arrived.length + nb * recycleCount b τ (τ.length - 1)) % nb := by rw [hcons]
+    rwa [Nat.add_mul_mod_self_left, Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hA0,
+      Nat.mod_eq_of_lt hAd] at e
+  have hqR : q = recycleCount b τ (τ.length - 1) := by
+    have : nb * q = nb * recycleCount b τ (τ.length - 1) := by omega
+    exact Nat.eq_of_mul_eq_mul_left hnbpos this
+  rw [← I.arrivers_pow b k, hq, Nat.mul_div_cancel_left _ hnbpos, hqR]
 
 /-!
 ## Theorem 1 (§1): barriers are restored over a complete run

@@ -6,6 +6,7 @@ Authors: Rohan Yadav
 import Weft.Traces
 import Mathlib.Algebra.BigOperators.Group.Finset.Basic
 import Mathlib.Algebra.BigOperators.Group.Finset.Piecewise
+import Mathlib.Data.Nat.Find
 
 /-!
 # Generations and well-synchronization (§4.1)
@@ -237,6 +238,229 @@ theorem suffix_length_le {α} {s l : List α} (h : s <:+ l) : s.length ≤ l.len
   obtain ⟨p, rfl⟩ := h
   simp [List.length_append]
 
+/-- Consecutive configurations of a trace step: from a chain with `τ[j]? = some C` and
+`τ[j+1]? = some C'`, the single CTA step `C ⤳ C'`. -/
+theorem chain_step {τ : List Config} (hchain : List.IsChain CTAStep τ) {j : Nat}
+    {C C' : Config} (hC : τ[j]? = some C) (hC' : τ[j + 1]? = some C') : CTAStep C C' := by
+  obtain ⟨_hj, rfl⟩ := List.getElem?_eq_some_iff.mp hC
+  obtain ⟨hj1, rfl⟩ := List.getElem?_eq_some_iff.mp hC'
+  exact (List.isChain_iff_getElem.mp hchain) j hj1
+
+/-- Programs only shrink: at a later trace index a thread's remaining program is a
+suffix of its program at an earlier index. -/
+theorem progOf_suffix_index_le {τ : List Config} (hchain : List.IsChain CTAStep τ)
+    (t : ThreadId) {p : Nat} {Cp : Config} (hp : τ[p]? = some Cp) :
+    ∀ {q : Nat}, p ≤ q → ∀ {Cq : Config}, τ[q]? = some Cq → Cq.progOf t <:+ Cp.progOf t := by
+  intro q hpq
+  induction q, hpq using Nat.le_induction with
+  | base =>
+      intro Cq hq
+      rw [hp, Option.some.injEq] at hq
+      subst hq; exact List.suffix_refl _
+  | succ q _hpq ih =>
+      intro Cq hq
+      have hqlt : q < τ.length := by
+        have h1 : q + 1 < τ.length := (List.getElem?_eq_some_iff.mp hq).1
+        omega
+      have hD : τ[q]? = some τ[q] := List.getElem?_eq_getElem hqlt
+      exact ((chain_step hchain hD hq).progOf_suffix t).trans (ih hD)
+
+/-- `IsTimeOf` is a partial function: an instruction executes at most once in a trace. -/
+theorem IsTimeOf.unique {C₀ : Config} {τ : List Config} {η : ProgPoint} {m m' : Nat}
+    (h : IsTimeOf C₀ τ η m) (h' : IsTimeOf C₀ τ η m') : m = m' := by
+  obtain ⟨hτ, hlt, j, C, C', hm, hCj, hCj1, hCeq, hC'eq⟩ := h
+  obtain ⟨_, _, j', D, D', hm', hDj, hDj1, hDeq, hD'eq⟩ := h'
+  subst hm; subst hm'
+  have hchain := hτ.1.subtrace
+  rcases Nat.lt_trichotomy j j' with hlt' | heq | hgt
+  · exfalso
+    have hsuf := progOf_suffix_index_le hchain η.thread hCj1 (show j + 1 ≤ j' by omega) hDj
+    have hle := suffix_length_le hsuf
+    rw [hDeq, hC'eq, List.length_drop, List.length_drop] at hle
+    omega
+  · omega
+  · exfalso
+    have hsuf := progOf_suffix_index_le hchain η.thread hDj1 (show j' + 1 ≤ j by omega) hCj
+    have hle := suffix_length_le hsuf
+    rw [hCeq, hD'eq, List.length_drop, List.length_drop] at hle
+    omega
+
+/-- A non-error thread step drops at most one command (`d ≤ 1`). -/
+theorem ThreadStep.run_drop_le_one {s s' : State} {i : ThreadId} {P P' : Prog}
+    (hstep : ThreadStep (.run s i P) (.run s' i P')) : ∃ d, d ≤ 1 ∧ P' = P.drop d := by
+  cases hstep with
+  | read_noop => exact ⟨1, by omega, rfl⟩
+  | write_noop => exact ⟨1, by omega, rfl⟩
+  | arrive_configure => exact ⟨1, by omega, rfl⟩
+  | arrive_register => exact ⟨1, by omega, rfl⟩
+  | sync_configure => exact ⟨0, by omega, rfl⟩
+  | sync_block => exact ⟨0, by omega, rfl⟩
+
+/-- A single CTA step shortens a thread's remaining program by at most one command:
+the program never jumps down by more than 1 (the `done` step only fires once every
+program is already empty). -/
+theorem CTAStep.progOf_length_le_succ {C C' : Config} (hstep : CTAStep C C') (t : ThreadId) :
+    (C.progOf t).length ≤ (C'.progOf t).length + 1 := by
+  cases hstep with
+  | @interleave s s' T i P' hi hbar hth =>
+      simp only [Config.progOf]
+      by_cases h : t = i
+      · subst h
+        obtain ⟨d, hd1, hd⟩ := hth.run_drop_le_one
+        simp only [CTA.set, Function.update_self, hd, List.length_drop]
+        omega
+      · simp only [CTA.set, Function.update_of_ne h]; omega
+  | @recycle s T b I A n hb hfull hpark =>
+      simp only [Config.progOf]
+      by_cases h : t ∈ I
+      · simp only [CTA.wake, if_pos h]
+        cases T.prog t with
+        | nil => simp
+        | cons x xs => simp
+      · simp only [CTA.wake, if_neg h]; omega
+  | @done s T hdone _ =>
+      have hnil : T.prog t = [] := by
+        by_cases ht : t ∈ T.ids
+        · exact hdone t ht
+        · exact T.nil_outside_ids t ht
+      simp only [Config.progOf, hnil]; simp
+  | @error s T i P' hth =>
+      simp only [Config.progOf]; omega
+
+/-- Every command runs in a successful execution: in a complete trace from `C₀` that
+ends in `done`, every valid program point `η` (`η.idx <` its program length) has a
+time. Found by an integer intermediate-value argument — the program length falls from
+`|C₀.progOf i|` to `0` in steps of at most one (`progOf_length_le_succ`), so it passes
+through the transition `|drop η.idx| → |drop (η.idx+1)|`; lengths pin down the suffix
+(`progOf_suffix_index_le`), giving the exact `drop`s. -/
+theorem exists_time_of_ends_done {C₀ : Config} {τ' : List Config} {sd : State}
+    (hτ : IsCompleteTraceFrom C₀ τ') (hlast : τ'.getLast? = some (Config.done sd))
+    {η : ProgPoint} (hk : η.idx < (C₀.progOf η.thread).length) :
+    ∃ n, IsTimeOf C₀ τ' η n := by
+  have hchain : List.IsChain CTAStep τ' := hτ.1.subtrace
+  set i := η.thread with hidef
+  have h0 : τ'[0]? = some C₀ := by
+    have hgen : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen]; exact hτ.2
+  have hlastidx : τ'[τ'.length - 1]? = some (Config.done sd) := by
+    rw [← List.getLast?_eq_getElem?]; exact hlast
+  have hsuffix : ∀ {j} {C : Config}, τ'[j]? = some C → C.progOf i <:+ C₀.progOf i :=
+    fun {j C} hCj => progOf_suffix_index_le hchain i h0 (Nat.zero_le j) hCj
+  have hQlast : ((τ'[τ'.length - 1]?).map (fun C => (C.progOf i).length)).getD 0
+      < (C₀.progOf i).length - η.idx := by
+    rw [hlastidx]; show (0 : Nat) < (C₀.progOf i).length - η.idx; omega
+  have hex : ∃ j, ((τ'[j]?).map (fun (C : Config) => (C.progOf i).length)).getD 0
+      < (C₀.progOf i).length - η.idx := ⟨τ'.length - 1, hQlast⟩
+  have hQj0 := Nat.find_spec hex
+  have hj0le : Nat.find hex ≤ τ'.length - 1 := Nat.find_le hQlast
+  have hQ0 : ¬ ((τ'[0]?).map (fun C => (C.progOf i).length)).getD 0
+      < (C₀.progOf i).length - η.idx := by
+    rw [h0]; show ¬ (C₀.progOf i).length < (C₀.progOf i).length - η.idx; omega
+  have hj0pos : 0 < Nat.find hex := by
+    rcases Nat.eq_zero_or_pos (Nat.find hex) with h | h
+    · rw [h] at hQj0; exact absurd hQj0 hQ0
+    · exact h
+  have hminj := Nat.find_min hex (show Nat.find hex - 1 < Nat.find hex by omega)
+  have hj0lt : Nat.find hex < τ'.length := by omega
+  obtain ⟨C, hC⟩ : ∃ C, τ'[Nat.find hex - 1]? = some C :=
+    ⟨_, List.getElem?_eq_getElem (show Nat.find hex - 1 < τ'.length by omega)⟩
+  obtain ⟨C', hC'⟩ : ∃ C', τ'[Nat.find hex]? = some C' :=
+    ⟨_, List.getElem?_eq_getElem hj0lt⟩
+  have hCC' : τ'[Nat.find hex - 1 + 1]? = some C' := by
+    rw [show Nat.find hex - 1 + 1 = Nat.find hex by omega]; exact hC'
+  have hub : (C.progOf i).length ≤ (C'.progOf i).length + 1 :=
+    (chain_step hchain hC hCC').progOf_length_le_succ i
+  have e1 : ((τ'[Nat.find hex - 1]?).map (fun C => (C.progOf i).length)).getD 0
+      = (C.progOf i).length := by rw [hC]; rfl
+  have e2 : ((τ'[Nat.find hex]?).map (fun C => (C.progOf i).length)).getD 0
+      = (C'.progOf i).length := by rw [hC']; rfl
+  rw [e1] at hminj
+  rw [e2] at hQj0
+  have hlenC : (C.progOf i).length = (C₀.progOf i).length - η.idx := by omega
+  have hlenC' : (C'.progOf i).length = (C₀.progOf i).length - η.idx - 1 := by omega
+  have hCdrop : C.progOf i = (C₀.progOf i).drop η.idx := by
+    have heq := List.IsSuffix.eq_drop (hsuffix hC)
+    rw [hlenC] at heq
+    rwa [show (C₀.progOf i).length - ((C₀.progOf i).length - η.idx) = η.idx by omega] at heq
+  have hC'drop : C'.progOf i = (C₀.progOf i).drop (η.idx + 1) := by
+    have heq := List.IsSuffix.eq_drop (hsuffix hC')
+    rw [hlenC'] at heq
+    rwa [show (C₀.progOf i).length - ((C₀.progOf i).length - η.idx - 1) = η.idx + 1 by omega] at heq
+  exact ⟨Nat.find hex, hτ, hk, Nat.find hex - 1, C, C', by omega, hC, hCC', hCdrop, hC'drop⟩
+
+/-- `IsGenOf` is a partial function: a command has at most one generation in a trace. -/
+theorem IsGenOf.unique {C₀ : Config} {τ : List Config} {η : ProgPoint} {g g' : Nat}
+    (h : IsGenOf C₀ τ η g) (h' : IsGenOf C₀ τ η g') : g = g' := by
+  obtain ⟨_, b, hb, hcase⟩ := h
+  obtain ⟨_, b', hb', hcase'⟩ := h'
+  rw [hb] at hb'; obtain rfl := Option.some.inj hb'
+  rcases hcase with ⟨m, hm, hg⟩ | ⟨hg0, hno⟩
+  · rcases hcase' with ⟨m', hm', hg'⟩ | ⟨hg0', hno'⟩
+    · have hmm : m = m' := IsTimeOf.unique hm hm'
+      rw [hg, hg', hmm]
+    · exact absurd ⟨m, hm⟩ hno'
+  · rcases hcase' with ⟨m', hm', _⟩ | ⟨hg0', _⟩
+    · exact absurd ⟨m', hm'⟩ hno
+    · rw [hg0, hg0']
+
+/-- One more recycle of `b` between steps `p` and `p+1` raises the recycle count by
+exactly one. -/
+theorem recycleCount_succ_of_recycle (b : Barrier) (τ : List Config) {p : Nat} {C C' : Config}
+    (hp : τ[p]? = some C) (hp1 : τ[p + 1]? = some C') (hrec : stepRecyclesBarrier b C C' = true) :
+    recycleCount b τ (p + 1) = recycleCount b τ p + 1 := by
+  unfold recycleCount
+  rw [List.range_succ, List.countP_append]
+  congr 1
+  simp [hp, hp1, hrec]
+
+/-- The recycle count is monotone in the step bound. -/
+theorem recycleCount_mono (b : Barrier) (τ : List Config) : Monotone (recycleCount b τ) :=
+  monotone_nat_of_le_succ fun p => by
+    unfold recycleCount; rw [List.range_succ, List.countP_append]; exact Nat.le_add_right _ _
+
+/-- A step that drops a thread's parked `sync bb nn` head is a recycle of `bb`: only
+`CTAStep.recycle` can advance past a `sync`, and it resets `bb` to unconfigured, so
+`stepRecyclesBarrier bb` holds. -/
+theorem sync_drop_recycles {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
+    {bb : Barrier} {nn : ℕ+} {rest : Prog}
+    (hC : C.progOf t = Cmd.sync bb nn :: rest) (hC' : C'.progOf t = rest) :
+    stepRecyclesBarrier bb C C' = true := by
+  cases hstep with
+  | @interleave s s' T i P' hi hbar hth =>
+      exfalso
+      simp only [Config.progOf] at hC hC'
+      by_cases h : t = i
+      · subst h
+        simp only [CTA.set, Function.update_self] at hC'
+        subst hC'
+        rw [hC] at hth
+        cases hth
+      · simp only [CTA.set, Function.update_of_ne h] at hC'
+        rw [hC] at hC'; simp at hC'
+  | @recycle s T b I A n hb hfull hpark =>
+      simp only [Config.progOf] at hC hC'
+      by_cases h : t ∈ I
+      · have hpk := hpark t h
+        rw [hC] at hpk; simp only [List.head?_cons, Option.some.injEq, Cmd.sync.injEq] at hpk
+        obtain ⟨rfl, rfl⟩ := hpk
+        simp [stepRecyclesBarrier, Config.state?, hb, BarrierState.isFull, hfull,
+          Function.update_self, BarrierState.unconfigured]
+      · exfalso
+        simp only [CTA.wake, if_neg h] at hC'
+        rw [hC] at hC'; simp at hC'
+  | @done s T hdone _ =>
+      exfalso
+      simp only [Config.progOf] at hC
+      have hnil : T.prog t = [] := by
+        by_cases ht : t ∈ T.ids
+        · exact hdone t ht
+        · exact T.nil_outside_ids t ht
+      rw [hnil] at hC; simp at hC
+  | @error s T i P' hth =>
+      exfalso
+      simp only [Config.progOf] at hC hC'
+      rw [hC] at hC'; simp at hC'
+
 /-- The program point at index `|C₀.progOf t| - |Cₙ.progOf t|` names the command at
 the head of `Cₙ.progOf t`, when the latter is a suffix of `C₀.progOf t`. -/
 theorem cmd_at_last {C₀ Cₙ : Config} {t : ThreadId} {cmd : Cmd} {c : Prog}
@@ -336,6 +560,213 @@ theorem wellSync_no_unexec_sync {C₀ : Config} (h : C₀.WellSynchronized)
   · exact hηnoexec ⟨m, hm⟩
   · exact hg0 hg
 
+/-- `updateMapOn f Y x` sends `a` to `x` if `a ∈ Y`, else to `f a`. -/
+theorem updateMapOn_apply {α β} [DecidableEq α] (f : α → β) (Y : List α) (x : β) (a : α) :
+    updateMapOn f Y x a = if a ∈ Y then x else f a := by
+  induction Y with
+  | nil => simp [updateMapOn]
+  | cons y ys ih =>
+    change Function.update (updateMapOn f ys x) y x a = _
+    rw [Function.update_apply, ih]
+    by_cases h : a = y
+    · subst h; simp
+    · simp [h, List.mem_cons]
+
+/-! ### The blocking invariant
+
+A part of well-formedness, separated out because its three clauses support each other
+inductively. To turn "a recycle clears a *full* barrier" into "a recycle consumes exactly
+its arrival count", the synced list at a recycle must be duplicate-free: `recycle`'s
+`hfull` premise is in list length, but the actual command/registration drop is the number
+of *distinct* woken ids. There may be duplicate *arrivers* on a barrier, but never
+duplicate *syncers*: a thread is disabled the instant it syncs (`synced ⟹ disabled`) and
+re-enabled only by the recycle that clears it, so it cannot re-sync (`Nodup`) nor be synced
+at two barriers at once (`uniqueness`). -/
+
+/-- The blocking invariant on a state: every barrier's synced list is duplicate-free
+(`Nodup`), every synced thread is disabled, and no thread is synced at two distinct
+barriers simultaneously. -/
+def State.BlockInv (s : State) : Prop :=
+  (∀ b, (s.B b).synced.Nodup) ∧
+  (∀ b i, i ∈ (s.B b).synced → s.E i = false) ∧
+  (∀ b b' i, i ∈ (s.B b).synced → i ∈ (s.B b').synced → b = b')
+
+/-- `BlockInv` holds at the initial state: every synced list is empty. -/
+theorem State.BlockInv.initial : State.initial.BlockInv :=
+  ⟨fun b => by simp [State.initial, BarrierState.unconfigured],
+   fun b i hi => by simp [State.initial, BarrierState.unconfigured] at hi,
+   fun b b' i hi _ => by simp [State.initial, BarrierState.unconfigured] at hi⟩
+
+/-- `BlockInv` is preserved by every step. The interesting cases: a `sync` adds an
+enabled thread to a synced list (fresh by `synced ⟹ disabled`, keeping `Nodup` and
+uniqueness), and a `recycle` of `b₀` re-enables exactly `synced(b₀)`, which by uniqueness
+is disjoint from every other synced list, so the `disabled` clause survives elsewhere. -/
+theorem blockInv_step {C C' : Config} (hstep : CTAStep C C')
+    (hC : ∀ s, C.state? = some s → s.BlockInv) :
+    ∀ s', C'.state? = some s' → s'.BlockInv := by
+  intro s' hs'
+  cases hstep with
+  | @interleave s s'' T i P' hi hbar hth =>
+    obtain ⟨hnd, hdis, hone⟩ := hC s rfl
+    simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+    generalize hpi : T.prog i = Pi at hth
+    cases hth with
+    | read_noop => exact ⟨hnd, hdis, hone⟩
+    | write_noop => exact ⟨hnd, hdis, hone⟩
+    | arrive_configure he hb0 =>
+      rename_i b₀ n
+      refine ⟨fun b => ?_, fun b j hj => ?_, fun b b' j h1 h2 => ?_⟩
+      · by_cases hbb : b = b₀
+        · subst hbb; simp [Function.update_self]
+        · simp only [Function.update_of_ne hbb]; exact hnd b
+      · by_cases hbb : b = b₀
+        · subst hbb; simp [Function.update_self] at hj
+        · simp only [Function.update_of_ne hbb] at hj; exact hdis b j hj
+      · by_cases hbb : b = b₀
+        · subst hbb; simp [Function.update_self] at h1
+        · by_cases hbb' : b' = b₀
+          · subst hbb'; simp [Function.update_self] at h2
+          · simp only [Function.update_of_ne hbb] at h1
+            simp only [Function.update_of_ne hbb'] at h2
+            exact hone b b' j h1 h2
+    | arrive_register he hb0 hpos hlt =>
+      rename_i b₀ n I A
+      refine ⟨fun b => ?_, fun b j hj => ?_, fun b b' j h1 h2 => ?_⟩
+      · by_cases hbb : b = b₀
+        · subst hbb; simp only [Function.update_self]; have h := hnd b; rw [hb0] at h; exact h
+        · simp only [Function.update_of_ne hbb]; exact hnd b
+      · by_cases hbb : b = b₀
+        · subst hbb; simp only [Function.update_self] at hj
+          exact hdis b j (by rw [hb0]; exact hj)
+        · simp only [Function.update_of_ne hbb] at hj; exact hdis b j hj
+      · refine hone b b' j ?_ ?_
+        · by_cases hbb : b = b₀
+          · subst hbb; simp only [Function.update_self] at h1; rw [hb0]; exact h1
+          · simp only [Function.update_of_ne hbb] at h1; exact h1
+        · by_cases hbb' : b' = b₀
+          · subst hbb'; simp only [Function.update_self] at h2; rw [hb0]; exact h2
+          · simp only [Function.update_of_ne hbb'] at h2; exact h2
+    | sync_configure he hb0 =>
+      rename_i b₀ n c
+      refine ⟨fun b => ?_, fun b j hj => ?_, fun b b' j h1 h2 => ?_⟩
+      · by_cases hbb : b = b₀
+        · subst hbb; simp [Function.update_self]
+        · simp only [Function.update_of_ne hbb]; exact hnd b
+      · by_cases hbb : b = b₀
+        · subst hbb; simp only [Function.update_self] at hj
+          rw [List.mem_singleton] at hj; subst hj; simp [Function.update_self]
+        · simp only [Function.update_of_ne hbb] at hj
+          by_cases hji : j = i
+          · subst hji; simp [Function.update_self]
+          · simp only [Function.update_of_ne hji]; exact hdis b j hj
+      · by_cases hbb : b = b₀
+        · subst hbb; simp only [Function.update_self] at h1
+          rw [List.mem_singleton] at h1; subst h1
+          by_cases hbb' : b' = b
+          · exact hbb'.symm
+          · simp only [Function.update_of_ne hbb'] at h2
+            exact absurd (hdis b' j h2) (by rw [he]; simp)
+        · by_cases hbb' : b' = b₀
+          · subst hbb'; simp only [Function.update_self] at h2
+            rw [List.mem_singleton] at h2; subst h2
+            simp only [Function.update_of_ne hbb] at h1
+            exact absurd (hdis b j h1) (by rw [he]; simp)
+          · simp only [Function.update_of_ne hbb] at h1
+            simp only [Function.update_of_ne hbb'] at h2
+            exact hone b b' j h1 h2
+    | sync_block he hb0 hpos hlt =>
+      rename_i b₀ n c I A
+      refine ⟨fun b => ?_, fun b j hj => ?_, fun b b' j h1 h2 => ?_⟩
+      · by_cases hbb : b = b₀
+        · subst hbb; simp only [Function.update_self, List.nodup_cons]
+          refine ⟨fun hii => ?_, by have h := hnd b; rw [hb0] at h; exact h⟩
+          have := hdis b i (by rw [hb0]; exact hii); rw [he] at this; exact absurd this (by simp)
+        · simp only [Function.update_of_ne hbb]; exact hnd b
+      · by_cases hbb : b = b₀
+        · subst hbb; simp only [Function.update_self] at hj
+          rw [List.mem_cons] at hj
+          rcases hj with rfl | hjI
+          · simp [Function.update_self]
+          · by_cases hji : j = i
+            · subst hji; simp [Function.update_self]
+            · simp only [Function.update_of_ne hji]; exact hdis b j (by rw [hb0]; exact hjI)
+        · simp only [Function.update_of_ne hbb] at hj
+          by_cases hji : j = i
+          · subst hji; simp [Function.update_self]
+          · simp only [Function.update_of_ne hji]; exact hdis b j hj
+      · by_cases hbb : b = b₀
+        · subst hbb; simp only [Function.update_self] at h1
+          rw [List.mem_cons] at h1
+          by_cases hbb' : b' = b
+          · exact hbb'.symm
+          · simp only [Function.update_of_ne hbb'] at h2
+            rcases h1 with rfl | h1I
+            · exact absurd (hdis b' j h2) (by rw [he]; simp)
+            · exact hone b b' j (by rw [hb0]; exact h1I) h2
+        · by_cases hbb' : b' = b₀
+          · subst hbb'; simp only [Function.update_self] at h2
+            rw [List.mem_cons] at h2
+            simp only [Function.update_of_ne hbb] at h1
+            rcases h2 with rfl | h2I
+            · exact absurd (hdis b j h1) (by rw [he]; simp)
+            · exact hone b b' j h1 (by rw [hb0]; exact h2I)
+          · simp only [Function.update_of_ne hbb] at h1
+            simp only [Function.update_of_ne hbb'] at h2
+            exact hone b b' j h1 h2
+  | @recycle s T b₀ I₀ A₀ n₀ hb hfullr hpark =>
+    obtain ⟨hnd, hdis, hone⟩ := hC s rfl
+    simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+    refine ⟨fun b => ?_, fun b j hj => ?_, fun b b' j h1 h2 => ?_⟩
+    · by_cases hbb : b = b₀
+      · subst hbb; simp [Function.update_self, BarrierState.unconfigured]
+      · simp only [Function.update_of_ne hbb]; exact hnd b
+    · by_cases hbb : b = b₀
+      · subst hbb; simp [Function.update_self, BarrierState.unconfigured] at hj
+      · simp only [Function.update_of_ne hbb] at hj
+        have hjnotI : j ∉ I₀ := by
+          intro hjI
+          exact hbb (hone b b₀ j hj (by rw [hb]; exact hjI))
+        show updateMapOn s.E I₀ true j = false
+        rw [updateMapOn_apply, if_neg hjnotI]; exact hdis b j hj
+    · by_cases hbb : b = b₀
+      · subst hbb; simp [Function.update_self, BarrierState.unconfigured] at h1
+      · by_cases hbb' : b' = b₀
+        · subst hbb'; simp [Function.update_self, BarrierState.unconfigured] at h2
+        · simp only [Function.update_of_ne hbb] at h1
+          simp only [Function.update_of_ne hbb'] at h2
+          exact hone b b' j h1 h2
+  | @done s T hdone hnofull =>
+    simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+    exact hC s rfl
+  | @error s T i P' hth => simp [Config.state?] at hs'
+
+/-- `BlockInv` holds at every configuration of a chain whose head satisfies it. -/
+theorem blockInv_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
+    τ.head? = some C₀ → (∀ s, C₀.state? = some s → s.BlockInv) →
+    ∀ C ∈ τ, ∀ s, C.state? = some s → s.BlockInv := by
+  intro τ
+  induction τ with
+  | nil => intro C₀ _ hhead; simp at hhead
+  | cons a rest ih =>
+    intro C₀ hchain hhead hC₀ C hC
+    rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead
+    cases rest with
+    | nil => rw [List.mem_singleton] at hC; subst hC; exact hC₀
+    | cons b₁ rest' =>
+      rw [List.isChain_cons_cons] at hchain
+      obtain ⟨hstep, hchain'⟩ := hchain
+      have hb1 : ∀ s, b₁.state? = some s → s.BlockInv := blockInv_step hstep hC₀
+      rw [List.mem_cons] at hC
+      rcases hC with rfl | hC'
+      · exact hC₀
+      · exact ih hchain' rfl hb1 C hC'
+
+/-- The source of any step is a `run` configuration (every `CTAStep` rule fires from
+`run`). Lets a step's source state be read off for invariant-extraction. -/
+theorem CTAStep.source_run {C C' : Config} (h : CTAStep C C') :
+    ∃ s T, C = Config.run s T := by
+  cases h <;> exact ⟨_, _, rfl⟩
+
 /-- The well-formedness invariant for a `run` configuration, a single predicate
 covering every barrier. For each barrier `b`:
 
@@ -345,6 +776,9 @@ covering every barrier. For each barrier `b`:
 * if it is **unconfigured** (`s.B b = ⟨I, A, none⟩`), its registration lists are
   empty (ruling out a malformed `⟨I, A, none⟩` with threads registered).
 
+Additionally `s.BlockInv` holds: the **syncer** lists are duplicate-free (a thread can be
+a duplicate *arriver* but never a duplicate *syncer* — syncing disables it until the next
+recycle), every synced thread is disabled, and no thread is synced at two barriers at once.
 The count `n : ℕ+` is positive by construction, so — unlike the earlier `Nat`-count
 formulation — no separate "valid counts" side condition is needed. Vacuously true for
 `done`/`err`. -/
@@ -352,7 +786,8 @@ def Config.WF : Config → Prop
   | .run s T =>
       (∀ b I A n, s.B b = ⟨I, A, some n⟩ →
           I.length + A.length ≤ (n : Nat) ∧ ∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)) ∧
-      (∀ b I A, s.B b = ⟨I, A, none⟩ → I = [] ∧ A = [])
+      (∀ b I A, s.B b = ⟨I, A, none⟩ → I = [] ∧ A = []) ∧
+      s.BlockInv
   | .done _ => True
   | .err _ => True
 
@@ -360,7 +795,7 @@ def Config.WF : Config → Prop
 configured-barrier condition is vacuous and every barrier is the empty unconfigured
 state. -/
 theorem WF_initial {T : CTA} : (Config.run State.initial T).WF := by
-  refine ⟨fun b I A n hB => ?_, fun b I A hB => ?_⟩
+  refine ⟨fun b I A n hB => ?_, fun b I A hB => ?_, State.BlockInv.initial⟩
   · simp [State.initial, BarrierState.unconfigured] at hB
   · simp only [State.initial, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
     exact ⟨hB.1.symm, hB.2.1.symm⟩
@@ -369,15 +804,25 @@ theorem WF_initial {T : CTA} : (Config.run State.initial T).WF := by
 theorem mem_of_mem_drop {α} {a : α} {l : List α} {d : Nat} (h : a ∈ l.drop d) : a ∈ l :=
   List.mem_of_mem_drop h
 
-/-- `WF` is preserved by every step — the main invariant-preservation lemma. Both
-conjuncts (the configured-barrier and unconfigured-barrier conditions) are
-re-established after each step. -/
+/-- `WF` is preserved by every step — the main invariant-preservation lemma. All three
+conjuncts (the configured-barrier and unconfigured-barrier conditions, and the blocking
+invariant `s.BlockInv`) are re-established after each step; the last uniformly via
+`blockInv_step`. -/
 theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF) : C'.WF := by
+  -- the blocking-invariant conjunct is preserved uniformly via `blockInv_step`
+  have hBIpres : ∀ s', C'.state? = some s' → s'.BlockInv := by
+    apply blockInv_step hstep
+    obtain ⟨ss, TT, hCeq⟩ := hstep.source_run
+    intro s hs
+    rw [hCeq] at hwf hs
+    simp only [Config.state?, Option.some.injEq] at hs
+    subst hs
+    exact hwf.2.2
   cases hstep with
   | @interleave s s' T i P' hi hbar hth =>
-    obtain ⟨hcond, hcondn⟩ := hwf
+    obtain ⟨hcond, hcondn, _⟩ := hwf
     generalize hpi : T.prog i = Pi at hth
-    refine ⟨?_, ?_⟩
+    refine ⟨?_, ?_, hBIpres _ rfl⟩
     · cases hth with
       | read_noop =>
         intro b I A n hB
@@ -481,8 +926,8 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
         · simp at hB
         · exact hcondn b I A hB
   | @recycle s T b₀ I₀ A₀ n₀ hb hfull hpark =>
-    obtain ⟨hcond, hcondn⟩ := hwf
-    refine ⟨?_, ?_⟩
+    obtain ⟨hcond, hcondn, _⟩ := hwf
+    refine ⟨?_, ?_, hBIpres _ rfl⟩
     · intro b I A n hB
       by_cases hbb : b = b₀
       · subst hbb
@@ -542,7 +987,7 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
     intro bb
     obtain ⟨bI, bA, bcnt, hbc⟩ : ∃ bI bA bcnt, s.B bb = ⟨bI, bA, bcnt⟩ := ⟨_, _, _, rfl⟩
     cases bcnt with
-    | none => obtain ⟨rfl, rfl⟩ := hwf.2 bb bI bA hbc; exact Or.inl hbc
+    | none => obtain ⟨rfl, rfl⟩ := hwf.2.1 bb bI bA hbc; exact Or.inl hbc
     | some n =>
       obtain ⟨hle, hpark⟩ := hwf.1 bb bI bA n hbc
       rcases lt_or_eq_of_le hle with hlt | heq
@@ -721,18 +1166,6 @@ def Config.cfgMeasure (S : Finset Barrier) : Config → Nat
   | .run s T => 3 * T.numCmds + 2 * s.numEnabled T + s.numConfigured S + 1
   | .done _ => 0
   | .err _ => 0
-
-/-- `updateMapOn f Y x` sends `a` to `x` if `a ∈ Y`, else to `f a`. -/
-theorem updateMapOn_apply {α β} [DecidableEq α] (f : α → β) (Y : List α) (x : β) (a : α) :
-    updateMapOn f Y x a = if a ∈ Y then x else f a := by
-  induction Y with
-  | nil => simp [updateMapOn]
-  | cons y ys ih =>
-    change Function.update (updateMapOn f ys x) y x a = _
-    rw [Function.update_apply, ih]
-    by_cases h : a = y
-    · subst h; simp
-    · simp [h, List.mem_cons]
 
 /-- The finite set of barriers mentioned by a CTA's programs — a support that
 contains every barrier that could ever be configured along an execution. -/
