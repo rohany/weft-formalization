@@ -461,6 +461,37 @@ theorem sync_drop_recycles {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
       simp only [Config.progOf] at hC hC'
       rw [hC] at hC'; simp at hC'
 
+/-- Reading a generation off `IsGenOf` at a known time: if `η` is a `bb`-command that
+executes at `m`, its generation is `recycleCount bb τ (m-1) + 1`. -/
+theorem isGenOf_recycleCount {C₀ : Config} {τ : List Config} {η : ProgPoint} {g : Nat}
+    {bb : Barrier} {m : Nat} (hgen : IsGenOf C₀ τ η g)
+    (hbb : (η.cmd C₀).bind Cmd.barrier? = some bb) (hm : IsTimeOf C₀ τ η m) :
+    g = recycleCount bb τ (m - 1) + 1 := by
+  obtain ⟨_, bb', hbb', hcase⟩ := hgen
+  rw [hbb] at hbb'; obtain rfl := Option.some.inj hbb'
+  rcases hcase with ⟨m', hm', hg⟩ | ⟨_, hno⟩
+  · rw [hg, IsTimeOf.unique hm hm']
+  · exact absurd ⟨m, hm⟩ hno
+
+/-- A `sync`'s execution step *is* a recycle of its barrier: at the step `n` where a
+`sync bb nn` command runs, the transition `τ[n-1] ⤳ τ[n]` recycles `bb`. -/
+theorem sync_time_recycles {C₀ : Config} {τ : List Config} {η : ProgPoint} {n : Nat}
+    {bb : Barrier} {nn : ℕ+} (hm : IsTimeOf C₀ τ η n)
+    (hcmd : η.cmd C₀ = some (Cmd.sync bb nn)) :
+    ∃ C C', τ[n - 1]? = some C ∧ τ[n]? = some C' ∧ stepRecyclesBarrier bb C C' = true := by
+  obtain ⟨hτ, hidxL, j, C, C', hn, hCj, hCj1, hCeq, hC'eq⟩ := hm
+  subst hn
+  refine ⟨C, C', by rw [show j + 1 - 1 = j by omega]; exact hCj, hCj1, ?_⟩
+  have hstep : CTAStep C C' := chain_step hτ.1.subtrace hCj hCj1
+  have hhead : (C₀.progOf η.thread)[η.idx]'hidxL = Cmd.sync bb nn := by
+    have hc := hcmd
+    simp only [ProgPoint.cmd] at hc
+    rw [List.getElem?_eq_getElem hidxL, Option.some.injEq] at hc
+    exact hc
+  have hCsync : C.progOf η.thread = Cmd.sync bb nn :: C'.progOf η.thread := by
+    rw [hCeq, hC'eq, List.drop_eq_getElem_cons hidxL, hhead]
+  exact sync_drop_recycles hstep hCsync rfl
+
 /-- The program point at index `|C₀.progOf t| - |Cₙ.progOf t|` names the command at
 the head of `Cₙ.progOf t`, when the latter is a suffix of `C₀.progOf t`. -/
 theorem cmd_at_last {C₀ Cₙ : Config} {t : ThreadId} {cmd : Cmd} {c : Prog}
