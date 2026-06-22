@@ -78,11 +78,11 @@ def Config.state? : Config → Option State
   | .err _ => none
 
 /-- A barrier state is *full* when it is configured (count `some n`) and exactly
-`n` threads have registered (`|I| + |A| = n`) — the situation in which
+`n` threads have registered (`|I| + A = n`) — the situation in which
 `CTAStep.recycle` fires. -/
 def BarrierState.isFull (β : BarrierState) : Bool :=
   match β.count with
-  | some n => β.synced.length + β.arrived.length == (n : Nat)
+  | some n => β.synced.length + β.arrived == (n : Nat)
   | none => false
 
 /-- The step `C ⤳ C'` recycles barrier `b`: `b` is configured-and-full in `C` and
@@ -909,12 +909,12 @@ theorem CTAStep.source_run {C C' : Config} (h : CTAStep C C') :
 covering every barrier. For each barrier `b`:
 
 * if it is **configured** (`s.B b = ⟨I, A, some n⟩`), registration is non-empty
-  (`0 < |I|+|A|`) and does not over-fill (`|I|+|A| ≤ n`), and every synced thread is
+  (`0 < |I|+A`) and does not over-fill (`|I|+A ≤ n`), and every synced thread is
   *parked* at `sync b n` (its program is headed by exactly that command) — note the
-  non-emptiness rules out the unreachable degenerate state `⟨[], [], some n⟩`
+  non-emptiness rules out the unreachable degenerate state `⟨[], 0, some n⟩`
   (configured yet with nothing registered), which the `≤ n` bound alone permits; and
-* if it is **unconfigured** (`s.B b = ⟨I, A, none⟩`), its registration lists are
-  empty (ruling out a malformed `⟨I, A, none⟩` with threads registered).
+* if it is **unconfigured** (`s.B b = ⟨I, A, none⟩`), its synced list is empty and
+  its arrived count is zero (ruling out a malformed `⟨I, A, none⟩` with threads registered).
 
 Additionally `s.BlockInv` holds: the **syncer** lists are duplicate-free (a thread can be
 a duplicate *arriver* but never a duplicate *syncer* — syncing disables it until the next
@@ -925,9 +925,9 @@ formulation — no separate "valid counts" side condition is needed. Vacuously t
 def Config.WF : Config → Prop
   | .run s T =>
       (∀ b I A n, s.B b = ⟨I, A, some n⟩ →
-          I.length + A.length ≤ (n : Nat) ∧ (∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)) ∧
-            0 < I.length + A.length) ∧
-      (∀ b I A, s.B b = ⟨I, A, none⟩ → I = [] ∧ A = []) ∧
+          I.length + A ≤ (n : Nat) ∧ (∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)) ∧
+            0 < I.length + A) ∧
+      (∀ b I A, s.B b = ⟨I, A, none⟩ → I = [] ∧ A = 0) ∧
       s.BlockInv
   | .done _ => True
   | .err _ => True
@@ -1001,8 +1001,7 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
           obtain ⟨rfl, rfl, rfl⟩ := hB
           obtain ⟨_, hcpark, _⟩ := hcond _ _ _ _ hb
           subst hbq
-          refine ⟨by simp only [List.length_cons]; omega, (fun i' hi' => ?_),
-            by simp only [List.length_cons]; omega⟩
+          refine ⟨by omega, (fun i' hi' => ?_), by omega⟩
           have hne : i' ≠ i := by
             rintro rfl; have := hcpark i' hi'; rw [hpi] at this; simp at this
           simp only [CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
@@ -1126,7 +1125,7 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
   -- A full barrier would either let `recycle` fire (its synced list empty, or its
   -- parked threads are `sync`-headed — both contradict stuckness/`hcon`).
   have hbar : ∀ bb, s.B bb = BarrierState.unconfigured ∨
-      ∃ I A n, s.B bb = ⟨I, A, some n⟩ ∧ I.length + A.length < (n : Nat) := by
+      ∃ I A n, s.B bb = ⟨I, A, some n⟩ ∧ I.length + A < (n : Nat) := by
     intro bb
     obtain ⟨bI, bA, bcnt, hbc⟩ : ∃ bI bA bcnt, s.B bb = ⟨bI, bA, bcnt⟩ := ⟨_, _, _, rfl⟩
     cases bcnt with
@@ -1147,7 +1146,7 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
             simp only [List.head?_cons, Option.some.injEq] at hpk
             exact hcon i₀ x t bb hp (by rw [hpk]; rfl)
   -- Since no barrier is full, the `done` rule's premise `hnofull` holds.
-  have hnofull : ∀ b I A n, s.B b = ⟨I, A, some n⟩ → I.length + A.length < (n : Nat) := by
+  have hnofull : ∀ b I A n, s.B b = ⟨I, A, some n⟩ → I.length + A < (n : Nat) := by
     intro b I A n hb
     rcases hbar b with hu | ⟨I', A', n', hb', hlt⟩
     · rw [hb] at hu; simp [BarrierState.unconfigured] at hu
@@ -1470,21 +1469,21 @@ theorem step_decreases (S : Finset Barrier) {C C' : Config}
     | @arrive_configure _ _ b₀ n _ he hb0 =>
       have h1 := numCmds_set hi P'
       have h2 : (T.prog i).length = P'.length + 1 := by rw [hpi]; simp
-      have hE : ({s with B := Function.update s.B b₀ ⟨[], [i], some n⟩} : State).numEnabled
+      have hE : ({s with B := Function.update s.B b₀ ⟨[], 1, some n⟩} : State).numEnabled
           (T.set i hi P') = s.numEnabled T := rfl
-      have hCf : ({s with B := Function.update s.B b₀ ⟨[], [i], some n⟩} : State).numConfigured S
+      have hCf : ({s with B := Function.update s.B b₀ ⟨[], 1, some n⟩} : State).numConfigured S
           ≤ s.numConfigured S + 1 := numConfigured_configure_le
       simp only [Config.cfgMeasure, hE]; omega
     | @arrive_register _ _ b₀ n _ I A he hb0 hpos hlt =>
       have h1 := numCmds_set hi P'
       have h2 : (T.prog i).length = P'.length + 1 := by rw [hpi]; simp
-      have hE : ({s with B := Function.update s.B b₀ ⟨I, i :: A, some n⟩} : State).numEnabled
+      have hE : ({s with B := Function.update s.B b₀ ⟨I, A + 1, some n⟩} : State).numEnabled
           (T.set i hi P') = s.numEnabled T := rfl
-      have hCf : ({s with B := Function.update s.B b₀ ⟨I, i :: A, some n⟩} : State).numConfigured S
+      have hCf : ({s with B := Function.update s.B b₀ ⟨I, A + 1, some n⟩} : State).numConfigured S
           = s.numConfigured S := numConfigured_reconfigure rfl (by rw [hb0]; rfl)
       simp only [Config.cfgMeasure, hE, hCf]; omega
     | @sync_configure _ _ b₀ n c he hb0 =>
-      set s' : State := ⟨Function.update s.E i false, Function.update s.B b₀ ⟨[i], [], some n⟩⟩
+      set s' : State := ⟨Function.update s.E i false, Function.update s.B b₀ ⟨[i], 0, some n⟩⟩
       have h1 := numCmds_set hi (Cmd.sync b₀ n :: c)
       have h2 : (T.prog i).length = (Cmd.sync b₀ n :: c).length := by rw [hpi]
       have hE : s'.numEnabled (T.set i hi (Cmd.sync b₀ n :: c)) + 1 = s.numEnabled T :=
