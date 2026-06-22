@@ -1529,4 +1529,595 @@ theorem Config.WellSynchronized.pow_barriers_restored {I : CTA}
       hcmd (Config.done s_d) (List.mem_of_mem_getLast? hlast) s_d rfl
     rw [hfrozen]
 
+/-!
+## Lemma 3 (§ "Structure of `G` across iteration batches"), two-batch case
+
+The document's Lemma 3 (`lemma:structure-g-across-iterations`) states that, across
+consecutive batches of the §1 unrolling `I ^ k`, the recovered generation mapping is
+constant up to a per-barrier offset. Here we state the **simplest instance**: just two
+batches, i.e. the program `I ^ k ⨾ I ^ k` (the document's `I₀^k ; I₁^k`, with `n = 0`).
+
+The offset for a barrier `b` is the number of times one batch `I ^ k` recycles `b`,
+which `Config.WellSynchronized.pow_barriers_advance_count` computes to be exactly
+`k · arrivers(b) / arrival-count(b)` (here `k = I.loopK h`); this is the same count that
+already appears in `pow_barriers_advance_count` / `arrivedLen_preserved`.
+-/
+
+/-- **Full state restoration from `State.initial`.** A successful run of `I ^ k`
+(`k = I.loopK h`) starting from `State.initial` returns the *entire* state to
+`State.initial`: the terminal `done s_d` has `s_d = State.initial`.
+
+This is stronger than the general `pow_barriers_restored` (which restores only arrived
+*counts*, `ArrivedCountEquiv`), and holds specifically because we start from `initial`.
+At the terminal configuration every barrier's `arrived` list is empty (`pow_barriers_restored`),
+its `synced` list is empty (`done` leaves no thread parked, so `WF`'s parked clause forces it),
+and hence — by `WF`'s "configured ⟹ non-empty registration" conjunct — it is unconfigured;
+and every thread is enabled (`EnabledInv`: a disabled thread would be parked at some syncer,
+but there are none). It is the fact that lets the second batch of `I ^ k ⨾ I ^ k` *replay*
+the first batch's schedule verbatim. -/
+theorem pow_done_state_initial {I : CTA} (h : I.ConsistentArrivalCounts) {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial (I ^ I.loopK h)) τ)
+    {s_d : State} (hlast : τ.getLast? = some (Config.done s_d)) :
+    s_d = State.initial := by
+  have hchain : List.IsChain CTAStep τ := hτ.1.1.subtrace
+  have hhead := hτ.1.2
+  have hAC : s_d.ArrivedCountEquiv State.initial :=
+    Config.WellSynchronized.pow_barriers_restored h WF_initial (fun _ => rfl) hτ hlast
+  obtain ⟨y, hy_mem, hy_step⟩ : ∃ y ∈ τ, CTAStep y (Config.done s_d) := by
+    rcases getLast_has_pred_mem hchain hlast with hh | hp
+    · rw [hhead] at hh; exact absurd hh (by simp)
+    · exact hp
+  have hwf_y : y.WF := WF_chain hchain hhead WF_initial y hy_mem
+  have hEnab : ∀ s, y.state? = some s → s.EnabledInv :=
+    enabledInv_chain hchain hhead
+      (by intro s hs; simp only [Config.state?, Option.some.injEq] at hs; subst hs
+          exact State.EnabledInv.initial) y hy_mem
+  cases hy_step with
+  | @done sd T hdone hnofull =>
+    obtain ⟨hcfg, huncfg, _⟩ := hwf_y
+    have hEnabled : s_d.EnabledInv := hEnab s_d rfl
+    -- every barrier is unconfigured at the terminal state
+    have hBunc : ∀ b, s_d.B b = BarrierState.unconfigured := by
+      intro b
+      obtain ⟨sy, ar, cnt, hbeq⟩ : ∃ sy ar cnt, s_d.B b = ⟨sy, ar, cnt⟩ := ⟨_, _, _, rfl⟩
+      have har : ar = [] := by
+        have hl : (s_d.B b).arrived.length = 0 := hAC b
+        rw [hbeq] at hl; simpa using hl
+      have hsy : sy = [] := by
+        cases cnt with
+        | none => exact (huncfg b sy ar hbeq).1
+        | some n =>
+          obtain ⟨_, hpark, _⟩ := hcfg b sy ar n hbeq
+          cases sy with
+          | nil => rfl
+          | cons i₀ rest =>
+            exfalso
+            have hh := hpark i₀ (by simp)
+            have hTnil : T.prog i₀ = [] := by
+              by_cases hmem : i₀ ∈ T.ids
+              · exact hdone i₀ hmem
+              · exact T.nil_outside_ids i₀ hmem
+            rw [hTnil] at hh; simp at hh
+      have hcnt : cnt = none := by
+        cases cnt with
+        | none => rfl
+        | some n =>
+          exfalso
+          obtain ⟨_, _, hpos⟩ := hcfg b sy ar n hbeq
+          rw [hsy, har] at hpos; simp at hpos
+      subst har; subst hsy; subst hcnt; exact hbeq
+    -- every thread is enabled at the terminal state
+    have hE : ∀ i, s_d.E i = true := by
+      intro i
+      by_contra hcon
+      rw [Bool.not_eq_true] at hcon
+      obtain ⟨b, hb'⟩ := hEnabled i hcon
+      rw [hBunc b] at hb'; simp [BarrierState.unconfigured] at hb'
+    have hEeq : s_d.E = State.initial.E := funext hE
+    have hBeq : s_d.B = State.initial.B := funext hBunc
+    calc s_d = ⟨s_d.E, s_d.B⟩ := rfl
+      _ = ⟨State.initial.E, State.initial.B⟩ := by rw [hEeq, hBeq]
+      _ = State.initial := rfl
+
+/-- `Config.seqLift` preserves the state component: appending `B`'s programs to a
+configuration changes only the programs, not the state `(E, B)`. -/
+theorem Config.seqLift_state? (A B : CTA) (X : Config) :
+    (Config.seqLift A B X).state? = X.state? := by
+  cases X <;> rfl
+
+/-- Lifting two configurations into `A ⨾ B` (`Config.seqLift`) does not change whether the
+step between them recycles `b`: `stepRecyclesBarrier` reads only the state, which `seqLift`
+preserves. This is why the lifted first batch recycles exactly as the standalone run does. -/
+theorem stepRecyclesBarrier_seqLift (A B : CTA) (b : Barrier) (X Y : Config) :
+    stepRecyclesBarrier b (Config.seqLift A B X) (Config.seqLift A B Y)
+      = stepRecyclesBarrier b X Y := by
+  unfold stepRecyclesBarrier
+  rw [Config.seqLift_state?, Config.seqLift_state?]
+
+/-- The recycle count is invariant under lifting a whole trace into `A ⨾ B`:
+`recycleCount b (l.map (seqLift A B)) M = recycleCount b l M`. -/
+theorem recycleCount_map_seqLift (A B : CTA) (b : Barrier) (l : List Config) (M : Nat) :
+    recycleCount b (l.map (Config.seqLift A B)) M = recycleCount b l M := by
+  unfold recycleCount
+  apply List.countP_congr
+  intro j _
+  simp only [List.getElem?_map]
+  rcases l[j]? with _ | C
+  · rfl
+  · rcases l[j+1]? with _ | C'
+    · rfl
+    · simp only [Option.map_some]
+      rw [stepRecyclesBarrier_seqLift]
+
+/-- `recycleCount b · M` depends only on the first `M+1` configurations of a trace: two
+traces agreeing on indices `0..M` have the same recycle count up to step `M`. -/
+theorem recycleCount_eq_of_getElem?_eq (b : Barrier) {τ₁ τ₂ : List Config} {M : Nat}
+    (h : ∀ j ≤ M, τ₁[j]? = τ₂[j]?) : recycleCount b τ₁ M = recycleCount b τ₂ M := by
+  unfold recycleCount
+  apply List.countP_congr
+  intro j hj
+  rw [List.mem_range] at hj
+  rw [h j (by omega), h (j + 1) (by omega)]
+
+/-- Recycle count of a trace that has `σ` as a suffix starting at index `p` splits as the
+count over the first `p` steps plus the count over `σ`: if `τ[p + r]? = σ[r]?` for all `r`,
+then `recycleCount b τ (p + K) = recycleCount b τ p + recycleCount b σ K`. -/
+theorem recycleCount_suffix (b : Barrier) {τ σ : List Config} {p K : Nat}
+    (h : ∀ r, τ[p + r]? = σ[r]?) :
+    recycleCount b τ (p + K) = recycleCount b τ p + recycleCount b σ K := by
+  unfold recycleCount
+  rw [List.range_add, List.countP_append, List.countP_map]
+  congr 1
+  apply List.countP_congr
+  intro r _
+  simp only [Function.comp_apply]
+  rw [h r, show p + r + 1 = p + (r + 1) from by omega, h (r + 1)]
+
+/-- A `run → run` step preserves the CTA's thread set: `interleave` updates one program
+(`CTA.set`) and `recycle` advances parked threads (`CTA.wake`), both keeping `ids`. -/
+theorem CTAStep.run_ids_eq {s s' : State} {T T' : CTA}
+    (hstep : CTAStep (Config.run s T) (Config.run s' T')) : T'.ids = T.ids := by
+  cases hstep with
+  | interleave hi hbar hth => rfl
+  | recycle hb hfull hpark => rfl
+
+/-- The thread set is invariant along a chain: every `run` configuration of a trace whose
+head is `run _ A` carries a CTA with `ids = A.ids`. -/
+theorem run_ids_chain {A : CTA} : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
+    τ.head? = some C₀ → (∀ s T, C₀ = Config.run s T → T.ids = A.ids) →
+    ∀ C ∈ τ, ∀ s T, C = Config.run s T → T.ids = A.ids := by
+  intro τ
+  induction τ with
+  | nil => intro C₀ _ hhead; simp at hhead
+  | cons a rest ih =>
+    intro C₀ hchain hhead hC₀ C hC
+    rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead
+    cases rest with
+    | nil => rw [List.mem_singleton] at hC; subst hC; exact hC₀
+    | cons b₁ rest' =>
+      rw [List.isChain_cons_cons] at hchain
+      obtain ⟨hstep, hchain'⟩ := hchain
+      have hb1 : ∀ s T, b₁ = Config.run s T → T.ids = A.ids := by
+        intro s' T' hb1eq
+        obtain ⟨sa, Ta, haeq⟩ := hstep.source_run
+        have hTa : Ta.ids = A.ids := hC₀ sa Ta haeq
+        rw [haeq, hb1eq] at hstep
+        rw [hstep.run_ids_eq, hTa]
+      rw [List.mem_cons] at hC
+      rcases hC with rfl | hC'
+      · exact hC₀
+      · exact ih hchain' rfl hb1 C hC'
+
+/-- The configuration just before a successful `A`-trace's terminal `done sd`, lifted into
+`A ⨾ A`, is `run sd A` — the "first batch done, second batch poised" configuration. (Its
+CTA has all programs empty by `progOf_penultimate_done`, and thread set `A.ids` by
+`run_ids_chain`, so appending `A` recovers exactly `A`.) -/
+theorem seqLift_penultimate {A : CTA} {t : List Config} (hchain : List.IsChain CTAStep t)
+    (hhead : t.head? = some (Config.run State.initial A))
+    {sd : State} (hlast : t.getLast? = some (Config.done sd)) (hdrop : t.dropLast ≠ []) :
+    Config.seqLift A A (t.dropLast.getLast hdrop) = Config.run sd A := by
+  have hne : t ≠ [] := fun h => by rw [h] at hlast; simp at hlast
+  have hgl : t.getLast hne = Config.done sd := by
+    have h := List.getLast?_eq_some_getLast hne; rw [hlast, Option.some.injEq] at h; exact h.symm
+  have e1 : t.dropLast ++ [Config.done sd] = t := by
+    have h := List.dropLast_concat_getLast hne; rwa [hgl] at h
+  have e2 : t.dropLast.dropLast ++ [t.dropLast.getLast hdrop] = t.dropLast :=
+    List.dropLast_concat_getLast hdrop
+  have hdecomp : t.dropLast.dropLast ++ (t.dropLast.getLast hdrop) :: Config.done sd :: [] = t := by
+    rw [show (t.dropLast.getLast hdrop) :: Config.done sd :: []
+          = [t.dropLast.getLast hdrop] ++ [Config.done sd] from rfl, ← List.append_assoc, e2, e1]
+  have hstep : CTAStep (t.dropLast.getLast hdrop) (Config.done sd) :=
+    List.isChain_iff_forall_rel_of_append_cons_cons.mp hchain hdecomp.symm
+  have hXmem : (t.dropLast.getLast hdrop) ∈ t :=
+    List.dropLast_subset _ (List.getLast_mem hdrop)
+  obtain ⟨sX, T, hXeq⟩ := hstep.source_run
+  have hTids : T.ids = A.ids :=
+    run_ids_chain hchain hhead
+      (by intro s T' he; rw [Config.run.injEq] at he; rw [← he.2])
+      (t.dropLast.getLast hdrop) hXmem sX T hXeq
+  rw [hXeq] at hstep ⊢
+  cases hstep with
+  | done hdone _ =>
+    have hTprog : ∀ i, T.prog i = [] := by
+      intro i; by_cases hi : i ∈ T.ids
+      · exact hdone i hi
+      · exact T.nil_outside_ids i hi
+    have hAeq : T.appendTail A = A := by
+      apply CTA.ext
+      · show T.ids ∪ A.ids = A.ids; rw [hTids, Finset.union_self]
+      · funext i; show T.prog i ++ A.prog i = A.prog i; rw [hTprog i, List.nil_append]
+    show Config.run sd (T.appendTail A) = Config.run sd A
+    rw [hAeq]
+
+/-- **The replay trace.** Given a successful `A`-trace `t₁` from `State.initial` that ends in
+`done State.initial` (full restoration), the list `(t₁.dropLast.map (seqLift A A)) ++ t₁.tail`
+is a successful trace of `A ⨾ A`: it lifts `t₁`'s execution as the first batch, and — since
+the boundary configuration is `run State.initial A` again (`seqLift_penultimate`) — replays
+`t₁` verbatim as the second batch. -/
+theorem replay_trace (A : CTA) {t₁ : List Config}
+    (ht₁ : IsSuccessfulTraceFrom (Config.run State.initial A) t₁)
+    (hlast : t₁.getLast? = some (Config.done State.initial)) :
+    IsSuccessfulTraceFrom (Config.run State.initial (A.seq A rfl))
+      (t₁.dropLast.map (Config.seqLift A A) ++ t₁.tail) := by
+  have hchain : List.IsChain CTAStep t₁ := ht₁.1.1.subtrace
+  have hhead : t₁.head? = some (Config.run State.initial A) := ht₁.1.2
+  obtain ⟨c1, trest, hteq⟩ : ∃ c1 trest, t₁ = Config.run State.initial A :: c1 :: trest := by
+    rcases t₁ with _ | ⟨a, _ | ⟨b, l⟩⟩
+    · simp at hhead
+    · rw [List.head?_cons, Option.some.injEq] at hhead
+      rw [List.getLast?_singleton, Option.some.injEq] at hlast
+      rw [hhead] at hlast; exact absurd hlast (by simp)
+    · rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead; exact ⟨b, l, rfl⟩
+  have hdrop : t₁.dropLast ≠ [] := by rw [hteq]; simp
+  have hPchain : List.IsChain CTAStep (t₁.dropLast.map (Config.seqLift A A)) :=
+    isChain_seqLift A A (mem_dropLast_isRun hchain) hchain.dropLast
+  have hCstar : Config.seqLift A A (t₁.dropLast.getLast hdrop) = Config.run State.initial A :=
+    seqLift_penultimate hchain hhead hlast hdrop
+  have htaileq : t₁.tail = c1 :: trest := by rw [hteq]; rfl
+  have hchain2 := hchain
+  rw [hteq, List.isChain_cons_cons] at hchain2
+  have htailchain : List.IsChain CTAStep t₁.tail := by rw [htaileq]; exact hchain2.2
+  have hstep0 : CTAStep (Config.run State.initial A) c1 := hchain2.1
+  have hPlast : (t₁.dropLast.map (Config.seqLift A A)).getLast? = some (Config.run State.initial A) := by
+    rw [List.getLast?_map, List.getLast?_eq_some_getLast hdrop, Option.map_some, hCstar]
+  have htailglast : t₁.tail.getLast? = some (Config.done State.initial) := by
+    rw [htaileq]; rw [hteq, List.getLast?_cons_cons] at hlast; exact hlast
+  refine ⟨⟨⟨?_, Config.done State.initial, ?_, Or.inl ⟨State.initial, rfl⟩⟩, ?_⟩,
+    State.initial, ?_⟩
+  · -- chain
+    apply hPchain.append htailchain
+    intro x hx y hy
+    rw [hPlast, Option.mem_some_iff] at hx; subst hx
+    rw [htaileq, List.head?_cons, Option.mem_some_iff] at hy; subst hy
+    exact hstep0
+  · -- ends: getLast? = some (done init)
+    exact List.mem_getLast?_append_of_mem_getLast? htailglast
+  · -- head
+    rw [hteq, List.dropLast_cons_cons, List.map_cons, List.cons_append, List.head?_cons,
+      show Config.seqLift A A (Config.run State.initial A)
+        = Config.run State.initial (A.appendTail A) from rfl, CTA.appendTail_eq_seq rfl]
+  · -- successful: getLast? = some (done init)
+    exact List.mem_getLast?_append_of_mem_getLast? htailglast
+
+/-- A step into a `done` configuration never recycles: the `done` rule keeps the state
+fixed, so `b` cannot be both full (source) and unconfigured (target). -/
+theorem stepRecyclesBarrier_to_done (b : Barrier) (C : Config) (s : State)
+    (hstep : CTAStep C (Config.done s)) : stepRecyclesBarrier b C (Config.done s) = false := by
+  obtain ⟨sC, T, hCeq⟩ := hstep.source_run
+  rw [hCeq] at hstep ⊢
+  cases hstep with
+  | done hdone _ =>
+    simp only [stepRecyclesBarrier, Config.state?]
+    by_cases hf : (s.B b).isFull = true
+    · rw [hf, Bool.true_and, decide_eq_false]
+      exact BarrierState.isFull_ne_unconfigured hf
+    · rw [Bool.not_eq_true] at hf; rw [hf, Bool.false_and]
+
+/-- A non-recycling step leaves the recycle count unchanged across that step. -/
+theorem recycleCount_succ_of_not_recycle (b : Barrier) (τ : List Config) {p : Nat} {C C' : Config}
+    (hp : τ[p]? = some C) (hp1 : τ[p + 1]? = some C') (hnr : stepRecyclesBarrier b C C' = false) :
+    recycleCount b τ (p + 1) = recycleCount b τ p := by
+  unfold recycleCount
+  rw [List.range_succ, List.countP_append]
+  simp [hp, hp1, hnr]
+
+/-- The last step of a successful trace (into `done`) does not recycle, so the recycle count
+over the whole trace equals the count over its `dropLast` steps. -/
+theorem recycleCount_done_last {τ : List Config} {sd : State} {b : Barrier}
+    (hchain : List.IsChain CTAStep τ) (hlast : τ.getLast? = some (Config.done sd))
+    (h2 : 2 ≤ τ.length) :
+    recycleCount b τ (τ.length - 1) = recycleCount b τ (τ.length - 2) := by
+  obtain ⟨X, hX⟩ : ∃ X, τ[τ.length - 2]? = some X :=
+    ⟨_, List.getElem?_eq_getElem (by omega)⟩
+  have hdone : τ[τ.length - 2 + 1]? = some (Config.done sd) := by
+    rw [show τ.length - 2 + 1 = τ.length - 1 by omega, ← List.getLast?_eq_getElem?]; exact hlast
+  have hstep : CTAStep X (Config.done sd) := chain_step hchain hX hdone
+  have hnr := stepRecyclesBarrier_to_done b X sd hstep
+  have := recycleCount_succ_of_not_recycle b τ hX hdone hnr
+  rwa [show τ.length - 2 + 1 = τ.length - 1 by omega] at this
+
+/-- A barrier-registering command's `barrier?` agrees with the barrier of its
+`barrierRef`: both single out the same `b` for `arrive`/`sync`. -/
+theorem Cmd.barrier?_of_barrierRef {c : Cmd} {b : Barrier} {n : ℕ+}
+    (hbr : Cmd.barrierRef c = some (b, n)) : Cmd.barrier? c = some b := by
+  cases c with
+  | read g => simp [Cmd.barrierRef] at hbr
+  | write g => simp [Cmd.barrierRef] at hbr
+  | arrive b' n' =>
+    simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbr
+    obtain ⟨rfl, -⟩ := hbr; rfl
+  | sync b' n' =>
+    simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbr
+    obtain ⟨rfl, -⟩ := hbr; rfl
+
+/-- **The recycle-count core of Lemma 3 (two-batch case).** *Stated, not yet proved.*
+This isolates the one genuinely hard fact behind `second_batch_gen_offset`: there is a
+successful trace `τ` of `I ^ k ⨾ I ^ k` along which, for every barrier instruction, `b`
+has been recycled exactly `k · arrivers(b) / arrival-count(b)` *more* times just before
+the **second** batch's copy executes than just before the **first** batch's copy. Since a
+barrier instruction's generation is `(recycles of its barrier before it executes) + 1`
+(Definition 5, `pointGen`), this offset is precisely the generation offset claimed by
+Lemma 3; `second_batch_gen_offset` is the routine `pointGen`-to-`recycleCount` repackaging
+of this statement (it converts each generation into a recycle count via the instruction's
+execution time and then applies this lemma).
+
+Proving it is the substance of the paper's Lemma 3: it needs a trace that runs the first
+`I ^ k` to completion and then *replays the same schedule* on the second `I ^ k`, so the
+recycle counts line up. All the conceptual prerequisites are now in place:
+
+* `pow_done_state_initial` — the batch-boundary state is *exactly* `State.initial` (full
+  restoration from `initial`, established via the new `WF` non-emptiness conjunct and the
+  `EnabledInv` invariant), so the second batch can replay the first batch's trace verbatim;
+* `recycleCount_map_seqLift` / `stepRecyclesBarrier_seqLift` — the lifted first batch
+  recycles exactly as the standalone `I ^ k` run does;
+* `recycleCount_eq_of_getElem?_eq` — recycle counts depend only on a trace prefix;
+* `Config.WellSynchronized.pow_barriers_advance_count` — one batch recycles `b` exactly
+  `k · arrivers(b) / arrival-count(b)` times.
+
+What remains is the mechanical assembly: glue `(t₁.dropLast).map (seqLift A A) ++ t₁.tail`
+into a successful trace of `A ⨾ A` (`A := I ^ k`), locate the two instruction times in the
+two batches via the progOf-length invariants (as in `seq_no_happensBefore_B_to_A`), and add
+up the recycle counts with the lemmas above. -/
+theorem CTA.WellSynchronized.second_batch_recycle_offset {I : CTA}
+    (h : I.ConsistentArrivalCounts) {k : Nat} (hk : k = I.loopK h)
+    (hWS0 : (I ^ k).WellSynchronized)
+    (hWS1 : ((I ^ k).seq (I ^ k) rfl).WellSynchronized) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k).seq (I ^ k) rfl)) τ ∧
+      ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (n : ℕ+) (m₁ m₂ : Nat),
+        ((I ^ k).prog t)[j]? = some c → Cmd.barrierRef c = some (b, n) →
+        IsTimeOf (Config.run State.initial ((I ^ k).seq (I ^ k) rfl)) τ ⟨t, j⟩ m₁ →
+        IsTimeOf (Config.run State.initial ((I ^ k).seq (I ^ k) rfl)) τ
+            ⟨t, ((I ^ k).prog t).length + j⟩ m₂ →
+        recycleCount b τ (m₂ - 1)
+          = recycleCount b τ (m₁ - 1) + k * I.arrivers b / I.arrivalCount h b := by
+  subst hk
+  set A := I ^ I.loopK h with hA
+  obtain ⟨t₁, ht₁⟩ := hWS0.exists_successfulTrace
+  obtain ⟨sd₁, ht₁L⟩ := ht₁.2
+  have hinit : sd₁ = State.initial := pow_done_state_initial h ht₁ ht₁L
+  rw [hinit] at ht₁L
+  refine ⟨_, replay_trace A ht₁ ht₁L, ?_⟩
+  intro t j c b n m₁ m₂ hcj hbr ht1 ht2
+  have hchain1 : List.IsChain CTAStep t₁ := ht₁.1.1.subtrace
+  have hhead1 : t₁.head? = some (Config.run State.initial A) := ht₁.1.2
+  obtain ⟨hjL, -⟩ := List.getElem?_eq_some_iff.mp hcj
+  -- t₁ has length ≥ 2 (starts `run`, ends `done`), so its `dropLast` is nonempty
+  have hne : t₁ ≠ [] := fun hd => by rw [hd] at hhead1; simp at hhead1
+  obtain ⟨a, l, htl⟩ := List.exists_cons_of_ne_nil hne
+  have hlne : l ≠ [] := by
+    rintro rfl
+    rw [htl] at hhead1 ht₁L
+    simp only [List.head?_cons, Option.some.injEq] at hhead1
+    simp only [List.getLast?_singleton, Option.some.injEq] at ht₁L
+    rw [hhead1] at ht₁L; exact absurd ht₁L (by simp)
+  have h2 : 2 ≤ t₁.length := by
+    rw [htl, List.length_cons]; have := List.length_pos_of_ne_nil hlne; omega
+  have hdrop : t₁.dropLast ≠ [] := by
+    intro hd; have : t₁.length - 1 = 0 := by rw [← List.length_dropLast, hd]; rfl
+    omega
+  -- the trace has length ≥ 3 (its penultimate config is all-empty, but `A.prog t ≠ []`)
+  have hpenult : (t₁.dropLast.getLast hdrop).progOf t = [] :=
+    progOf_penultimate_done hchain1 ht₁L (List.getLast?_eq_some_getLast hdrop) t
+  have hN3 : 3 ≤ t₁.length := by
+    rcases Nat.lt_or_ge t₁.length 3 with hlt | hge
+    · exfalso
+      have hlen2 : t₁.length = 2 := by omega
+      have e1 : t₁.dropLast.getLast? = t₁.head? := by
+        rw [List.head?_eq_getElem?, List.getLast?_eq_getElem?, List.length_dropLast,
+          List.getElem?_dropLast, if_pos (by omega)]
+        congr 1; omega
+      rw [List.getLast?_eq_some_getLast hdrop, hhead1] at e1
+      have hpen0 : t₁.dropLast.getLast hdrop = Config.run State.initial A :=
+        (Option.some.injEq _ _).mp e1
+      rw [hpen0, show (Config.run State.initial A).progOf t = A.prog t from rfl] at hpenult
+      rw [hpenult] at hjL; exact absurd hjL (by simp)
+    · exact hge
+  -- start-config program splits in two; boundary config is `run init A`
+  have hC0 : (Config.run State.initial (A.seq A rfl)).progOf t = A.prog t ++ A.prog t := rfl
+  have hCstar : Config.seqLift A A (t₁.dropLast.getLast hdrop) = Config.run State.initial A :=
+    seqLift_penultimate hchain1 hhead1 ht₁L hdrop
+  -- lengths and list structure of the replay trace `τ = P_lift ++ t₁.tail = Q ++ t₁`
+  have hPLlen : (t₁.dropLast.map (Config.seqLift A A)).length = t₁.length - 1 := by
+    rw [List.length_map, List.length_dropLast]
+  have hPLne : (t₁.dropLast.map (Config.seqLift A A)) ≠ [] := by
+    rw [Ne, List.map_eq_nil_iff]; exact hdrop
+  have ht₁cons : Config.run State.initial A :: t₁.tail = t₁ := by
+    rw [htl] at hhead1 ⊢
+    simp only [List.head?_cons, Option.some.injEq] at hhead1
+    rw [List.tail_cons, hhead1]
+  have hPLgl : (t₁.dropLast.map (Config.seqLift A A)).getLast hPLne = Config.run State.initial A := by
+    have hg : (t₁.dropLast.map (Config.seqLift A A)).getLast? = some (Config.run State.initial A) := by
+      rw [List.getLast?_map, List.getLast?_eq_some_getLast hdrop, Option.map_some, hCstar]
+    have hh := List.getLast?_eq_some_getLast hPLne; rw [hg] at hh; exact (Option.some.injEq _ _).mp hh.symm
+  have htlist : (t₁.dropLast.map (Config.seqLift A A)) ++ t₁.tail
+      = (t₁.dropLast.map (Config.seqLift A A)).dropLast ++ t₁ := by
+    conv_lhs => rw [← List.dropLast_concat_getLast hPLne]
+    rw [hPLgl, List.append_assoc, List.singleton_append, ht₁cons]
+  have hQlen : ((t₁.dropLast.map (Config.seqLift A A)).dropLast).length = t₁.length - 2 := by
+    rw [List.length_dropLast, hPLlen]; omega
+  -- suffix: the second batch of `τ` is exactly `t₁`
+  have hsnd : ∀ r, ((t₁.dropLast.map (Config.seqLift A A)) ++ t₁.tail)[(t₁.length - 2) + r]? = t₁[r]? := by
+    intro r
+    rw [htlist, List.getElem?_append_right (by rw [hQlen]; omega), hQlen]
+    congr 1; omega
+  -- first batch agrees with the lifted `t₁`
+  have hdropget : ∀ q, q < t₁.length - 1 → t₁.dropLast[q]? = t₁[q]? :=
+    fun q hq => by rw [List.getElem?_dropLast, if_pos hq]
+  have hfst : ∀ q, q ≤ t₁.length - 2 →
+      ((t₁.dropLast.map (Config.seqLift A A)) ++ t₁.tail)[q]? = (t₁.map (Config.seqLift A A))[q]? := by
+    intro q hq
+    rw [List.getElem?_append_left (by rw [hPLlen]; omega), List.getElem?_map, List.getElem?_map,
+      hdropget q (by omega)]
+  -- `b` is referenced by `A`, so the per-batch recycle count is `Δ`
+  have hb : b ∈ A.barrierSet := by
+    rw [CTA.barrierSet, Finset.mem_biUnion]
+    exact ⟨t, mem_ids_of_idx_lt A hjL, List.mem_toFinset.mpr
+      (List.mem_filterMap.mpr ⟨c, List.mem_of_getElem? hcj, Cmd.barrier?_of_barrierRef hbr⟩)⟩
+  -- extract execution data (rephrased with `t`/`j` in place of the `ProgPoint` projections)
+  obtain ⟨-, -, j₀, C, C', hm₁eq, hCj, hCj1, hCeq0, hC'eq0⟩ := ht1
+  obtain ⟨-, -, j₂, D, D', hm₂eq, hDj, hDj1, hDeq0, hD'eq0⟩ := ht2
+  have hCeq : C.progOf t = (A.prog t ++ A.prog t).drop j := hCeq0
+  have hC'eq : C'.progOf t = (A.prog t ++ A.prog t).drop (j + 1) := hC'eq0
+  have hDeq : D.progOf t = (A.prog t ++ A.prog t).drop ((A.prog t).length + j) := hDeq0
+  have hD'eq : D'.progOf t = (A.prog t ++ A.prog t).drop ((A.prog t).length + j + 1) := hD'eq0
+  -- locate η₁ in the first batch: `j₀ ≤ N - 3`
+  have hj₀ : j₀ ≤ t₁.length - 3 := by
+    by_contra hcon
+    push_neg at hcon
+    have hCt : t₁[j₀ - (t₁.length - 2)]? = some C := by
+      have := hsnd (j₀ - (t₁.length - 2)); rw [show (t₁.length - 2) + (j₀ - (t₁.length - 2)) = j₀ by omega, hCj] at this; exact this.symm
+    have hle : (C.progOf t).length ≤ (A.prog t).length :=
+      suffix_length_le (progOf_suffix_head hchain1 hhead1 C (List.mem_of_getElem? hCt) t)
+    rw [hCeq, List.length_drop, List.length_append] at hle
+    omega
+  -- η₁ executes in `t₁` at `j₀ + 1`
+  have hfj₀ := hfst j₀ (by omega)
+  rw [hCj, List.getElem?_map] at hfj₀
+  obtain ⟨Ct, hCtj, hCteq⟩ := Option.map_eq_some_iff.mp hfj₀.symm
+  have hfj₀1 := hfst (j₀ + 1) (by omega)
+  rw [hCj1, List.getElem?_map] at hfj₀1
+  obtain ⟨Ct', hCtj1, hCt'eq⟩ := Option.map_eq_some_iff.mp hfj₀1.symm
+  have hCtprog : Ct.progOf t = (A.prog t).drop j := by
+    have e : C.progOf t = Ct.progOf t ++ A.prog t := by rw [← hCteq, Config.seqLift_progOf]
+    rw [hCeq, List.drop_append_of_le_length (by omega)] at e
+    exact (List.append_cancel_right e).symm
+  have hCt'prog : Ct'.progOf t = (A.prog t).drop (j + 1) := by
+    have e : C'.progOf t = Ct'.progOf t ++ A.prog t := by rw [← hCt'eq, Config.seqLift_progOf]
+    rw [hC'eq, List.drop_append_of_le_length (by omega)] at e
+    exact (List.append_cancel_right e).symm
+  have hT1 : IsTimeOf (Config.run State.initial A) t₁ ⟨t, j⟩ (j₀ + 1) :=
+    ⟨ht₁.1, hjL, j₀, Ct, Ct', rfl, hCtj, hCtj1, hCtprog, hCt'prog⟩
+  -- locate η₂ in the second batch: `N - 2 ≤ j₂`
+  have hj₂ : t₁.length - 2 ≤ j₂ := by
+    by_contra hcon
+    push_neg at hcon
+    have hfd := hfst (j₂ + 1) (by omega)
+    rw [hDj1, List.getElem?_map] at hfd
+    obtain ⟨Dt', _, hDt'eq⟩ := Option.map_eq_some_iff.mp hfd.symm
+    have hge : (A.prog t).length ≤ (D'.progOf t).length := by
+      rw [← hDt'eq, Config.seqLift_progOf, List.length_append]; omega
+    have hlt : (D'.progOf t).length < (A.prog t).length := by
+      rw [hD'eq, List.length_drop, List.length_append]; omega
+    omega
+  -- η₂'s instruction is the same `⟨t,j⟩`, executing in `t₁` at `j₂ - (N-2) + 1`
+  have hDt : t₁[j₂ - (t₁.length - 2)]? = some D := by
+    have := hsnd (j₂ - (t₁.length - 2)); rw [show (t₁.length - 2) + (j₂ - (t₁.length - 2)) = j₂ by omega, hDj] at this; exact this.symm
+  have hDt1 : t₁[(j₂ - (t₁.length - 2)) + 1]? = some D' := by
+    have := hsnd ((j₂ - (t₁.length - 2)) + 1)
+    rw [show (t₁.length - 2) + ((j₂ - (t₁.length - 2)) + 1) = j₂ + 1 by omega, hDj1] at this
+    exact this.symm
+  have hDprog : D.progOf t = (A.prog t).drop j := by
+    rw [hDeq, List.drop_append, List.drop_eq_nil_of_le (by omega), List.nil_append]
+    congr 1; omega
+  have hD'prog : D'.progOf t = (A.prog t).drop (j + 1) := by
+    rw [hD'eq, List.drop_append, List.drop_eq_nil_of_le (by omega), List.nil_append]
+    congr 1; omega
+  have hT2 : IsTimeOf (Config.run State.initial A) t₁ ⟨t, j⟩ ((j₂ - (t₁.length - 2)) + 1) :=
+    ⟨ht₁.1, hjL, j₂ - (t₁.length - 2), D, D', rfl, hDt, hDt1, hDprog, hD'prog⟩
+  have huniq : j₀ + 1 = (j₂ - (t₁.length - 2)) + 1 := IsTimeOf.unique hT1 hT2
+  -- assemble the recycle counts
+  have hF1 : recycleCount b ((t₁.dropLast.map (Config.seqLift A A)) ++ t₁.tail) j₀
+      = recycleCount b t₁ j₀ := by
+    rw [recycleCount_eq_of_getElem?_eq b (fun q _ => hfst q (by omega))]
+    exact recycleCount_map_seqLift A A b t₁ j₀
+  have hF2 : recycleCount b ((t₁.dropLast.map (Config.seqLift A A)) ++ t₁.tail) (t₁.length - 2)
+      = recycleCount b t₁ (t₁.length - 2) := by
+    rw [recycleCount_eq_of_getElem?_eq b (fun q hq => hfst q hq)]
+    exact recycleCount_map_seqLift A A b t₁ (t₁.length - 2)
+  have hΔ : recycleCount b t₁ (t₁.length - 2) = I.loopK h * I.arrivers b / I.arrivalCount h b := by
+    rw [← recycleCount_done_last hchain1 ht₁L h2]
+    exact Config.WellSynchronized.pow_barriers_advance_count h WF_initial rfl ht₁ hb
+  subst hm₁eq hm₂eq
+  simp only [Nat.add_sub_cancel]
+  rw [show j₂ = (t₁.length - 2) + j₀ by omega, recycleCount_suffix b hsnd, hF1, hF2, hΔ]
+  omega
+
+/-- **Lemma 3, two-batch case.** Let `k = I.loopK h` be the §1 iteration count, and
+assume both `I ^ k` and the two-batch program `I ^ k ⨾ I ^ k` are well-synchronized
+(`hWS0`, `hWS1`). Then there is a successful trace `τ` of `I ^ k ⨾ I ^ k` whose recovered
+generation mapping (`pointGen`) has the batch structure of the document's Lemma 3: every
+barrier instruction of the **second** batch has the same generation as the corresponding
+instruction of the **first** batch, incremented by `k · arrivers(b) / arrival-count(b)`,
+the number of times one batch recycles that instruction's barrier `b`.
+
+A program point `⟨t, j⟩` with `((I ^ k).prog t)[j]? = some c` is instruction `j` of thread
+`t` in the first batch; since `(I ^ k ⨾ I ^ k).prog t = (I ^ k).prog t ++ (I ^ k).prog t`,
+the *corresponding* instruction of the second batch is `⟨t, |(I ^ k).prog t| + j⟩` (the same
+command `c`). The structure is stated only for barrier instructions (`Cmd.barrierRef c =
+some (b, n)`), the ones generations are defined on.
+
+Proof sketch (to fill in). By `seq_angelic_completion` (using `hWS0`, `hWS1`) there is a
+successful trace of `I ^ k ⨾ I ^ k` that runs the first `I ^ k` to completion and then the
+second. By `pow_barriers_restored` the state after the first batch agrees (on arrived
+counts) with the initial state, so — `I ^ k` being well-synchronized — the *same* schedule
+replays on the second batch, producing the same per-instruction generations offset by the
+recycles accumulated in the first batch. That recycle count is
+`k · arrivers(b) / arrival-count(b)` by `pow_barriers_advance_count`; the absence of
+backward happens-before edges (`seq_no_happensBefore_B_to_A`) is what guarantees the second
+batch cannot perturb the first batch's generations.
+NOTE (rohany): This is the first step towards an important lemma.
+-/
+theorem CTA.WellSynchronized.second_batch_gen_offset {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h)
+    (hWS0 : (I ^ k).WellSynchronized)
+    (hWS1 : ((I ^ k).seq (I ^ k) rfl).WellSynchronized) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k).seq (I ^ k) rfl)) τ ∧
+      ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (n : ℕ+),
+        ((I ^ k).prog t)[j]? = some c → Cmd.barrierRef c = some (b, n) →
+        pointGen ((I ^ k).seq (I ^ k) rfl) τ ⟨t, ((I ^ k).prog t).length + j⟩
+          = pointGen ((I ^ k).seq (I ^ k) rfl) τ ⟨t, j⟩
+            + k * I.arrivers b / I.arrivalCount h b := by
+  -- The recycle-count core supplies the trace and the per-instruction offset.
+  obtain ⟨τ, hτ, hrec⟩ := CTA.WellSynchronized.second_batch_recycle_offset h hk hWS0 hWS1
+  refine ⟨τ, hτ, ?_⟩
+  intro t j c b n hcj hbr
+  -- the start configuration's program for thread `t` is `(I ^ k) ; (I ^ k)`
+  have hprogt : (Config.run State.initial ((I ^ k).seq (I ^ k) rfl)).progOf t
+      = (I ^ k).prog t ++ (I ^ k).prog t := rfl
+  obtain ⟨hjlt, -⟩ := List.getElem?_eq_some_iff.mp hcj
+  obtain ⟨sd, hlast⟩ := hτ.2
+  -- both copies of the instruction execute in the successful trace `τ`
+  obtain ⟨m₁, ht1⟩ := exists_time_of_ends_done hτ.1 hlast (η := ⟨t, j⟩)
+    (by change j < ((Config.run State.initial ((I ^ k).seq (I ^ k) rfl)).progOf t).length
+        rw [hprogt, List.length_append]; omega)
+  obtain ⟨m₂, ht2⟩ := exists_time_of_ends_done hτ.1 hlast (η := ⟨t, ((I ^ k).prog t).length + j⟩)
+    (by change ((I ^ k).prog t).length + j
+            < ((Config.run State.initial ((I ^ k).seq (I ^ k) rfl)).progOf t).length
+        rw [hprogt, List.length_append]; omega)
+  -- the command at each point is `c`, a barrier op on `b`
+  have hbar : Cmd.barrier? c = some b := Cmd.barrier?_of_barrierRef hbr
+  have hcmd1 : ((I ^ k).seq (I ^ k) rfl).cmdAt ⟨t, j⟩ = some c := by
+    change ((I ^ k).prog t ++ (I ^ k).prog t)[j]? = some c
+    rw [List.getElem?_append_left hjlt]; exact hcj
+  have hcmd2 : ((I ^ k).seq (I ^ k) rfl).cmdAt ⟨t, ((I ^ k).prog t).length + j⟩ = some c := by
+    change ((I ^ k).prog t ++ (I ^ k).prog t)[((I ^ k).prog t).length + j]? = some c
+    rw [List.getElem?_append_right (Nat.le_add_right _ _), Nat.add_sub_cancel_left]; exact hcj
+  -- each generation is its barrier's recycle count just before its execution time, plus one
+  have hg1 : pointGen ((I ^ k).seq (I ^ k) rfl) τ ⟨t, j⟩ = recycleCount b τ (m₁ - 1) + 1 := by
+    simp only [pointGen, hcmd1, Option.bind_some, hbar, pointTime_eq_of_isTimeOf ht1]
+  have hg2 : pointGen ((I ^ k).seq (I ^ k) rfl) τ ⟨t, ((I ^ k).prog t).length + j⟩
+      = recycleCount b τ (m₂ - 1) + 1 := by
+    simp only [pointGen, hcmd2, Option.bind_some, hbar, pointTime_eq_of_isTimeOf ht2]
+  rw [hg1, hg2, hrec t j c b n m₁ m₂ hcj hbr ht1 ht2]; omega
+
 end Weft

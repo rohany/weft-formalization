@@ -792,6 +792,113 @@ theorem blockInv_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CT
       · exact hC₀
       · exact ih hchain' rfl hb1 C hC'
 
+/-- The converse of `BlockInv`'s "synced ⟹ disabled" clause: every **disabled** thread is
+parked at some barrier, i.e. it appears in some synced list. Together with `BlockInv` this
+gives "disabled ⟺ synced somewhere". A thread is disabled exactly by a `sync` (which puts
+it in that barrier's synced list) and re-enabled exactly by the matching `recycle` (which
+removes it), so this is invariant. It is what restores the enabled map to all-`true` at a
+`done` configuration (no syncers parked ⇒ no disabled threads). -/
+def State.EnabledInv (s : State) : Prop :=
+  ∀ i, s.E i = false → ∃ b, i ∈ (s.B b).synced
+
+/-- `EnabledInv` holds at the initial state: every thread is enabled, so the implication
+is vacuous. -/
+theorem State.EnabledInv.initial : State.initial.EnabledInv := by
+  intro i hi; simp [State.initial] at hi
+
+/-- `EnabledInv` is preserved by every step. A `sync` that disables thread `i` simultaneously
+adds it to a synced list; a `recycle` re-enables exactly the threads it removes from a synced
+list; every other step touches neither the enabled map nor any synced list relevantly. -/
+theorem enabledInv_step {C C' : Config} (hstep : CTAStep C C')
+    (hC : ∀ s, C.state? = some s → s.EnabledInv) :
+    ∀ s', C'.state? = some s' → s'.EnabledInv := by
+  intro s' hs' i hi
+  cases hstep with
+  | @interleave s s'' T j P' hj hbar hth =>
+    have hinv := hC s rfl
+    simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+    generalize hpj : T.prog j = Pj at hth
+    cases hth with
+    | read_noop => exact hinv i hi
+    | write_noop => exact hinv i hi
+    | arrive_configure he hb =>
+      rename_i b₀ n
+      obtain ⟨b, hb'⟩ := hinv i hi
+      refine ⟨b, ?_⟩
+      by_cases hbb : b = b₀
+      · subst hbb; rw [hb] at hb'; simp [BarrierState.unconfigured] at hb'
+      · simpa only [Function.update_of_ne hbb] using hb'
+    | arrive_register he hb hpos hlt =>
+      rename_i b₀ n I A
+      obtain ⟨b, hb'⟩ := hinv i hi
+      refine ⟨b, ?_⟩
+      by_cases hbb : b = b₀
+      · subst hbb; simp only [Function.update_self]; rw [hb] at hb'; exact hb'
+      · simpa only [Function.update_of_ne hbb] using hb'
+    | sync_configure he hb =>
+      rename_i b₀ n c
+      by_cases hji : i = j
+      · exact ⟨b₀, by subst hji; simp [Function.update_self]⟩
+      · have hiold : s.E i = false := by
+          have h : Function.update s.E j false i = false := hi
+          rwa [Function.update_of_ne hji] at h
+        obtain ⟨b, hb'⟩ := hinv i hiold
+        refine ⟨b, ?_⟩
+        by_cases hbb : b = b₀
+        · subst hbb; rw [hb] at hb'; simp [BarrierState.unconfigured] at hb'
+        · simpa only [Function.update_of_ne hbb] using hb'
+    | sync_block he hb hpos hlt =>
+      rename_i b₀ n c I A
+      by_cases hji : i = j
+      · exact ⟨b₀, by subst hji; simp [Function.update_self]⟩
+      · have hiold : s.E i = false := by
+          have h : Function.update s.E j false i = false := hi
+          rwa [Function.update_of_ne hji] at h
+        obtain ⟨b, hb'⟩ := hinv i hiold
+        refine ⟨b, ?_⟩
+        by_cases hbb : b = b₀
+        · subst hbb; simp only [Function.update_self]; rw [hb] at hb'
+          exact List.mem_cons_of_mem _ hb'
+        · simpa only [Function.update_of_ne hbb] using hb'
+  | @recycle s T b₀ I₀ A₀ n₀ hb hfull hpark =>
+    have hinv := hC s rfl
+    simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+    have hi' : updateMapOn s.E I₀ true i = false := hi
+    rw [updateMapOn_apply] at hi'
+    split at hi'
+    · simp at hi'
+    · rename_i hni
+      obtain ⟨b, hb'⟩ := hinv i hi'
+      refine ⟨b, ?_⟩
+      by_cases hbb : b = b₀
+      · subst hbb; rw [hb] at hb'; exact absurd hb' hni
+      · simpa only [Function.update_of_ne hbb] using hb'
+  | @done s T hdone hnofull =>
+    simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+    exact hC s rfl i hi
+  | @error s T j P' hth => simp [Config.state?] at hs'
+
+/-- `EnabledInv` holds at every configuration of a chain whose head satisfies it. -/
+theorem enabledInv_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
+    τ.head? = some C₀ → (∀ s, C₀.state? = some s → s.EnabledInv) →
+    ∀ C ∈ τ, ∀ s, C.state? = some s → s.EnabledInv := by
+  intro τ
+  induction τ with
+  | nil => intro C₀ _ hhead; simp at hhead
+  | cons a rest ih =>
+    intro C₀ hchain hhead hC₀ C hC
+    rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead
+    cases rest with
+    | nil => rw [List.mem_singleton] at hC; subst hC; exact hC₀
+    | cons b₁ rest' =>
+      rw [List.isChain_cons_cons] at hchain
+      obtain ⟨hstep, hchain'⟩ := hchain
+      have hb1 : ∀ s, b₁.state? = some s → s.EnabledInv := enabledInv_step hstep hC₀
+      rw [List.mem_cons] at hC
+      rcases hC with rfl | hC'
+      · exact hC₀
+      · exact ih hchain' rfl hb1 C hC'
+
 /-- The source of any step is a `run` configuration (every `CTAStep` rule fires from
 `run`). Lets a step's source state be read off for invariant-extraction. -/
 theorem CTAStep.source_run {C C' : Config} (h : CTAStep C C') :
@@ -801,9 +908,11 @@ theorem CTAStep.source_run {C C' : Config} (h : CTAStep C C') :
 /-- The well-formedness invariant for a `run` configuration, a single predicate
 covering every barrier. For each barrier `b`:
 
-* if it is **configured** (`s.B b = ⟨I, A, some n⟩`), registration does not over-fill
-  (`|I|+|A| ≤ n`) and every synced thread is *parked* at `sync b n` (its program is
-  headed by exactly that command); and
+* if it is **configured** (`s.B b = ⟨I, A, some n⟩`), registration is non-empty
+  (`0 < |I|+|A|`) and does not over-fill (`|I|+|A| ≤ n`), and every synced thread is
+  *parked* at `sync b n` (its program is headed by exactly that command) — note the
+  non-emptiness rules out the unreachable degenerate state `⟨[], [], some n⟩`
+  (configured yet with nothing registered), which the `≤ n` bound alone permits; and
 * if it is **unconfigured** (`s.B b = ⟨I, A, none⟩`), its registration lists are
   empty (ruling out a malformed `⟨I, A, none⟩` with threads registered).
 
@@ -816,7 +925,8 @@ formulation — no separate "valid counts" side condition is needed. Vacuously t
 def Config.WF : Config → Prop
   | .run s T =>
       (∀ b I A n, s.B b = ⟨I, A, some n⟩ →
-          I.length + A.length ≤ (n : Nat) ∧ ∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)) ∧
+          I.length + A.length ≤ (n : Nat) ∧ (∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b n)) ∧
+            0 < I.length + A.length) ∧
       (∀ b I A, s.B b = ⟨I, A, none⟩ → I = [] ∧ A = []) ∧
       s.BlockInv
   | .done _ => True
@@ -857,15 +967,15 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
     · cases hth with
       | read_noop =>
         intro b I A n hB
-        obtain ⟨hle, hpark⟩ := hcond b I A n hB
-        refine ⟨hle, fun i' hi' => ?_⟩
+        obtain ⟨hle, hpark, hpos⟩ := hcond b I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
         have hne : i' ≠ i := by
           rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
         simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
       | write_noop =>
         intro b I A n hB
-        obtain ⟨hle, hpark⟩ := hcond b I A n hB
-        refine ⟨hle, fun i' hi' => ?_⟩
+        obtain ⟨hle, hpark, hpos⟩ := hcond b I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
         have hne : i' ≠ i := by
           rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
         simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
@@ -876,9 +986,9 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
         · simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
           have hpos := n.pos
           obtain ⟨rfl, rfl, rfl⟩ := hB
-          exact ⟨by simp; omega, fun i' hi' => by simp at hi'⟩
-        · obtain ⟨hle, hpark⟩ := hcond b I A n hB
-          refine ⟨hle, fun i' hi' => ?_⟩
+          exact ⟨by simp; omega, (fun i' hi' => by simp at hi'), by simp⟩
+        · obtain ⟨hle, hpark, hpos⟩ := hcond b I A n hB
+          refine ⟨hle, (fun i' hi' => ?_), hpos⟩
           have hne : i' ≠ i := by
             rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
           simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
@@ -889,14 +999,15 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
         · rename_i hbq
           simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
           obtain ⟨rfl, rfl, rfl⟩ := hB
-          obtain ⟨_, hcpark⟩ := hcond _ _ _ _ hb
+          obtain ⟨_, hcpark, _⟩ := hcond _ _ _ _ hb
           subst hbq
-          refine ⟨by simp only [List.length_cons]; omega, fun i' hi' => ?_⟩
+          refine ⟨by simp only [List.length_cons]; omega, (fun i' hi' => ?_),
+            by simp only [List.length_cons]; omega⟩
           have hne : i' ≠ i := by
             rintro rfl; have := hcpark i' hi'; rw [hpi] at this; simp at this
           simp only [CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
-        · obtain ⟨hle, hpark⟩ := hcond b I A n hB
-          refine ⟨hle, fun i' hi' => ?_⟩
+        · obtain ⟨hle, hpark, hpos'⟩ := hcond b I A n hB
+          refine ⟨hle, (fun i' hi' => ?_), hpos'⟩
           have hne : i' ≠ i := by
             rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
           simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
@@ -909,11 +1020,11 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
           have hpos := n.pos
           obtain ⟨rfl, rfl, rfl⟩ := hB
           subst hbq
-          refine ⟨by simp; omega, fun i' hi' => ?_⟩
+          refine ⟨by simp; omega, (fun i' hi' => ?_), by simp⟩
           simp only [List.mem_singleton] at hi'; subst hi'
           simp only [CTA.set, Function.update_self, List.head?_cons]
-        · obtain ⟨hle, hpark⟩ := hcond b I A n hB
-          refine ⟨hle, fun i' hi' => ?_⟩
+        · obtain ⟨hle, hpark, hpos⟩ := hcond b I A n hB
+          refine ⟨hle, (fun i' hi' => ?_), hpos⟩
           by_cases hne : i' = i
           · subst hne; simp only [CTA.set, Function.update_self]; rw [← hpi]; exact hpark _ hi'
           · simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
@@ -924,16 +1035,17 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
         · rename_i hbq
           simp only [BarrierState.mk.injEq, Option.some.injEq] at hB
           obtain ⟨rfl, rfl, rfl⟩ := hB
-          obtain ⟨_, hcpark⟩ := hcond _ _ _ _ hb
+          obtain ⟨_, hcpark, _⟩ := hcond _ _ _ _ hb
           subst hbq
-          refine ⟨by simp only [List.length_cons]; omega, fun i' hi' => ?_⟩
+          refine ⟨by simp only [List.length_cons]; omega, (fun i' hi' => ?_),
+            by simp only [List.length_cons]; omega⟩
           rcases List.mem_cons.mp hi' with rfl | hi'
           · simp only [CTA.set, Function.update_self, List.head?_cons]
           · by_cases hne : i' = i
             · subst hne; simp only [CTA.set, Function.update_self, List.head?_cons]
             · simp only [CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
-        · obtain ⟨hle, hpark⟩ := hcond b I A n hB
-          refine ⟨hle, fun i' hi' => ?_⟩
+        · obtain ⟨hle, hpark, hpos'⟩ := hcond b I A n hB
+          refine ⟨hle, (fun i' hi' => ?_), hpos'⟩
           by_cases hne : i' = i
           · subst hne; simp only [CTA.set, Function.update_self]; rw [← hpi]; exact hpark _ hi'
           · simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
@@ -965,8 +1077,8 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
         simp only [Function.update_self, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
         exact absurd hB.2.2 (by simp)
       · simp only [Function.update_of_ne hbb] at hB
-        obtain ⟨hle, hpk⟩ := hcond b I A n hB
-        refine ⟨hle, fun i' hi' => ?_⟩
+        obtain ⟨hle, hpk, hpos⟩ := hcond b I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
         have hni : i' ∉ I₀ := by
           intro hmem
           have h1 := hpark i' hmem
@@ -1020,7 +1132,7 @@ theorem stuck_has_sync_head {s : State} {T : CTA}
     cases bcnt with
     | none => obtain ⟨rfl, rfl⟩ := hwf.2.1 bb bI bA hbc; exact Or.inl hbc
     | some n =>
-      obtain ⟨hle, hpark⟩ := hwf.1 bb bI bA n hbc
+      obtain ⟨hle, hpark, _⟩ := hwf.1 bb bI bA n hbc
       rcases lt_or_eq_of_le hle with hlt | heq
       · exact Or.inr ⟨bI, bA, n, hbc, hlt⟩
       · exfalso

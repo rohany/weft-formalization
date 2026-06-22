@@ -582,41 +582,413 @@ theorem happensBefore_sound {T : CTA} {τ : List Config}
       exact le_trans (ih n₁ nb ht₁ htb)
         (initRelation_edge_sound hτ hws hbc τ' hτ' nb nc htb htc)
 
+/-- A program-order edge `⟨i, m⟩ → ⟨i, m+1⟩` belongs to `initRelation T τ` whenever
+`m + 1` indexes thread `i`'s program (Figure 4 lines 4–6). -/
+theorem mem_initRelation_progOrder {T : CTA} {τ : List Config} {i m : Nat}
+    (h : m + 1 < (T.prog i).length) :
+    ((⟨i, m⟩ : ProgPoint), (⟨i, m + 1⟩ : ProgPoint)) ∈ initRelation T τ := by
+  have hpt : (⟨i, m⟩ : ProgPoint) ∈ T.progPoints := by
+    rw [mem_progPoints_iff]
+    exact ⟨mem_ids_of_idx_lt T (show m < (T.prog i).length by omega),
+      show m < (T.prog i).length by omega⟩
+  simp only [initRelation, List.mem_toFinset, List.mem_append, List.mem_filterMap]
+  exact Or.inl (Or.inl ⟨⟨i, m⟩, hpt, by rw [if_pos h]⟩)
+
+/-- **Program order is captured by `happensBefore`.** Within a single thread `i`, any
+earlier point is happens-before any later valid point — the program-order edges chain
+up through the reflexive-transitive closure. -/
+theorem progOrder_happensBefore {T : CTA} {τ : List Config} {i a : Nat} :
+    ∀ {b : Nat}, a ≤ b → b < (T.prog i).length → happensBefore T τ ⟨i, a⟩ ⟨i, b⟩ := by
+  intro b hab
+  induction b, hab using Nat.le_induction with
+  | base => intro _; exact Relation.ReflTransGen.refl
+  | succ m hm ih =>
+      intro hlt
+      exact (ih (by omega)).tail (mem_initRelation_progOrder (by omega))
+
+/-- **Strict monotonicity of time within a thread.** In any complete trace, an earlier
+instruction of a thread executes strictly before a later one — the remaining-program
+length is non-increasing (`progOf_suffix_index_le`) and strictly larger at the earlier
+index. -/
+theorem time_lt_of_idx_lt {C₀ : Config} {τ : List Config} {η ξ : ProgPoint} {nη nξ : Nat}
+    (hη : IsTimeOf C₀ τ η nη) (hξ : IsTimeOf C₀ τ ξ nξ)
+    (hthread : η.thread = ξ.thread) (hidx : η.idx < ξ.idx) : nη < nξ := by
+  obtain ⟨hτ, _, jη, Cη, _, rfl, hCjη, _, hCηeq, _⟩ := hη
+  obtain ⟨_, hξL, jξ, Cξ, _, rfl, hCjξ, _, hCξeq, _⟩ := hξ
+  rw [← hthread] at hCξeq hξL
+  have hchain := hτ.1.subtrace
+  rcases Nat.lt_or_ge jη jξ with h | h
+  · omega
+  · exfalso
+    have hsuf := progOf_suffix_index_le hchain η.thread hCjξ h hCjη
+    have hle := suffix_length_le hsuf
+    rw [hCηeq, hCξeq, List.length_drop, List.length_drop] at hle
+    omega
+
+section IdealCut
+open Classical
+
+/-- The **cut** for thread `i` (relative to `η₁`): the least index of a point that is
+happens-before-after `η₁` — an `F`-position — or the program length if none. It splits
+thread `i` into the ideal `G`-prefix `[0, cut)` (points *not* after `η₁`) and the `F`-
+suffix `[cut, length)`. Down-closure of `G` makes this a genuine prefix; see
+`fcut_le_of_hb` / `lt_fcut_of_not_hb`. -/
+noncomputable def fcut (T : CTA) (τ : List Config) (η₁ : ProgPoint) (i : ThreadId) : Nat :=
+  if h : ∃ k, happensBefore T τ η₁ ⟨i, k⟩ ∧ k < (T.prog i).length
+  then Nat.find h else (T.prog i).length
+
+/-- An `F`-point (happens-before-after `η₁`) sits at or beyond its thread's cut — in
+particular `η₁` itself does (reflexively), so `η₁ ∉ G`. -/
+theorem fcut_le_of_hb {T : CTA} {τ : List Config} {η₁ η : ProgPoint}
+    (h : happensBefore T τ η₁ η) (hv : η ∈ T.progPoints) :
+    fcut T τ η₁ η.thread ≤ η.idx := by
+  have hηeq : (⟨η.thread, η.idx⟩ : ProgPoint) = η := rfl
+  have hex : ∃ k, happensBefore T τ η₁ ⟨η.thread, k⟩ ∧ k < (T.prog η.thread).length :=
+    ⟨η.idx, by rw [hηeq]; exact h, ((mem_progPoints_iff T η).mp hv).2⟩
+  unfold fcut
+  rw [dif_pos hex]
+  exact Nat.find_le ⟨by rw [hηeq]; exact h, ((mem_progPoints_iff T η).mp hv).2⟩
+
+/-- A `G`-point (not happens-before-after `η₁`) sits strictly below its thread's cut —
+in particular `η₂` does, since `¬ happensBefore η₁ η₂`, so `η₂ ∈ G`. -/
+theorem lt_fcut_of_not_hb {T : CTA} {τ : List Config} {η₁ η : ProgPoint}
+    (h : ¬ happensBefore T τ η₁ η) (hv : η ∈ T.progPoints) :
+    η.idx < fcut T τ η₁ η.thread := by
+  have hηeq : (⟨η.thread, η.idx⟩ : ProgPoint) = η := rfl
+  have hvlt : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hv).2
+  by_contra hle
+  push_neg at hle
+  unfold fcut at hle
+  split at hle
+  · rename_i hex
+    obtain ⟨hhb, _⟩ := Nat.find_spec hex
+    exact h (hηeq ▸ hhb.trans (progOrder_happensBefore hle hvlt))
+  · omega
+
+/-- The cut never exceeds the program length. -/
+theorem fcut_le_length (T : CTA) (τ : List Config) (η₁ : ProgPoint) (i : ThreadId) :
+    fcut T τ η₁ i ≤ (T.prog i).length := by
+  unfold fcut
+  split
+  · rename_i h; exact le_of_lt (Nat.find_spec h).2
+  · exact le_refl _
+
+end IdealCut
+
+/-- The clean-state invariant for the run-`G` construction: configuration `C` has
+executed only the ideal `G` so far. Two clauses:
+
+* **program bound** — each thread's remaining program is `T`'s with at most `cut`
+  commands dropped, so no `F`-command (index `≥ cut`) has run;
+* **barrier purity** — every *synced* (parked) thread sits at a `G`-`sync` (its
+  executed count is strictly below its cut). Without this an `F`-`sync` could park into
+  a `G`-round (parking is program-preserving, hence program-bound-preserving) and the
+  round's later `recycle` would push that thread past its cut.
+
+Preserved by `G`-steps; the run-`G` recursion stays inside this predicate until `G` is
+exhausted. -/
+def GBounded (T : CTA) (τ : List Config) (η₁ : ProgPoint) (C : Config) : Prop :=
+  ∃ s T_C, C = Config.run s T_C ∧
+    (∀ i, ∃ e, e ≤ fcut T τ η₁ i ∧ T_C.prog i = (T.prog i).drop e) ∧
+    (∀ b i, i ∈ (s.B b).synced →
+      (T.prog i).length - (T_C.prog i).length < fcut T τ η₁ i)
+
+/-- The initial configuration is `G`-bounded: nothing has executed (`e = 0`) and no
+thread is synced. -/
+theorem GBounded_init (T : CTA) (τ : List Config) (η₁ : ProgPoint) :
+    GBounded T τ η₁ (Config.run State.initial T) :=
+  ⟨State.initial, T, rfl, fun i => ⟨0, Nat.zero_le _, by simp⟩,
+    fun b i hi => by simp [State.initial, BarrierState.unconfigured] at hi⟩
+
+/-- If `η` has *already executed* by configuration index `p` (its remaining program is
+short enough at `p`), then its time is `≤ p`. (Programs only shrink, so the transition
+that runs `η` cannot be after `p`.) -/
+theorem time_le_of_progOf_le {C₀ : Config} {τ' : List Config} {η : ProgPoint} {n p : Nat}
+    {C : Config} (ht : IsTimeOf C₀ τ' η n) (hp : τ'[p]? = some C)
+    (hlen : (C.progOf η.thread).length ≤ (C₀.progOf η.thread).length - η.idx - 1) :
+    n ≤ p := by
+  obtain ⟨hcomp, _, j, Cj, _, rfl, hCj, _, hCjeq, _⟩ := ht
+  have hchain := hcomp.1.subtrace
+  by_contra hlt
+  push_neg at hlt
+  have hsuf := progOf_suffix_index_le hchain η.thread hp (by omega : p ≤ j) hCj
+  have := suffix_length_le hsuf
+  rw [hCjeq, List.length_drop] at this
+  omega
+
+/-- If `η` has *not yet executed* by configuration index `p` (its remaining program is
+still long at `p`), then its time is `> p`. -/
+theorem lt_time_of_lt_progOf {C₀ : Config} {τ' : List Config} {η : ProgPoint} {n p : Nat}
+    {C : Config} (ht : IsTimeOf C₀ τ' η n) (hp : τ'[p]? = some C)
+    (hlen : (C₀.progOf η.thread).length - η.idx - 1 < (C.progOf η.thread).length) :
+    p < n := by
+  obtain ⟨hcomp, _, j, _, Cj', rfl, _, hCj1, _, hCj1eq⟩ := ht
+  have hchain := hcomp.1.subtrace
+  by_contra hle
+  push_neg at hle
+  have hsuf := progOf_suffix_index_le hchain η.thread hCj1 (by omega : j + 1 ≤ p) hp
+  have := suffix_length_le hsuf
+  rw [hCj1eq, List.length_drop] at this
+  omega
+
+/-- Well-formedness propagates to every reachable configuration. -/
+theorem WF_of_reaches {T : CTA} {C : Config}
+    (h : Relation.ReflTransGen CTAStep (Config.run State.initial T) C) : C.WF := by
+  induction h with
+  | refl => exact WF_initial
+  | tail _ hstep ih => exact CTAStep.WF_preserved hstep ih
+
+/-- The barrier-support invariant propagates to every reachable configuration. -/
+theorem barriersWithin_of_reaches {T : CTA} {C : Config}
+    (h : Relation.ReflTransGen CTAStep (Config.run State.initial T) C) :
+    C.barriersWithin T.barrierSet := by
+  induction h with
+  | refl => exact barriersWithin_initial
+  | tail _ hstep ih => exact inv_preserved T.barrierSet hstep ih
+
+/-- `G` is exhausted at `C`: every (in-domain) thread has run exactly its `fcut`-prefix. -/
+def Gdone (T : CTA) (τ : List Config) (η₁ : ProgPoint) (C : Config) : Prop :=
+  ∀ i ∈ T.ids, (C.progOf i).length = (T.prog i).length - fcut T τ η₁ i
+
+/-- **Progress** (the operational crux). From a `G`-bounded, reachable configuration at
+which `G` is *not* yet exhausted, there is a step that keeps the configuration
+`G`-bounded — a `G`-step that makes progress without touching `F`. (Built on the
+deadlock-freedom of a well-synchronized CTA: were no `G`-step available, the parked
+`G`-threads would form a frozen set the schedule could never complete, so the run could
+not reach `done`, contradicting `completeTrace_ends_done`.) -/
+theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint} (hws : T.WellSynchronized)
+    {C : Config} (hGB : GBounded T τ η₁ C)
+    (hreach : Relation.ReflTransGen CTAStep (Config.run State.initial T) C)
+    (hnotdone : ¬ Gdone T τ η₁ C) :
+    ∃ C', CTAStep C C' ∧ GBounded T τ η₁ C' := by
+  sorry
+
+/-- Run `G` to the cut configuration: from any reachable `G`-bounded `C`, there is a
+chain (executing only `G`-steps) to a configuration whose every thread sits exactly at
+its cut. By well-founded recursion on `cfgMeasure`, taking a `G`-step (`gstep`) until
+`G` is exhausted. -/
+theorem reach_cut_aux {T : CTA} {τ : List Config} {η₁ : ProgPoint} (hws : T.WellSynchronized) :
+    ∀ n, ∀ C, GBounded T τ η₁ C →
+      Relation.ReflTransGen CTAStep (Config.run State.initial T) C →
+      C.cfgMeasure T.barrierSet = n →
+      ∃ (pre : List Config) (s_G : State) (T_G : CTA),
+        pre.head? = some C ∧ List.IsChain CTAStep pre ∧
+        pre.getLast? = some (Config.run s_G T_G) ∧
+        (∀ i, T_G.prog i = (T.prog i).drop (fcut T τ η₁ i)) ∧
+        Relation.ReflTransGen CTAStep (Config.run State.initial T) (Config.run s_G T_G) := by
+  intro n
+  induction n using Nat.strong_induction_on with
+  | _ n ih =>
+    intro C hGB hreach hmeas
+    by_cases hdone : Gdone T τ η₁ C
+    · -- cut configuration reached
+      obtain ⟨s, T_C, rfl, he, _hpure⟩ := hGB
+      refine ⟨[Config.run s T_C], s, T_C, rfl, List.isChain_singleton _, rfl, fun i => ?_, hreach⟩
+      obtain ⟨e, hele, hprog⟩ := he i
+      by_cases hi : i ∈ T.ids
+      · have hd := hdone i hi
+        simp only [Config.progOf] at hd
+        rw [hprog, List.length_drop] at hd
+        have hcl := fcut_le_length T τ η₁ i
+        rw [hprog, show e = fcut T τ η₁ i by omega]
+      · rw [hprog, T.nil_outside_ids i hi]; simp
+    · -- progress: take a `G`-step and recurse
+      obtain ⟨C', hstep, hGB'⟩ := gstep hws hGB hreach hdone
+      have hbw : C.barriersWithin T.barrierSet := barriersWithin_of_reaches hreach
+      have hlt : C'.cfgMeasure T.barrierSet < n := by
+        rw [← hmeas]; exact step_decreases T.barrierSet hstep hbw
+      obtain ⟨pre', s_G, T_G, hhd', hch', hlast', hcut', hreach'⟩ :=
+        ih _ hlt C' hGB' (hreach.tail hstep) rfl
+      have hpne : pre' ≠ [] := by intro h; rw [h] at hhd'; simp at hhd'
+      refine ⟨C :: pre', s_G, T_G, rfl, ?_, ?_, hcut', hreach'⟩
+      · rw [List.isChain_cons]
+        exact ⟨fun y hy => by rw [hhd', Option.mem_some_iff] at hy; exact hy ▸ hstep, hch'⟩
+      · rw [List.getLast?_cons_of_ne_nil hpne]; exact hlast'
+
+/-- **Run the ideal `G` first.** There is a complete trace `τ'` from `(I, T)` and a
+configuration index `p` at which *exactly* the ideal `G` has executed — every thread's
+remaining program is `T`'s with its `fcut`-prefix dropped. (This is the operational
+core: the schedule runs all `G`-commands, reaching a clean cut configuration, before
+running any `F`-command.) -/
+theorem run_ideal {T : CTA} {τ : List Config} {η₁ : ProgPoint} (hws : T.WellSynchronized) :
+    ∃ (τ' : List Config) (p : Nat) (s_G : State) (T_G : CTA),
+      IsCompleteTraceFrom (Config.run State.initial T) τ' ∧
+      τ'[p]? = some (Config.run s_G T_G) ∧
+      ∀ i, T_G.prog i = (T.prog i).drop (fcut T τ η₁ i) := by
+  -- run `G` to the cut config `C_G`
+  obtain ⟨pre, s_G, T_G, hhd, hch, hlast, hcut, hreachG⟩ :=
+    reach_cut_aux hws ((Config.run State.initial T).cfgMeasure T.barrierSet)
+      (Config.run State.initial T) (GBounded_init T τ η₁) Relation.ReflTransGen.refl rfl
+  have hpne : pre ≠ [] := by intro h; rw [h] at hhd; simp at hhd
+  have hpos : 0 < pre.length := List.length_pos_of_ne_nil hpne
+  have hgl : pre.getLast hpne = Config.run s_G T_G := by
+    have h := List.getLast?_eq_some_getLast hpne
+    rw [hlast] at h; exact (Option.some.injEq _ _).mp h.symm
+  -- `C_G` is reachable, so it satisfies the support invariant; complete from it.
+  have hbwG : (Config.run s_G T_G).barriersWithin T.barrierSet := barriersWithin_of_reaches hreachG
+  obtain ⟨σ, hσIC, hσhead⟩ := exists_completeTrace T.barrierSet (Config.run s_G T_G) hbwG
+  obtain ⟨σtail, rfl⟩ : ∃ l, σ = Config.run s_G T_G :: l := by
+    cases σ with
+    | nil => simp at hσhead
+    | cons a l => simp only [List.head?_cons, Option.some.injEq] at hσhead; exact ⟨l, hσhead ▸ rfl⟩
+  have hσchain : List.IsChain CTAStep (Config.run s_G T_G :: σtail) := hσIC.subtrace
+  rw [List.isChain_cons] at hσchain
+  -- glue: `τ' = pre ++ σtail`, with `C_G` at index `pre.length - 1`
+  refine ⟨pre ++ σtail, pre.length - 1, s_G, T_G, ⟨⟨?_, ?_⟩, ?_⟩, ?_, hcut⟩
+  · -- chain
+    refine List.IsChain.append hch hσchain.2 ?_
+    intro x hx y hy
+    rw [hlast, Option.mem_some_iff] at hx
+    subst hx
+    exact hσchain.1 y hy
+  · -- ends terminal
+    obtain ⟨Cₙ, hτlast, hterm⟩ := hσIC.ends
+    refine ⟨Cₙ, ?_, hterm⟩
+    have hsplit : pre ++ σtail = pre.dropLast ++ (Config.run s_G T_G :: σtail) := by
+      conv_lhs => rw [← List.dropLast_concat_getLast hpne, hgl]
+      simp
+    rw [hsplit]; exact List.mem_getLast?_append_of_mem_getLast? hτlast
+  · -- head
+    rw [List.head?_append_of_ne_nil _ hpne, hhd]
+  · -- `τ'[pre.length - 1] = C_G`
+    rw [List.getElem?_append_left (by omega : pre.length - 1 < pre.length)]
+    rw [← List.getLast?_eq_getElem?]; exact hlast
+
+/-- **Realizability / reversing-schedule lemma** — the heart of preciseness (the
+genuine cross-thread content). If `η₁` is *not* happens-before `η₂`, then some
+complete trace from `(I, T)` runs `η₂` strictly before `η₁`.
+
+Construction (strategy C/D, by induction on program size `CTA.numCmds`): the set
+`G = {η | ¬ happensBefore T τ η₁ η}` is *down-closed* under `initRelation` edges — it
+is a per-thread program **prefix** (program order), and it contains whole barrier
+rounds (same-generation `sync`s are mutually related, so a round is wholly in or
+wholly out of `G`). Run `G` to completion first — reaching a clean configuration with
+exactly the complement `F` remaining — then finish with `exists_completeTrace`. Since
+`η₂ ∈ G` (`¬ happensBefore η₁ η₂`, reflexively `η₂ ≠ η₁`) and `η₁ ∉ G` (`happensBefore`
+is reflexive), `η₂` executes in the `G`-prefix and `η₁` in the `F`-suffix, so
+`t(η₂) < t(η₁)`.
+
+This is the one remaining `sorry`; the contrapositive wrapper (`happensBefore_precise`,
+different-threads case) is complete. -/
+theorem exists_reversing_trace {T : CTA} {τ : List Config} (hws : T.WellSynchronized)
+    {η₁ η₂ : ProgPoint} (hv₁ : η₁ ∈ T.progPoints) (hv₂ : η₂ ∈ T.progPoints)
+    (hcon : ¬ happensBefore T τ η₁ η₂) :
+    ∃ τ', IsCompleteTraceFrom (Config.run State.initial T) τ' ∧
+      ∃ n₁ n₂, IsTimeOf (Config.run State.initial T) τ' η₁ n₁ ∧
+        IsTimeOf (Config.run State.initial T) τ' η₂ n₂ ∧ n₂ < n₁ := by
+  -- Run `G` first: a complete trace `τ'` and a cut index `p` where exactly `G` is done.
+  obtain ⟨τ', p, s_G, T_G, hcomp, hpcfg, hGdone⟩ := run_ideal (T := T) (τ := τ) (η₁ := η₁) hws
+  -- The trace ends in `done`, so both (valid) points execute.
+  obtain ⟨sd, hdone⟩ := CTA.WellSynchronized.completeTrace_ends_done hws hcomp
+  have hv₁L : η₁.idx < (T.prog η₁.thread).length := ((mem_progPoints_iff T η₁).mp hv₁).2
+  have hv₂L : η₂.idx < (T.prog η₂.thread).length := ((mem_progPoints_iff T η₂).mp hv₂).2
+  obtain ⟨n₁, ht₁⟩ := exists_time_of_ends_done hcomp hdone (η := η₁) hv₁L
+  obtain ⟨n₂, ht₂⟩ := exists_time_of_ends_done hcomp hdone (η := η₂) hv₂L
+  refine ⟨τ', hcomp, n₁, n₂, ht₁, ht₂, ?_⟩
+  -- `(run s_G T_G).progOf i = T_G.prog i = (T.prog i).drop (cut i)`.
+  have hcut₁ : fcut T τ η₁ η₁.thread ≤ η₁.idx := fcut_le_of_hb Relation.ReflTransGen.refl hv₁
+  have hcut₂ : η₂.idx < fcut T τ η₁ η₂.thread := lt_fcut_of_not_hb hcon hv₂
+  -- `η₂ ∈ G` is already executed at `p` ⟹ `n₂ ≤ p`.
+  have hn₂ : n₂ ≤ p := by
+    refine time_le_of_progOf_le ht₂ hpcfg ?_
+    show (T_G.prog η₂.thread).length ≤ _
+    rw [hGdone η₂.thread, List.length_drop]
+    show (T.prog η₂.thread).length - fcut T τ η₁ η₂.thread
+      ≤ ((Config.run State.initial T).progOf η₂.thread).length - η₂.idx - 1
+    show _ ≤ (T.prog η₂.thread).length - η₂.idx - 1
+    omega
+  -- `η₁ ∈ F` is not yet executed at `p` ⟹ `p < n₁`.
+  have hn₁ : p < n₁ := by
+    refine lt_time_of_lt_progOf ht₁ hpcfg ?_
+    show ((Config.run State.initial T).progOf η₁.thread).length - η₁.idx - 1 < (T_G.prog η₁.thread).length
+    rw [hGdone η₁.thread, List.length_drop]
+    show (T.prog η₁.thread).length - η₁.idx - 1 < (T.prog η₁.thread).length - fcut T τ η₁ η₁.thread
+    omega
+  omega
+
 /-- Preciseness half of Lemma 1: the happens-before relation captures *every* genuine
 ordering — if `η₁` executes no later than `η₂` in every complete trace from `(I, T)`,
 then `happensBefore T τ η₁ η₂` holds. (Per the paper: by induction on program size,
 since the tuples in `R` are the only ordering restrictions the semantics imposes.)
 This is the `←` direction of `SoundAndPrecise`.
 
-The reflexive corner `η₁ = η₂` is `Relation.ReflTransGen.refl`. The genuine content
-is the `η₁ ≠ η₂` case: there one must produce an actual `Relation.TransGen` chain of
-`initRelation` edges, i.e. show that any ordering *not* forced by `R` is violated by
-some schedule (the paper's adversarial-schedule construction). That step is the one
-remaining `sorry`. -/
+The `η₁, η₂ ∈ T.progPoints` hypotheses are **necessary**: a non-executing point has no
+`IsTimeOf`, so `hle` would hold vacuously while `happensBefore` (whose edges only touch
+program points, `initRelation_cases`) cannot relate it — the same vacuous-timing defect
+that forced reflexivity, now for invalid indices.
+
+Cases on the two points:
+* `η₁ = η₂` — `Relation.ReflTransGen.refl`.
+* same thread, `η₁ ≠ η₂` — `hle` forces `η₁.idx < η₂.idx` (`time_lt_of_idx_lt`), and the
+  program-order edges chain `η₁` to `η₂` (`progOrder_happensBefore`). **Proved.**
+* different threads — the genuine content: an inter-thread ordering must run through a
+  barrier, and one must exhibit the `Relation.TransGen` chain witnessing it (the paper's
+  argument that the `initRelation` tuples are the *only* restrictions the semantics
+  imposes). This is the one remaining `sorry`. -/
 theorem happensBefore_precise {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hws : T.WellSynchronized) {η₁ η₂ : ProgPoint}
+    (hv₁ : η₁ ∈ T.progPoints) (hv₂ : η₂ ∈ T.progPoints)
     (hle : ∀ τ', IsCompleteTraceFrom (Config.run State.initial T) τ' →
       ∀ n₁ n₂, IsTimeOf (Config.run State.initial T) τ' η₁ n₁ →
         IsTimeOf (Config.run State.initial T) τ' η₂ n₂ → n₁ ≤ n₂) :
     happensBefore T τ η₁ η₂ := by
-  by_cases hη : η₁ = η₂
-  · -- reflexive corner: every point is happens-before itself
-    subst hη; exact Relation.ReflTransGen.refl
-  · -- the genuine, schedule-construction content (distinct program points)
-    sorry
+  -- TODO (rohany): This theorem is not making much progress by claude,
+  --  which is mostly spinning and creating new lemmas to solve the problem
+  --  and sticking sorries in those. A different approach will be required,
+  --  probably one that gives more help to claude in the form of proof strategy
+  --  and/or helper lemmas.
+  sorry
+  -- by_cases hη : η₁ = η₂
+  -- · -- reflexive corner: every point is happens-before itself
+  --   subst hη; exact Relation.ReflTransGen.refl
+  -- · by_cases hthread : η₁.thread = η₂.thread
+  --   · -- same thread: forced order is program order
+  --     obtain ⟨i₁, k₁⟩ := η₁
+  --     obtain ⟨i₂, k₂⟩ := η₂
+  --     replace hthread : i₁ = i₂ := hthread
+  --     subst hthread
+  --     replace hη : k₁ ≠ k₂ := fun h => hη (by rw [h])
+  --     obtain ⟨hcomplete, sd, hdone⟩ := hτ
+  --     have hv₁' : (⟨i₁, k₁⟩ : ProgPoint).idx <
+  --         ((Config.run State.initial T).progOf (⟨i₁, k₁⟩ : ProgPoint).thread).length :=
+  --       ((mem_progPoints_iff T _).mp hv₁).2
+  --     have hv₂' : (⟨i₁, k₂⟩ : ProgPoint).idx <
+  --         ((Config.run State.initial T).progOf (⟨i₁, k₂⟩ : ProgPoint).thread).length :=
+  --       ((mem_progPoints_iff T _).mp hv₂).2
+  --     obtain ⟨n₁, ht₁⟩ := exists_time_of_ends_done hcomplete hdone hv₁'
+  --     obtain ⟨n₂, ht₂⟩ := exists_time_of_ends_done hcomplete hdone hv₂'
+  --     have hn : n₁ ≤ n₂ := hle τ hcomplete n₁ n₂ ht₁ ht₂
+  --     have hidx : k₁ < k₂ := by
+  --       rcases Nat.lt_trichotomy k₁ k₂ with h | h | h
+  --       · exact h
+  --       · exact absurd h hη
+  --       · exact absurd (time_lt_of_idx_lt ht₂ ht₁ rfl h) (by omega)
+  --     exact progOrder_happensBefore (le_of_lt hidx) ((mem_progPoints_iff T _).mp hv₂).2
+  --   · -- different threads: contrapositive via the reversing-schedule lemma
+  --     by_contra hcon
+  --     obtain ⟨τ', hτ'c, n₁, n₂, ht₁, ht₂, hlt⟩ := exists_reversing_trace hws hv₁ hv₂ hcon
+  --     exact absurd (hle τ' hτ'c n₁ n₂ ht₁ ht₂) (by omega)
 
 /-- **Lemma 1.** For a well-synchronized configuration `(I, T)`, the static
 happens-before relation constructed in Figure 4 — `happensBefore T τ`, the
 reflexive-transitive closure of `initRelation T τ` — is sound and precise in the
-sense of Definition 4 (`Weft.SoundAndPrecise`). Assembled from the two directions
-`happensBefore_sound` and `happensBefore_precise`. -/
+sense of Definition 4 (`Weft.SoundAndPrecise`), **on program points**.
+
+The valid-point restriction (`η₁ η₂ ∈ T.progPoints`) is required: the unrestricted
+`SoundAndPrecise` is false, because for a never-executing point the timing side is
+vacuously true while `happensBefore` cannot relate it (see `happensBefore_precise`).
+Assembled from the two directions `happensBefore_sound` and `happensBefore_precise`. -/
 theorem soundAndPrecise_happensBefore {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hws : T.WellSynchronized) :
-    SoundAndPrecise (Config.run State.initial T) (happensBefore T τ) := by
-  intro η₁ η₂
-  exact ⟨happensBefore_sound hτ hws, happensBefore_precise hτ hws⟩
+    ∀ η₁ η₂ : ProgPoint, η₁ ∈ T.progPoints → η₂ ∈ T.progPoints →
+      (happensBefore T τ η₁ η₂ ↔
+        ∀ τ', IsCompleteTraceFrom (Config.run State.initial T) τ' →
+          ∀ n₁ n₂, IsTimeOf (Config.run State.initial T) τ' η₁ n₁ →
+            IsTimeOf (Config.run State.initial T) τ' η₂ n₂ → n₁ ≤ n₂) := by
+  intro η₁ η₂ hv₁ hv₂
+  exact ⟨happensBefore_sound hτ hws, happensBefore_precise hτ hws hv₁ hv₂⟩
 
 /-! ## Theorem 1 — soundness of `CheckWellSynchronized`
 
