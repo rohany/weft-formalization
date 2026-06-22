@@ -1007,4 +1007,25 @@ theorem wellSynchronized_of_check {T : CTA} {τ : List Config}
     T.WellSynchronized := by
   sorry
 
+/-! ## Theorem 2 — completeness of `CheckWellSynchronized`
+
+The paper's **Theorem 2** (the converse of Theorem 1): the check never rejects a
+genuinely well-synchronized CTA (`T.WellSynchronized → (CheckWellSynchronized T τ).1 =
+true`). Stated below in the equivalent contrapositive direction — a configuration that
+is *not* well-synchronized always fails the check. (Per the paper, this follows from
+the preciseness half of Lemma 1
+(`happensBefore_precise`): a missing happens-before edge witnesses a schedule that
+reorders the synchronizations, so the pairwise check in Step 3 of Figure 4 must find
+some unordered `(generation k, generation k+1)` barrier pair and return `false`.)
+Stated here as a stub. -/
+
+/-- **Theorem 2 (completeness).** If `τ` is a complete trace from `(I, T)` ending in
+`done` (`τ ≡ (I, T) ⤳* (F, done)`) and `T` is *not* well-synchronized, then
+`CheckWellSynchronized T τ` returns `false`. -/
+theorem check_false_of_not_wellSynchronized {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hns : ¬ T.WellSynchronized) :
+    (CheckWellSynchronized T τ).1 = false := by
+  sorry
+
 end Weft
