@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Rohan Yadav
 -/
 import Weft.WellSynchronized
+import Weft.CheckWellSynchronized
 
 /-!
 # Sequential composition and angelic completion
@@ -367,5 +368,173 @@ theorem CTA.WellSynchronized.seq_angelic_completion {A B : CTA} (hids : A.ids = 
   obtain ⟨t, ht⟩ := hA.exists_successfulTrace
   obtain ⟨t', ht', hpre⟩ := seq_angelic_prefix hids hAB t ht
   exact ⟨t, t', ht, ht', hpre⟩
+
+/-- Lifting a configuration into `A ⨾ B` appends `B`'s program to every thread's
+remaining program — at the level of `progOf`: `(Config.seqLift A B X).progOf i =
+X.progOf i ++ B.prog i`. (For a finished `A`-configuration `done`, `X.progOf i = []`,
+so the lift's program is exactly `B.prog i`.) -/
+theorem Config.seqLift_progOf (A B : CTA) (X : Config) (i : ThreadId) :
+    (Config.seqLift A B X).progOf i = X.progOf i ++ B.prog i := by
+  cases X <;> rfl
+
+/-- The configuration just before a successful trace's terminal `done` has every
+thread finished. The final step `X ⤳ done` can only be `CTAStep.done`, whose premise
+`CTA.IsDone` makes every thread's program empty; so `X.progOf i = []` for every `i`. -/
+theorem progOf_penultimate_done {t : List Config} (hchain : List.IsChain CTAStep t)
+    {sd : State} (hlast : t.getLast? = some (Config.done sd))
+    {X : Config} (hX : t.dropLast.getLast? = some X) (i : ThreadId) : X.progOf i = [] := by
+  have hne : t ≠ [] := by intro h; rw [h] at hlast; simp at hlast
+  have hdropne : t.dropLast ≠ [] := by intro h; rw [h] at hX; simp at hX
+  -- name the two relevant configurations via `getLast`
+  have hgl : t.getLast hne = Config.done sd := by
+    have h := List.getLast?_eq_some_getLast hne; rw [hlast, Option.some.injEq] at h; exact h.symm
+  have hgl' : t.dropLast.getLast hdropne = X := by
+    have h := List.getLast?_eq_some_getLast hdropne; rw [hX, Option.some.injEq] at h; exact h.symm
+  -- `t = t.dropLast.dropLast ++ X :: done sd :: []`
+  have e1 : t.dropLast ++ [Config.done sd] = t := by
+    have h := List.dropLast_concat_getLast hne; rwa [hgl] at h
+  have e2 : t.dropLast.dropLast ++ [X] = t.dropLast := by
+    have h := List.dropLast_concat_getLast hdropne; rwa [hgl'] at h
+  have hdecomp : t.dropLast.dropLast ++ X :: Config.done sd :: [] = t := by
+    rw [show X :: Config.done sd :: [] = [X] ++ [Config.done sd] from rfl, ← List.append_assoc,
+      e2, e1]
+  -- the last step is `CTAStep X (done sd)`; only `CTAStep.done` can produce a `done`
+  have hstep : CTAStep X (Config.done sd) :=
+    List.isChain_iff_forall_rel_of_append_cons_cons.mp hchain hdecomp.symm
+  cases hstep with
+  | @done s T hdone _ =>
+    change T.prog i = []
+    by_cases hi : i ∈ T.ids
+    · exact hdone i hi
+    · exact T.nil_outside_ids i hi
+
+/-- **No happens-before edge runs from `B` back into `A`.** Take two straight-line
+fragments `A` and `B` of one kernel (`hids : A.ids = B.ids`) with both `A` and the
+composition `A ⨾ B` well-synchronized, and let `τ` be a successful trace of `A ⨾ B`,
+off which Figure 4 builds the happens-before relation `happensBefore (A ⨾ B) τ`. Then
+that relation never orders a `B`-instruction before an `A`-instruction: there is no
+pair `(s, d)` in it with `s` in the `B`-phase and `d` in the `A`-phase.
+
+A program point `η = ⟨i, k⟩` of `A ⨾ B` indexes into `(A ⨾ B).prog i = A.prog i ++
+B.prog i`, so it is **in `A`** (`d` here) exactly when `k < |A.prog i|` — the command
+comes from `A`'s fragment — and **in `B`** (`s` here) exactly when `|A.prog i| ≤ k <
+|A.prog i| + |B.prog i|` — a genuine point of `A ⨾ B` whose command comes from the
+appended `B`.
+
+Proof idea (uses Lemma 1's soundness, `happensBefore_sound`, with the angelic trace
+of `seq_angelic_completion`): if `s` were happens-before `d`, soundness would force
+`t(s) ≤ t(d)` in *every* complete trace of `A ⨾ B`. But `WS(A)` produces — via
+`seq_angelic_completion` — the angelic schedule that runs `A` entirely to completion
+and only then runs `B`; in it every `A`-instruction (so `d`) executes strictly before
+every `B`-instruction (so `s`), i.e. `t(d) < t(s)`. Contradiction.
+NOTE: rohany (this is not a major theorem, but one that wouldn't be possible if the
+angelic approach was not actually true. )
+-/
+theorem CTA.WellSynchronized.seq_no_happensBefore_B_to_A {A B : CTA} (hids : A.ids = B.ids)
+    (hA : A.WellSynchronized) (hAB : (A.seq B hids).WellSynchronized)
+    {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial (A.seq B hids)) τ) :
+    ¬ ∃ s d : ProgPoint,
+        happensBefore (A.seq B hids) τ s d ∧
+        -- `s ∈ B`: `s` is a program point of `A ⨾ B` lying in the appended `B`-part.
+        ((A.prog s.thread).length ≤ s.idx ∧
+          s.idx < (A.prog s.thread).length + (B.prog s.thread).length) ∧
+        -- `d ∈ A`: `d`'s command comes from `A`'s fragment.
+        d.idx < (A.prog d.thread).length := by
+  rintro ⟨s, d, hR, ⟨hsB1, hsB2⟩, hdA⟩
+  -- `progOf` of the start configuration splits as `A.prog i ++ B.prog i`.
+  have hC0prog : ∀ i, (Config.run State.initial (A.seq B hids)).progOf i
+      = A.prog i ++ B.prog i := fun _ => rfl
+  -- Soundness of the happens-before relation (Lemma 1, `happensBefore_sound`): since
+  -- `A ⨾ B` is well-synchronized and `τ` runs it to `done`, every happens-before pair
+  -- is a genuine ordering — `s` runs no later than `d` in *every* complete trace.
+  have hsound := happensBefore_sound hτ hAB hR
+  -- The contradiction comes from one specific schedule: the *angelic* trace `t'` that
+  -- runs `A` entirely to completion and only then runs `B` (from `WS(A)` and `WS(A ⨾ B)`
+  -- via `seq_angelic_completion`). Its `A`-phase is the lifted `A`-execution `P`, a
+  -- prefix of `t'`.
+  obtain ⟨t, t', ht, ht', hpre⟩ := CTA.WellSynchronized.seq_angelic_completion hids hA hAB
+  set P := t.dropLast.map (Config.seqLift A B) with hPdef
+  obtain ⟨rest, hrest⟩ := hpre              -- `hrest : P ++ rest = t'`
+  obtain ⟨sdone, htlast⟩ := ht'.2
+  have ht'complete : IsCompleteTraceFrom (Config.run State.initial (A.seq B hids)) t' := ht'.1
+  have ht'chain : List.IsChain CTAStep t' := ht'complete.1.subtrace
+  -- `d` and `s` both execute in `t'` (it ends in `done`, so every command runs).
+  obtain ⟨n₂, htd⟩ : ∃ n, IsTimeOf (Config.run State.initial (A.seq B hids)) t' d n :=
+    exists_time_of_ends_done (η := d) ht'complete htlast
+      (by rw [hC0prog, List.length_append]; omega)
+  obtain ⟨n₁, hts⟩ : ∃ n, IsTimeOf (Config.run State.initial (A.seq B hids)) t' s n :=
+    exists_time_of_ends_done (η := s) ht'complete htlast
+      (by rw [hC0prog, List.length_append]; omega)
+  -- `P` is nonempty: `t` has length ≥ 2 (it runs from `run init A` to `done`).
+  obtain ⟨sA, htAlast⟩ := ht.2
+  have hthead : t.head? = some (Config.run State.initial A) := ht.1.2
+  have htlen2 : 2 ≤ t.length := by
+    rcases t with _ | ⟨c0, _ | ⟨c1, tr⟩⟩
+    · simp at hthead
+    · simp only [List.head?_cons, Option.some.injEq] at hthead
+      simp only [List.getLast?_singleton, Option.some.injEq] at htAlast
+      rw [hthead] at htAlast; simp at htAlast
+    · simp only [List.length_cons]; omega
+  have hPlen : P.length = t.length - 1 := by rw [hPdef, List.length_map, List.length_dropLast]
+  have hPpos : 0 < P.length := by rw [hPlen]; omega
+  have hPne : P ≠ [] := List.ne_nil_of_length_pos hPpos
+  have hdropne : t.dropLast ≠ [] := fun h => hPne (by rw [hPdef, h, List.map_nil])
+  -- `Cstar`, the last config of `P` ("`A` done, `B` poised"): its remaining program is
+  -- exactly `B.prog i`, since the penultimate config of `t` is all-empty.
+  obtain ⟨Cstar, hCstar⟩ : ∃ C, P.getLast? = some C := by
+    cases hPl : P.getLast? with
+    | none => rw [List.getLast?_eq_none_iff] at hPl; exact absurd hPl hPne
+    | some C => exact ⟨C, rfl⟩
+  have hXempty : ∀ i, (t.dropLast.getLast hdropne).progOf i = [] := fun i =>
+    progOf_penultimate_done ht.1.1.subtrace htAlast (List.getLast?_eq_some_getLast hdropne) i
+  have hCstarprog : ∀ i, Cstar.progOf i = B.prog i := by
+    intro i
+    have hmap : P.getLast? = (t.dropLast.getLast?).map (Config.seqLift A B) := by
+      rw [hPdef, List.getLast?_map]
+    rw [List.getLast?_eq_some_getLast hdropne, Option.map_some, hCstar, Option.some.injEq] at hmap
+    rw [hmap, Config.seqLift_progOf, hXempty i, List.nil_append]
+  -- index of `Cstar` in `t'`.
+  have hp : P.length - 1 < P.length := by omega
+  have hCstaridx : t'[P.length - 1]? = some Cstar := by
+    rw [← hrest, List.getElem?_append_left hp, ← List.getLast?_eq_getElem?]; exact hCstar
+  -- **P-invariant**: in `P` every thread's program is `≥ |B.prog i|` long (B intact).
+  have hPinv : ∀ q (C : Config), q < P.length → t'[q]? = some C →
+      ∀ i, (B.prog i).length ≤ (C.progOf i).length := by
+    intro q C hq hCq i
+    rw [← hrest, List.getElem?_append_left hq, hPdef, List.getElem?_map] at hCq
+    obtain ⟨X', _, hCeq⟩ := Option.map_eq_some_iff.mp hCq
+    rw [← hCeq, Config.seqLift_progOf, List.length_append]; omega
+  -- **tail-invariant**: from `Cstar` onward every thread's program is `≤ |B.prog i|`.
+  have hTinv : ∀ q (C : Config), P.length - 1 ≤ q → t'[q]? = some C →
+      ∀ i, (C.progOf i).length ≤ (B.prog i).length := by
+    intro q C hq hCq i
+    have hsuf := progOf_suffix_index_le ht'chain i hCstaridx hq hCq
+    have hle := suffix_length_le hsuf
+    rwa [hCstarprog i] at hle
+  -- `d` (in the `A`-phase) executes before reaching `Cstar`: `n₂ ≤ P.length - 1`.
+  obtain ⟨-, -, jd, Cd, _Cd', hn₂eq, hCdj, _, hCdeq, _⟩ := id htd
+  have hCdlen : (Cd.progOf d.thread).length
+      = (A.prog d.thread).length + (B.prog d.thread).length - d.idx := by
+    rw [hCdeq, hC0prog, List.length_drop, List.length_append]
+  have hjd : jd < P.length - 1 := by
+    by_contra hcon
+    rw [not_lt] at hcon
+    have h := hTinv jd Cd hcon hCdj d.thread
+    rw [hCdlen] at h; omega
+  -- `s` (in the `B`-phase) executes only after `Cstar`: `P.length ≤ n₁`.
+  obtain ⟨-, -, js, _Cs, Cs', hn₁eq, _, hCsj1, _, hCs'eq⟩ := id hts
+  have hCs'len : (Cs'.progOf s.thread).length
+      = (A.prog s.thread).length + (B.prog s.thread).length - (s.idx + 1) := by
+    rw [hCs'eq, hC0prog, List.length_drop, List.length_append]
+  have hjs : P.length ≤ js + 1 := by
+    by_contra hcon
+    rw [not_le] at hcon
+    have h := hPinv (js + 1) Cs' hcon hCsj1 s.thread
+    rw [hCs'len] at h; omega
+  -- assemble: `n₂ = jd+1 ≤ P.length-1 < P.length ≤ js+1 = n₁`, contradicting soundness.
+  have hlt : n₂ < n₁ := by omega
+  have hle : n₁ ≤ n₂ := hsound t' ht'complete n₁ n₂ hts htd
+  omega
 
 end Weft
