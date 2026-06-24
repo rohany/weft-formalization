@@ -2707,6 +2707,37 @@ theorem CTA.WellSynchronized.second_batch_hb_within {I : CTA} (h : I.ConsistentA
     simp only [Nat.add_sub_cancel_left] at hA'
     exact Relation.ReflTransGen.mono (fun a b hab => hab.1) hA'
 
+/-- **Lemma 4.2, conclusion 1 (within-batch), `n`-batch case (last two batches).**
+*Stated, not yet proved.* The `n`-batch generalization of `second_batch_hb_within`: for the
+`n`-fold composition `(I ^ k) ^ n` (`n ≥ 2`), there is a successful trace `τ` whose
+happens-before relation agrees *internally* between the **last two** batches. With
+`L = ((I ^ k).prog _).length`, the copy of body instruction `⟨t, j⟩` (`j < L`) in batch `i`
+(0-indexed) is `⟨t, i * L + j⟩`; the last batch is `i = n - 1` and the second-to-last is
+`i = n - 2`. The claim: for any two body instructions `⟨t₁, j₁⟩` and `⟨t₂, j₂⟩` of `I ^ k`,
+their second-to-last-batch copies are happens-before related exactly when their last-batch
+copies are.
+
+This is conclusion 1 of `structure-r-across-iterations` applied to the final batch pair;
+`second_batch_hb_within` is the `n = 2` instance (`n - 2 = 0`, `n - 1 = 1`, and
+`(I ^ k) ^ 2 = (I ^ k) ⨾ (I ^ k)`). The hypothesis is the `CTA.BatchesWellSynchronized`
+family — every batch-prefix `(I ^ k) ^ m` (`1 ≤ m ≤ n`) is well-synchronized — generalizing
+the two `WellSynchronized` assumptions of `second_batch_hb_within`. As there, the statement
+is for *all* instruction pairs, not only barrier instructions (`R` orders read/write
+instructions too, via program order and the sync edges). -/
+theorem CTA.WellSynchronized.last_batch_hb_within {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 2 ≤ n)
+    (hWS : (I ^ k).BatchesWellSynchronized n) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
+      ∀ (t₁ t₂ : ThreadId) (j₁ j₂ : Nat),
+        j₁ < ((I ^ k).prog t₁).length → j₂ < ((I ^ k).prog t₂).length →
+        (happensBefore ((I ^ k) ^ n) τ
+              ⟨t₁, (n - 2) * ((I ^ k).prog t₁).length + j₁⟩
+              ⟨t₂, (n - 2) * ((I ^ k).prog t₂).length + j₂⟩
+          ↔ happensBefore ((I ^ k) ^ n) τ
+              ⟨t₁, (n - 1) * ((I ^ k).prog t₁).length + j₁⟩
+              ⟨t₂, (n - 1) * ((I ^ k).prog t₂).length + j₂⟩) := by
+  sorry
+
 /-- **Consecutive-batch recycle offset for three batches** (regrouped as `A ⨾ (A ⨾ A)`).
 *(Helper for `third_batch_gen_offset`.)* There is a successful trace `τ` of the three-batch
 program along which, for every barrier instruction and every batch index `i < 2`, the recycle
@@ -3294,5 +3325,40 @@ theorem CTA.WellSynchronized.second_batch_hb_across {I : CTA} (h : I.ConsistentA
     rw [show (A.prog t₂).length + ((A.prog t₂).length + j₂) = 2 * (A.prog t₂).length + j₂ by omega]
       at hUp
     exact Relation.ReflTransGen.mono (fun a b hab => hab.1) hUp
+
+/-- **Lemma 4.2, conclusion 2 (across batches), `n`-batch case (last three batches).**
+*Stated, not yet proved.* The `n`-batch generalization of `second_batch_hb_across`: for the
+`n`-fold composition `(I ^ k) ^ n` (`n ≥ 3`), there is a successful trace `τ` along which the
+happens-before edge running from the **second-to-last** batch into the **last** batch agrees
+with the corresponding edge from the **third-to-last** batch into the **second-to-last**.
+Those are two distinct adjacent-batch pairs, so the statement genuinely refers to the last
+*three* batches (it cannot be expressed on only two), which is why `n ≥ 3`.
+
+With `L = ((I ^ k).prog _).length`, the copy of body instruction `⟨t, j⟩` (`j < L`) in batch
+`i` (0-indexed) is `⟨t, i * L + j⟩`. The claim relates the edge from batch `n - 2`'s copy of
+`⟨t₁, j₁⟩` (at index `(n - 2) · L + j₁`) into batch `n - 1`'s copy of `⟨t₂, j₂⟩` (at index
+`(n - 1) · L + j₂`) with the edge from batch `n - 3`'s copy of `⟨t₁, j₁⟩` (at index
+`(n - 3) · L + j₁`) into batch `n - 2`'s copy of `⟨t₂, j₂⟩` (at index `(n - 2) · L + j₂`).
+
+`second_batch_hb_across` is the `n = 3` instance (`n - 3 = 0`, `n - 2 = 1`, `n - 1 = 2`, and
+`(I ^ k) ^ 3 = ((I ^ k) ⨾ (I ^ k)) ⨾ (I ^ k)`). The hypothesis is the
+`CTA.BatchesWellSynchronized` family — every batch-prefix `(I ^ k) ^ m` (`1 ≤ m ≤ n`) is
+well-synchronized — generalizing the three `WellSynchronized` assumptions of
+`second_batch_hb_across`. As there, the statement is for *all* instruction pairs, not only
+barrier instructions (`R` orders read/write instructions too, via program order and the sync
+edges). -/
+theorem CTA.WellSynchronized.last_batch_hb_across {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 3 ≤ n)
+    (hWS : (I ^ k).BatchesWellSynchronized n) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
+      ∀ (t₁ t₂ : ThreadId) (j₁ j₂ : Nat),
+        j₁ < ((I ^ k).prog t₁).length → j₂ < ((I ^ k).prog t₂).length →
+        (happensBefore ((I ^ k) ^ n) τ
+              ⟨t₁, (n - 2) * ((I ^ k).prog t₁).length + j₁⟩
+              ⟨t₂, (n - 1) * ((I ^ k).prog t₂).length + j₂⟩
+          ↔ happensBefore ((I ^ k) ^ n) τ
+              ⟨t₁, (n - 3) * ((I ^ k).prog t₁).length + j₁⟩
+              ⟨t₂, (n - 2) * ((I ^ k).prog t₂).length + j₂⟩) := by
+  sorry
 
 end Weft
