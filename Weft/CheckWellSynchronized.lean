@@ -274,6 +274,7 @@ theorem mem_iterate_of_isChain (R : Finset (α × α)) :
           rw [← hlen]
           exact mem_iterate_prepend R hax hxb
 
+omit [DecidableEq α] in
 /-- A nodup `R`-chain has at most `R.card` edges (its distinct consecutive pairs are
 distinct elements of `R`). -/
 theorem nodup_chain_length_le (R : Finset (α × α)) {a : α} {l : List α}
@@ -298,6 +299,7 @@ theorem nodup_chain_length_le (R : Finset (α × α)) {a : α} {l : List α}
       exact (List.Nodup.getElem_inj_iff hnd).mp hij.1
   rwa [Finset.card_range] at key
 
+omit [DecidableEq α] in
 /-- Loop-cutting: any nonempty `R`-chain contains a *nodup* `R`-chain with the same
 head and last (drawn from the same vertices). -/
 theorem exists_nodup_isChain (R : Finset (α × α)) :
@@ -362,7 +364,7 @@ theorem mem_transClosure_of_transGen (R : Finset (α × α)) {a b : α} (hne : a
   have hchain : List.IsChain (fun x y => (x, y) ∈ R) (a :: c :: l') :=
     hchain'.cons (by intro z hz; rw [List.head?_cons, Option.mem_some_iff] at hz; exact hz ▸ hac)
   have hlast : (a :: c :: l').getLast? = some b := by
-    rw [List.getLast?_cons_cons, List.getLast?_eq_getLast (l := c :: l') (by simp), hlast']
+    rw [List.getLast?_cons_cons, List.getLast?_eq_some_getLast (l := c :: l') (by simp), hlast']
   -- cut to a nodup chain with the same endpoints
   obtain ⟨ws, hwne, hwc, hwh, hwl, hwnd, _⟩ :=
     exists_nodup_isChain R (a :: c :: l') (by simp) hchain
@@ -503,7 +505,7 @@ theorem initRelation_cases {T : CTA} {τ : List Config} {a b : ProgPoint}
             split at hin2
             · rename_i hcond
               obtain ⟨hbb, _, hgen⟩ := hcond
-              simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false,
+              simp only [List.mem_cons, List.not_mem_nil, or_false,
                 Prod.mk.injEq] at hin2
               rcases hin2 with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩
               · refine ⟨hc1, hc2, Or.inr ⟨b', n', hcmd2, ?_, hgen⟩⟩
@@ -647,7 +649,7 @@ theorem pointTime_eq_of_isTimeOf {T : CTA} {τ : List Config} {η : ProgPoint} {
   have hjmem : j ∈ List.range (τ.length - 1) := List.mem_range.mpr (by omega)
   have hne : (List.range (τ.length - 1)).findSome? f ≠ none := by
     rw [Ne, List.findSome?_eq_none_iff]
-    push_neg
+    push Not
     exact ⟨j, hjmem, by rw [hfj]; simp⟩
   obtain ⟨m'', hm''⟩ := Option.ne_none_iff_exists'.mp hne
   rw [hm'']
@@ -893,7 +895,7 @@ theorem mem_initRelation_iff {T : CTA} {τ : List Config} {a b : ProgPoint} :
               split at hin2
               · rename_i hcond
                 obtain ⟨rfl, rfl, hgen⟩ := hcond
-                simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false,
+                simp only [List.mem_cons, List.not_mem_nil, or_false,
                   Prod.mk.injEq] at hin2
                 rcases hin2 with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩
                 · exact Or.inr (Or.inr ⟨bb, n, hc1, hc2, hcmd1, hcmd2, hgen⟩)
@@ -950,8 +952,8 @@ theorem time_lt_of_idx_lt {C₀ : Config} {τ : List Config} {η ξ : ProgPoint}
     omega
 
 section IdealCut
-open Classical
 
+open Classical in
 /-- The **cut** for thread `i` (relative to `η₁`): the least index of a point that is
 happens-before-after `η₁` — an `F`-position — or the program length if none. It splits
 thread `i` into the ideal `G`-prefix `[0, cut)` (points *not* after `η₁`) and the `F`-
@@ -966,6 +968,7 @@ particular `η₁` itself does (reflexively), so `η₁ ∉ G`. -/
 theorem fcut_le_of_hb {T : CTA} {τ : List Config} {η₁ η : ProgPoint}
     (h : happensBefore T τ η₁ η) (hv : η ∈ T.progPoints) :
     fcut T τ η₁ η.thread ≤ η.idx := by
+  classical
   have hηeq : (⟨η.thread, η.idx⟩ : ProgPoint) = η := rfl
   have hex : ∃ k, happensBefore T τ η₁ ⟨η.thread, k⟩ ∧ k < (T.prog η.thread).length :=
     ⟨η.idx, by rw [hηeq]; exact h, ((mem_progPoints_iff T η).mp hv).2⟩
@@ -978,10 +981,11 @@ in particular `η₂` does, since `¬ happensBefore η₁ η₂`, so `η₂ ∈ 
 theorem lt_fcut_of_not_hb {T : CTA} {τ : List Config} {η₁ η : ProgPoint}
     (h : ¬ happensBefore T τ η₁ η) (hv : η ∈ T.progPoints) :
     η.idx < fcut T τ η₁ η.thread := by
+  classical
   have hηeq : (⟨η.thread, η.idx⟩ : ProgPoint) = η := rfl
   have hvlt : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hv).2
   by_contra hle
-  push_neg at hle
+  push Not at hle
   unfold fcut at hle
   split at hle
   · rename_i hex
@@ -992,6 +996,7 @@ theorem lt_fcut_of_not_hb {T : CTA} {τ : List Config} {η₁ η : ProgPoint}
 /-- The cut never exceeds the program length. -/
 theorem fcut_le_length (T : CTA) (τ : List Config) (η₁ : ProgPoint) (i : ThreadId) :
     fcut T τ η₁ i ≤ (T.prog i).length := by
+  classical
   unfold fcut
   split
   · rename_i h; exact le_of_lt (Nat.find_spec h).2
@@ -1035,7 +1040,7 @@ theorem time_le_of_progOf_le {C₀ : Config} {τ' : List Config} {η : ProgPoint
   obtain ⟨hcomp, _, j, Cj, _, rfl, hCj, _, hCjeq, _⟩ := ht
   have hchain := hcomp.1.subtrace
   by_contra hlt
-  push_neg at hlt
+  push Not at hlt
   have hsuf := progOf_suffix_index_le hchain η.thread hp (by omega : p ≤ j) hCj
   have := suffix_length_le hsuf
   rw [hCjeq, List.length_drop] at this
@@ -1050,7 +1055,7 @@ theorem lt_time_of_lt_progOf {C₀ : Config} {τ' : List Config} {η : ProgPoint
   obtain ⟨hcomp, _, j, _, Cj', rfl, _, hCj1, _, hCj1eq⟩ := ht
   have hchain := hcomp.1.subtrace
   by_contra hle
-  push_neg at hle
+  push Not at hle
   have hsuf := progOf_suffix_index_le hchain η.thread hCj1 (by omega : j + 1 ≤ p) hp
   have := suffix_length_le hsuf
   rw [hCj1eq, List.length_drop] at this
@@ -1400,7 +1405,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
   obtain ⟨s, T_C, rfl, hbound, hpurity⟩ := hGB
   have hwf : (Config.run s T_C).WF := WF_of_reaches hreach
   -- a `G`-thread `i₀` still has commands below its cut (`¬ Gdone`)
-  simp only [Gdone, not_forall, _root_.not_imp] at hnotdone
+  simp only [Gdone, not_forall] at hnotdone
   obtain ⟨i₀, hi₀ids, hi₀ne⟩ := hnotdone
   obtain ⟨e₀, he₀le, he₀prog⟩ := hbound i₀
   have hi₀G : e₀ < fcut T τ η₁ i₀ := by
@@ -1436,7 +1441,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
         have hpj := hpurity b' j hjsynced
         simpa only [CTA.wake, hjnotI, if_false] using hpj
   · -- **Case B**: no barrier is full, so `hbar` holds (every barrier unconfigured/under-full).
-    push_neg at hfull
+    push Not at hfull
     have hbar : ∀ bb, s.B bb = BarrierState.unconfigured ∨
         ∃ I A n, s.B bb = ⟨I, A, some n⟩ ∧ I.length + A < (n : Nat) := by
       intro bb
@@ -1538,7 +1543,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
             intro b'' j hj
             by_cases hb''b : b'' = b
             · subst hb''b
-              simp only [Function.update_self, hbcfg, List.mem_cons] at hj
+              simp only [Function.update_self, List.mem_cons] at hj
               rcases hj with rfl | hj
               · exact Or.inl rfl
               · exact Or.inr (by rw [hbcfg]; exact hj)
@@ -1612,9 +1617,9 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
       obtain ⟨m₀, hm₀⟩ := exists_time_of_ends_done htrIC htrdone (η := ⟨i₀, e₀⟩) hci₀L
       have hpcm₀ : pc < m₀ := by
         refine lt_time_of_lt_progOf hm₀ htrpc ?_
-        show ((Config.run State.initial T).progOf i₀).length - e₀ - 1 < (T_C.prog i₀).length
+        change ((Config.run State.initial T).progOf i₀).length - e₀ - 1 < (T_C.prog i₀).length
         rw [he₀prog, List.length_drop]
-        show (T.prog i₀).length - e₀ - 1 < (T.prog i₀).length - e₀
+        change (T.prog i₀).length - e₀ - 1 < (T.prog i₀).length - e₀
         omega
       -- The step `m₀-1 → m₀` recycles `b₁` (waking `i₀`).
       obtain ⟨Cm, Cm', hCm, hCm', hrecm⟩ := sync_time_recycles hm₀ hci₀cmd
@@ -1694,9 +1699,9 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
         (show et < ((Config.run State.initial T).progOf t'').length from htL)
       have hpcmt : pc < mt := by
         refine lt_time_of_lt_progOf hmt htrpc ?_
-        show ((Config.run State.initial T).progOf t'').length - et - 1 < (T_C.prog t'').length
+        change ((Config.run State.initial T).progOf t'').length - et - 1 < (T_C.prog t'').length
         rw [hetprog, List.length_drop]
-        show (T.prog t'').length - et - 1 < (T.prog t'').length - et
+        change (T.prog t'').length - et - 1 < (T.prog t'').length - et
         omega
       have hrct'' : recycleCount b'' tr (mt - 1) = recycleCount b'' tr pc :=
         parked_sync_recycleCount hBItr rfl hmt htrpc ht'' hetprog hpcmt
@@ -1806,7 +1811,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
           (sd.B b'').synced.length + (sd.B b'').arrived <
             (sd'.B b'').synced.length + (sd'.B b'').arrived := by
         by_contra hcon
-        push_neg at hcon
+        push Not at hcon
         have hmono : ∀ e, pc ≤ e → e ≤ dw → ∀ se Te, tr[e]? = some (Config.run se Te) →
             (se.B b'').synced.length + (se.B b'').arrived ≤
               (s.B b'').synced.length + (s.B b'').arrived := by
@@ -1890,7 +1895,8 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
           by_cases hbb : b'' = b₀
           · subst hbb
             have hsuf0 := progOf_suffix_index_le htrIC.1.subtrace ii htr0 (Nat.zero_le d) hsd
-            have hedprog : Td.prog ii = (T.prog ii).drop ((T.prog ii).length - (Td.prog ii).length) :=
+            have hedprog :
+                Td.prog ii = (T.prog ii).drop ((T.prog ii).length - (Td.prog ii).length) :=
               List.IsSuffix.eq_drop hsuf0
             have hn2 : nn = n₂ := by
               have hc := hcountconst d hpcd (le_of_lt hd_dw) sd Td hsd
@@ -1908,7 +1914,8 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
             have hmi : IsTimeOf (Config.run State.initial T) tr
                 (⟨ii, (T.prog ii).length - (Td.prog ii).length⟩ : ProgPoint) (d + 1) :=
               ⟨htrIC, hLcfg, d, _, _, rfl, hsd, hsd', hedprog, hC'eq⟩
-            have hgenci : pointGen T τ (⟨ii, (T.prog ii).length - (Td.prog ii).length⟩ : ProgPoint) =
+            have hgenci :
+                pointGen T τ (⟨ii, (T.prog ii).length - (Td.prog ii).length⟩ : ProgPoint) =
                 recycleCount b'' tr pc + 1 := by
               rw [hgenTr _ b'' (d + 1) (by rw [hcicmd]; rfl)
                 (mem_progPoints_of_cmdAt T hcicmd) hmi, Nat.add_sub_cancel,
@@ -1919,7 +1926,8 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
           by_cases hbb : b'' = b₀
           · subst hbb
             have hsuf0 := progOf_suffix_index_le htrIC.1.subtrace ii htr0 (Nat.zero_le d) hsd
-            have hedprog : Td.prog ii = (T.prog ii).drop ((T.prog ii).length - (Td.prog ii).length) :=
+            have hedprog :
+                Td.prog ii = (T.prog ii).drop ((T.prog ii).length - (Td.prog ii).length) :=
               List.IsSuffix.eq_drop hsuf0
             have hn2 : nn = n₂ := by
               have hc := hcountconst d hpcd (le_of_lt hd_dw) sd Td hsd
@@ -1927,7 +1935,8 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
             subst hn2
             have hcicmd : T.cmdAt (⟨ii, (T.prog ii).length - (Td.prog ii).length⟩ : ProgPoint) =
                 some (Cmd.sync b'' nn) := cmd_at_last hsuf0 hpi
-            have hii_syncd : ii ∈ ((Function.update sd.B b'' ⟨ii :: I, A, some nn⟩) b'').synced := by
+            have hii_syncd :
+                ii ∈ ((Function.update sd.B b'' ⟨ii :: I, A, some nn⟩) b'').synced := by
               rw [Function.update_self]; exact List.mem_cons_self
             have hprog' : (Td.set ii hii (Cmd.sync b'' nn :: c)).prog ii =
                 (T.prog ii).drop ((T.prog ii).length - (Td.prog ii).length) := by
@@ -1939,19 +1948,21 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
               (η := ⟨ii, (T.prog ii).length - (Td.prog ii).length⟩) hLcfg
             have hd1mi : d + 1 < mi := by
               refine lt_time_of_lt_progOf hmi hsd' ?_
-              show ((Config.run State.initial T).progOf ii).length -
+              change ((Config.run State.initial T).progOf ii).length -
                   ((T.prog ii).length - (Td.prog ii).length) - 1 <
                   ((Td.set ii hii (Cmd.sync b'' nn :: c)).prog ii).length
               rw [hprog', List.length_drop]
-              show (T.prog ii).length - ((T.prog ii).length - (Td.prog ii).length) - 1 <
+              change (T.prog ii).length - ((T.prog ii).length - (Td.prog ii).length) - 1 <
                 (T.prog ii).length - ((T.prog ii).length - (Td.prog ii).length)
               omega
             have hrcmi : recycleCount b'' tr (mi - 1) = recycleCount b'' tr pc := by
               rw [parked_sync_recycleCount hBItr rfl hmi hsd' hii_syncd hprog' hd1mi,
                 hrcc (d + 1) (by omega) (by omega)]
-            have hgenci : pointGen T τ (⟨ii, (T.prog ii).length - (Td.prog ii).length⟩ : ProgPoint) =
+            have hgenci :
+                pointGen T τ (⟨ii, (T.prog ii).length - (Td.prog ii).length⟩ : ProgPoint) =
                 recycleCount b'' tr pc + 1 := by
-              rw [hgenTr _ b'' mi (by rw [hcicmd]; rfl) (mem_progPoints_of_cmdAt T hcicmd) hmi, hrcmi]
+              rw [hgenTr _ b'' mi (by rw [hcicmd]; rfl) (mem_progPoints_of_cmdAt T hcicmd) hmi,
+                hrcmi]
             exact hregfalse ii _ (Or.inr hcicmd) hgenci hedprog he
           · simp only [Function.update_of_ne hbb] at hcntlt; omega
       | @recycle s₀ T₀ b₀ I A nn hb hfull hpark =>
@@ -2111,16 +2122,18 @@ theorem exists_reversing_trace {T : CTA} {τ : List Config}
   -- `η₂ ∈ G` is already executed at `p` ⟹ `n₂ ≤ p`.
   have hn₂ : n₂ ≤ p := by
     refine time_le_of_progOf_le ht₂ hpcfg ?_
-    show (T_G.prog η₂.thread).length ≤ _
+    change (T_G.prog η₂.thread).length ≤ _
     rw [hGdone η₂.thread, List.length_drop]
-    show _ ≤ (T.prog η₂.thread).length - η₂.idx - 1
+    change _ ≤ (T.prog η₂.thread).length - η₂.idx - 1
     omega
   -- `η₁ ∈ F` is not yet executed at `p` ⟹ `p < n₁`.
   have hn₁ : p < n₁ := by
     refine lt_time_of_lt_progOf ht₁ hpcfg ?_
-    show ((Config.run State.initial T).progOf η₁.thread).length - η₁.idx - 1 < (T_G.prog η₁.thread).length
+    change ((Config.run State.initial T).progOf η₁.thread).length - η₁.idx - 1 <
+      (T_G.prog η₁.thread).length
     rw [hGdone η₁.thread, List.length_drop]
-    show (T.prog η₁.thread).length - η₁.idx - 1 < (T.prog η₁.thread).length - fcut T τ η₁ η₁.thread
+    change (T.prog η₁.thread).length - η₁.idx - 1 <
+      (T.prog η₁.thread).length - fcut T τ η₁ η₁.thread
     omega
   omega
 
@@ -2143,8 +2156,7 @@ Cases on the two points:
   barrier, and one must exhibit the `Relation.TransGen` chain witnessing it (the paper's
   argument that the `initRelation` tuples are the *only* restrictions the semantics
   imposes).
-NOTE (rohany): This is a top-level theorem.
-   -/
+NOTE (rohany): This is a top-level theorem. -/
 theorem happensBefore_precise {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hws : T.WellSynchronized) {η₁ η₂ : ProgPoint}
@@ -2164,8 +2176,10 @@ theorem happensBefore_precise {T : CTA} {τ : List Config}
       subst hthread
       replace hη : k₁ ≠ k₂ := fun h => hη (by rw [h])
       obtain ⟨hcomplete, sd, hdone⟩ := hτ
-      obtain ⟨n₁, ht₁⟩ := exists_time_of_ends_done hcomplete hdone ((mem_progPoints_iff T _).mp hv₁).2
-      obtain ⟨n₂, ht₂⟩ := exists_time_of_ends_done hcomplete hdone ((mem_progPoints_iff T _).mp hv₂).2
+      obtain ⟨n₁, ht₁⟩ :=
+        exists_time_of_ends_done hcomplete hdone ((mem_progPoints_iff T _).mp hv₁).2
+      obtain ⟨n₂, ht₂⟩ :=
+        exists_time_of_ends_done hcomplete hdone ((mem_progPoints_iff T _).mp hv₂).2
       have hn : n₁ ≤ n₂ := hle τ hcomplete n₁ n₂ ht₁ ht₂
       have hidx : k₁ < k₂ := by
         rcases Nat.lt_trichotomy k₁ k₂ with h | h | h
@@ -2187,8 +2201,7 @@ The valid-point restriction (`η₁ η₂ ∈ T.progPoints`) is required: the un
 `SoundAndPrecise` is false, because for a never-executing point the timing side is
 vacuously true while `happensBefore` cannot relate it (see `happensBefore_precise`).
 Assembled from the two directions `happensBefore_sound` and `happensBefore_precise`.
-NOTE (rohany): This is a top-level theorem.
- -/
+NOTE (rohany): This is a top-level theorem. -/
 theorem soundAndPrecise_happensBefore {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hws : T.WellSynchronized) :
@@ -2413,7 +2426,7 @@ complete trace in which `c2` does **not** have generation `k+1` — contradictin
 
 This uses the *direct* run-`G`-then-step-`c2` construction; it does **not** factor through
 the matching-arrive idea (false: `sync_configure` registers a thread directly, with no prior
-`arrive`). It is built on the (sorried) `run_ideal` cut and `hws`-driven generation transfer.-/
+`arrive`). It is built on the (sorried) `run_ideal` cut and `hws`-driven generation transfer. -/
 theorem competing_sync_false {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ) (hws : T.WellSynchronized)
     {c1 c2 : ProgPoint} {b : Barrier} {nn mm : ℕ+}
@@ -2657,7 +2670,7 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
     have hprogpark : (Tm.set c2.thread hc2ids
           (Cmd.sync b mm :: (T.prog c2.thread).drop (c2.idx + 1))).prog c2.thread
         = ((Config.run State.initial T).progOf c2.thread).drop c2.idx := by
-      show (Function.update Tm.prog c2.thread _) c2.thread = _
+      change (Function.update Tm.prog c2.thread _) c2.thread = _
       rw [Function.update_self]; exact hdrop2.symm
     have hBI'' : ∀ C ∈ τ'', ∀ s, C.state? = some s → s.BlockInv := by
       refine blockInv_chain htrace.1.subtrace htrace.2 ?_
@@ -2686,7 +2699,8 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
         (Cmd.sync b mm :: (T.prog c2.thread).drop (c2.idx + 1)))) := by
       rw [show p + (d₀ - 1) + 1 = p + d₀ from by omega]; exact hCpark
     have hstepfalse : stepRecyclesBarrier b (Config.run sm Tm) (Config.run sN
-        (Tm.set c2.thread hc2ids (Cmd.sync b mm :: (T.prog c2.thread).drop (c2.idx + 1)))) = false := by
+        (Tm.set c2.thread hc2ids (Cmd.sync b mm :: (T.prog c2.thread).drop (c2.idx + 1)))) =
+        false := by
       simp [stepRecyclesBarrier, Config.state?, hbne]
     have heq4 : recycleCount b τ'' (p + d₀) = recycleCount b τ' (p + (d₀ - 1)) := by
       have hsucc : recycleCount b τ'' (p + d₀) = recycleCount b τ'' (p + (d₀ - 1)) := by

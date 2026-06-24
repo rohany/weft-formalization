@@ -348,14 +348,14 @@ theorem exists_time_of_ends_done {C₀ : Config} {τ' : List Config} {sd : State
     fun {j C} hCj => progOf_suffix_index_le hchain i h0 (Nat.zero_le j) hCj
   have hQlast : ((τ'[τ'.length - 1]?).map (fun C => (C.progOf i).length)).getD 0
       < (C₀.progOf i).length - η.idx := by
-    rw [hlastidx]; show (0 : Nat) < (C₀.progOf i).length - η.idx; omega
+    rw [hlastidx]; change (0 : Nat) < (C₀.progOf i).length - η.idx; omega
   have hex : ∃ j, ((τ'[j]?).map (fun (C : Config) => (C.progOf i).length)).getD 0
       < (C₀.progOf i).length - η.idx := ⟨τ'.length - 1, hQlast⟩
   have hQj0 := Nat.find_spec hex
   have hj0le : Nat.find hex ≤ τ'.length - 1 := Nat.find_le hQlast
   have hQ0 : ¬ ((τ'[0]?).map (fun C => (C.progOf i).length)).getD 0
       < (C₀.progOf i).length - η.idx := by
-    rw [h0]; show ¬ (C₀.progOf i).length < (C₀.progOf i).length - η.idx; omega
+    rw [h0]; change ¬ (C₀.progOf i).length < (C₀.progOf i).length - η.idx; omega
   have hj0pos : 0 < Nat.find hex := by
     rcases Nat.eq_zero_or_pos (Nat.find hex) with h | h
     · rw [h] at hQj0; exact absurd hQj0 hQ0
@@ -757,7 +757,7 @@ theorem blockInv_step {C C' : Config} (hstep : CTAStep C C')
         have hjnotI : j ∉ I₀ := by
           intro hjI
           exact hbb (hone b b₀ j hj (by rw [hb]; exact hjI))
-        show updateMapOn s.E I₀ true j = false
+        change updateMapOn s.E I₀ true j = false
         rw [updateMapOn_apply, if_neg hjnotI]; exact hdis b j hj
     · by_cases hbb : b = b₀
       · subst hbb; simp [Function.update_self, BarrierState.unconfigured] at h1
