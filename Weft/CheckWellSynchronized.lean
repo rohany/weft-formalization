@@ -2113,8 +2113,6 @@ theorem exists_reversing_trace {T : CTA} {τ : List Config}
     refine time_le_of_progOf_le ht₂ hpcfg ?_
     show (T_G.prog η₂.thread).length ≤ _
     rw [hGdone η₂.thread, List.length_drop]
-    show (T.prog η₂.thread).length - fcut T τ η₁ η₂.thread
-      ≤ ((Config.run State.initial T).progOf η₂.thread).length - η₂.idx - 1
     show _ ≤ (T.prog η₂.thread).length - η₂.idx - 1
     omega
   -- `η₁ ∈ F` is not yet executed at `p` ⟹ `p < n₁`.
@@ -2166,14 +2164,8 @@ theorem happensBefore_precise {T : CTA} {τ : List Config}
       subst hthread
       replace hη : k₁ ≠ k₂ := fun h => hη (by rw [h])
       obtain ⟨hcomplete, sd, hdone⟩ := hτ
-      have hv₁' : (⟨i₁, k₁⟩ : ProgPoint).idx <
-          ((Config.run State.initial T).progOf (⟨i₁, k₁⟩ : ProgPoint).thread).length :=
-        ((mem_progPoints_iff T _).mp hv₁).2
-      have hv₂' : (⟨i₁, k₂⟩ : ProgPoint).idx <
-          ((Config.run State.initial T).progOf (⟨i₁, k₂⟩ : ProgPoint).thread).length :=
-        ((mem_progPoints_iff T _).mp hv₂).2
-      obtain ⟨n₁, ht₁⟩ := exists_time_of_ends_done hcomplete hdone hv₁'
-      obtain ⟨n₂, ht₂⟩ := exists_time_of_ends_done hcomplete hdone hv₂'
+      obtain ⟨n₁, ht₁⟩ := exists_time_of_ends_done hcomplete hdone ((mem_progPoints_iff T _).mp hv₁).2
+      obtain ⟨n₂, ht₂⟩ := exists_time_of_ends_done hcomplete hdone ((mem_progPoints_iff T _).mp hv₂).2
       have hn : n₁ ≤ n₂ := hle τ hcomplete n₁ n₂ ht₁ ht₂
       have hidx : k₁ < k₂ := by
         rcases Nat.lt_trichotomy k₁ k₂ with h | h | h
