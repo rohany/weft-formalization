@@ -1707,14 +1707,15 @@ theorem run_ids_chain {A : CTA} : ∀ {τ : List Config} {C₀ : Config}, List.I
       · exact hC₀
       · exact ih hchain' rfl hb1 C hC'
 
-/-- The configuration just before a successful `A`-trace's terminal `done sd`, lifted into
-`A ⨾ A`, is `run sd A` — the "first batch done, second batch poised" configuration. (Its
-CTA has all programs empty by `progOf_penultimate_done`, and thread set `A.ids` by
-`run_ids_chain`, so appending `A` recovers exactly `A`.) -/
-theorem seqLift_penultimate {A : CTA} {t : List Config} (hchain : List.IsChain CTAStep t)
-    (hhead : t.head? = some (Config.run State.initial A))
+/-- The configuration just before a restoring `A`-trace's terminal `done sd`, lifted into
+`A ⨾ B` (`A.ids = B.ids`), is `run sd B` — the "`A` done, `B` poised" boundary configuration.
+(The penultimate config has all programs empty by `progOf_penultimate_done`, and thread set
+`A.ids` by `run_ids_chain`, so appending `B` recovers exactly `B`.) The `B = A` case is the
+replay boundary used by `replay_trace`; the general case backs `glue_trace`. -/
+theorem seqLift_penultimate_gen {A B : CTA} (hids : A.ids = B.ids) {t : List Config}
+    (hchain : List.IsChain CTAStep t) (hhead : t.head? = some (Config.run State.initial A))
     {sd : State} (hlast : t.getLast? = some (Config.done sd)) (hdrop : t.dropLast ≠ []) :
-    Config.seqLift A A (t.dropLast.getLast hdrop) = Config.run sd A := by
+    Config.seqLift A B (t.dropLast.getLast hdrop) = Config.run sd B := by
   have hne : t ≠ [] := fun h => by rw [h] at hlast; simp at hlast
   have hgl : t.getLast hne = Config.done sd := by
     have h := List.getLast?_eq_some_getLast hne; rw [hlast, Option.some.injEq] at h; exact h.symm
@@ -1741,18 +1742,19 @@ theorem seqLift_penultimate {A : CTA} {t : List Config} (hchain : List.IsChain C
       intro i; by_cases hi : i ∈ T.ids
       · exact hdone i hi
       · exact T.nil_outside_ids i hi
-    have hAeq : T.appendTail A = A := by
+    have hBeq : T.appendTail B = B := by
       apply CTA.ext
-      · show T.ids ∪ A.ids = A.ids; rw [hTids, Finset.union_self]
-      · funext i; show T.prog i ++ A.prog i = A.prog i; rw [hTprog i, List.nil_append]
-    show Config.run sd (T.appendTail A) = Config.run sd A
-    rw [hAeq]
+      · show T.ids ∪ B.ids = B.ids; rw [hTids, hids, Finset.union_self]
+      · funext i; show T.prog i ++ B.prog i = B.prog i; rw [hTprog i, List.nil_append]
+    show Config.run sd (T.appendTail B) = Config.run sd B
+    rw [hBeq]
 
 /-- **The replay trace.** Given a successful `A`-trace `t₁` from `State.initial` that ends in
 `done State.initial` (full restoration), the list `(t₁.dropLast.map (seqLift A A)) ++ t₁.tail`
 is a successful trace of `A ⨾ A`: it lifts `t₁`'s execution as the first batch, and — since
-the boundary configuration is `run State.initial A` again (`seqLift_penultimate`) — replays
-`t₁` verbatim as the second batch. -/
+the boundary configuration is `run State.initial A` again (`seqLift_penultimate_gen`) — replays
+`t₁` verbatim as the second batch. It is the `B = A` instance of `glue_trace`, packaged via
+`seq_splice`. -/
 theorem replay_trace (A : CTA) {t₁ : List Config}
     (ht₁ : IsSuccessfulTraceFrom (Config.run State.initial A) t₁)
     (hlast : t₁.getLast? = some (Config.done State.initial)) :
@@ -1768,35 +1770,17 @@ theorem replay_trace (A : CTA) {t₁ : List Config}
       rw [hhead] at hlast; exact absurd hlast (by simp)
     · rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead; exact ⟨b, l, rfl⟩
   have hdrop : t₁.dropLast ≠ [] := by rw [hteq]; simp
-  have hPchain : List.IsChain CTAStep (t₁.dropLast.map (Config.seqLift A A)) :=
-    isChain_seqLift A A (mem_dropLast_isRun hchain) hchain.dropLast
+  -- the boundary `seqLift A A (penult t₁) = run init A` (restoration), so `t₁` itself replays
+  -- as the second batch; `seq_splice` glues it on
   have hCstar : Config.seqLift A A (t₁.dropLast.getLast hdrop) = Config.run State.initial A :=
-    seqLift_penultimate hchain hhead hlast hdrop
-  have htaileq : t₁.tail = c1 :: trest := by rw [hteq]; rfl
-  have hchain2 := hchain
-  rw [hteq, List.isChain_cons_cons] at hchain2
-  have htailchain : List.IsChain CTAStep t₁.tail := by rw [htaileq]; exact hchain2.2
-  have hstep0 : CTAStep (Config.run State.initial A) c1 := hchain2.1
-  have hPlast : (t₁.dropLast.map (Config.seqLift A A)).getLast? = some (Config.run State.initial A) := by
-    rw [List.getLast?_map, List.getLast?_eq_some_getLast hdrop, Option.map_some, hCstar]
+    seqLift_penultimate_gen rfl hchain hhead hlast hdrop
+  have hcont : IsCompleteTraceFrom (Config.seqLift A A (t₁.dropLast.getLast hdrop)) t₁ := by
+    rw [hCstar]; exact ht₁.1
+  obtain ⟨hICF, -⟩ := seq_splice rfl ht₁ hdrop hcont
   have htailglast : t₁.tail.getLast? = some (Config.done State.initial) := by
+    have htaileq : t₁.tail = c1 :: trest := by rw [hteq]; rfl
     rw [htaileq]; rw [hteq, List.getLast?_cons_cons] at hlast; exact hlast
-  refine ⟨⟨⟨?_, Config.done State.initial, ?_, Or.inl ⟨State.initial, rfl⟩⟩, ?_⟩,
-    State.initial, ?_⟩
-  · -- chain
-    apply hPchain.append htailchain
-    intro x hx y hy
-    rw [hPlast, Option.mem_some_iff] at hx; subst hx
-    rw [htaileq, List.head?_cons, Option.mem_some_iff] at hy; subst hy
-    exact hstep0
-  · -- ends: getLast? = some (done init)
-    exact List.mem_getLast?_append_of_mem_getLast? htailglast
-  · -- head
-    rw [hteq, List.dropLast_cons_cons, List.map_cons, List.cons_append, List.head?_cons,
-      show Config.seqLift A A (Config.run State.initial A)
-        = Config.run State.initial (A.appendTail A) from rfl, CTA.appendTail_eq_seq rfl]
-  · -- successful: getLast? = some (done init)
-    exact List.mem_getLast?_append_of_mem_getLast? htailglast
+  exact ⟨hICF, State.initial, List.mem_getLast?_append_of_mem_getLast? htailglast⟩
 
 /-- A step into a `done` configuration never recycles: the `done` rule keeps the state
 fixed, so `b` cannot be both full (source) and unconfigured (target). -/
@@ -1934,7 +1918,7 @@ theorem CTA.WellSynchronized.second_batch_recycle_offset {I : CTA}
   -- start-config program splits in two; boundary config is `run init A`
   have hC0 : (Config.run State.initial (A.seq A rfl)).progOf t = A.prog t ++ A.prog t := rfl
   have hCstar : Config.seqLift A A (t₁.dropLast.getLast hdrop) = Config.run State.initial A :=
-    seqLift_penultimate hchain1 hhead1 ht₁L hdrop
+    seqLift_penultimate_gen rfl hchain1 hhead1 ht₁L hdrop
   -- lengths and list structure of the replay trace `τ = P_lift ++ t₁.tail = Q ++ t₁`
   have hPLlen : (t₁.dropLast.map (Config.seqLift A A)).length = t₁.length - 1 := by
     rw [List.length_map, List.length_dropLast]
@@ -2190,46 +2174,6 @@ theorem CTA.pow_regroup_last_two (A : CTA) {n : Nat} (hn : 2 ≤ n) :
 successful trace of `A ⨾ B`. Iterating it (`pow_replay_trace`) builds a trace of `A ^ m` that
 runs `m` batches of `A` back to back. -/
 
-/-- `seqLift_penultimate`, for a general second phase `B`: the configuration just before a
-restoring `A`-trace's terminal `done sd`, lifted into `A ⨾ B`, is `run sd B` ("`A` done, `B`
-poised"). -/
-theorem seqLift_penultimate_gen {A B : CTA} (hids : A.ids = B.ids) {t : List Config}
-    (hchain : List.IsChain CTAStep t) (hhead : t.head? = some (Config.run State.initial A))
-    {sd : State} (hlast : t.getLast? = some (Config.done sd)) (hdrop : t.dropLast ≠ []) :
-    Config.seqLift A B (t.dropLast.getLast hdrop) = Config.run sd B := by
-  have hne : t ≠ [] := fun h => by rw [h] at hlast; simp at hlast
-  have hgl : t.getLast hne = Config.done sd := by
-    have h := List.getLast?_eq_some_getLast hne; rw [hlast, Option.some.injEq] at h; exact h.symm
-  have e1 : t.dropLast ++ [Config.done sd] = t := by
-    have h := List.dropLast_concat_getLast hne; rwa [hgl] at h
-  have e2 : t.dropLast.dropLast ++ [t.dropLast.getLast hdrop] = t.dropLast :=
-    List.dropLast_concat_getLast hdrop
-  have hdecomp : t.dropLast.dropLast ++ (t.dropLast.getLast hdrop) :: Config.done sd :: [] = t := by
-    rw [show (t.dropLast.getLast hdrop) :: Config.done sd :: []
-          = [t.dropLast.getLast hdrop] ++ [Config.done sd] from rfl, ← List.append_assoc, e2, e1]
-  have hstep : CTAStep (t.dropLast.getLast hdrop) (Config.done sd) :=
-    List.isChain_iff_forall_rel_of_append_cons_cons.mp hchain hdecomp.symm
-  have hXmem : (t.dropLast.getLast hdrop) ∈ t :=
-    List.dropLast_subset _ (List.getLast_mem hdrop)
-  obtain ⟨sX, T, hXeq⟩ := hstep.source_run
-  have hTids : T.ids = A.ids :=
-    run_ids_chain hchain hhead
-      (by intro s T' he; rw [Config.run.injEq] at he; rw [← he.2])
-      (t.dropLast.getLast hdrop) hXmem sX T hXeq
-  rw [hXeq] at hstep ⊢
-  cases hstep with
-  | done hdone _ =>
-    have hTprog : ∀ i, T.prog i = [] := by
-      intro i; by_cases hi : i ∈ T.ids
-      · exact hdone i hi
-      · exact T.nil_outside_ids i hi
-    have hBeq : T.appendTail B = B := by
-      apply CTA.ext
-      · show T.ids ∪ B.ids = B.ids; rw [hTids, hids, Finset.union_self]
-      · funext i; show T.prog i ++ B.prog i = B.prog i; rw [hTprog i, List.nil_append]
-    show Config.run sd (T.appendTail B) = Config.run sd B
-    rw [hBeq]
-
 /-- **Splice two batches.** A successful `A`-trace `t_A` that fully restores the state
 (`done State.initial`) followed by any successful `B`-trace `τ_B` from `State.initial` glue
 into a successful trace of `A ⨾ B`: lift `t_A`'s execution (minus its terminal `done`) as the
@@ -2246,7 +2190,7 @@ theorem glue_trace {A B : CTA} (hids : A.ids = B.ids) {t_A : List Config}
           = τ_B[r]? := by
   have hchain : List.IsChain CTAStep t_A := htA.1.1.subtrace
   have hhead : t_A.head? = some (Config.run State.initial A) := htA.1.2
-  obtain ⟨c1, trest, hteq⟩ : ∃ c1 trest, t_A = Config.run State.initial A :: c1 :: trest := by
+  obtain ⟨_, _, hteq⟩ : ∃ c1 trest, t_A = Config.run State.initial A :: c1 :: trest := by
     rcases t_A with _ | ⟨a, _ | ⟨b, l⟩⟩
     · simp at hhead
     · rw [List.head?_cons, Option.some.injEq] at hhead
@@ -2254,65 +2198,27 @@ theorem glue_trace {A B : CTA} (hids : A.ids = B.ids) {t_A : List Config}
       rw [hhead] at hAlast; exact absurd hAlast (by simp)
     · rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead; exact ⟨b, l, rfl⟩
   have hdrop : t_A.dropLast ≠ [] := by rw [hteq]; simp
-  have hPchain : List.IsChain CTAStep (t_A.dropLast.map (Config.seqLift A B)) :=
-    isChain_seqLift A B (mem_dropLast_isRun hchain) hchain.dropLast
+  -- The boundary config `C⋆ = seqLift A B (penult t_A)` is `run init B` (full restoration),
+  -- so the given B-trace `τ_B` is itself a complete continuation from `C⋆`; `seq_splice`
+  -- glues it onto the lifted `A`-phase.
   have hCstar : Config.seqLift A B (t_A.dropLast.getLast hdrop) = Config.run State.initial B :=
     seqLift_penultimate_gen hids hchain hhead hAlast hdrop
-  have hBchain : List.IsChain CTAStep τ_B := hτB.1.1.subtrace
-  have hBhead : τ_B.head? = some (Config.run State.initial B) := hτB.1.2
+  have hcont : IsCompleteTraceFrom (Config.seqLift A B (t_A.dropLast.getLast hdrop)) τ_B := by
+    rw [hCstar]; exact hτB.1
+  obtain ⟨hICF, hsplit⟩ := seq_splice hids htA hdrop hcont
   obtain ⟨sB, hBlast⟩ := hτB.2
-  obtain ⟨d1, τrest, hτeq⟩ : ∃ d1 τrest, τ_B = Config.run State.initial B :: d1 :: τrest := by
-    rcases τ_B with _ | ⟨a, _ | ⟨b, l⟩⟩
-    · simp at hBhead
-    · rw [List.head?_cons, Option.some.injEq] at hBhead
-      rw [List.getLast?_singleton, Option.some.injEq] at hBlast
-      rw [hBhead] at hBlast; exact absurd hBlast (by simp)
-    · rw [List.head?_cons, Option.some.injEq] at hBhead; subst hBhead; exact ⟨b, l, rfl⟩
-  have hτtaileq : τ_B.tail = d1 :: τrest := by rw [hτeq]; rfl
-  have hBchain2 := hBchain
-  rw [hτeq, List.isChain_cons_cons] at hBchain2
-  have htailchain : List.IsChain CTAStep τ_B.tail := by rw [hτtaileq]; exact hBchain2.2
-  have hstep0 : CTAStep (Config.run State.initial B) d1 := hBchain2.1
-  have hPlast : (t_A.dropLast.map (Config.seqLift A B)).getLast?
-      = some (Config.run State.initial B) := by
-    rw [List.getLast?_map, List.getLast?_eq_some_getLast hdrop, Option.map_some, hCstar]
-  have hPne : (t_A.dropLast.map (Config.seqLift A B)) ≠ [] := by
-    rw [Ne, List.map_eq_nil_iff]; exact hdrop
-  have htailglast : τ_B.tail.getLast? = τ_B.getLast? := by
-    rw [hτtaileq, hτeq, List.getLast?_cons_cons]
-  have hgluelast : (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail).getLast?
-      = some (Config.done sB) :=
-    List.mem_getLast?_append_of_mem_getLast? (htailglast.trans hBlast)
-  have hPLgl : (t_A.dropLast.map (Config.seqLift A B)).getLast hPne
-      = Config.run State.initial B := by
-    have hh := List.getLast?_eq_some_getLast hPne; rw [hPlast] at hh
-    exact (Option.some.injEq _ _).mp hh.symm
-  have hτcons : Config.run State.initial B :: τ_B.tail = τ_B := by rw [hτeq]; rfl
-  have htlist : t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail
-      = (t_A.dropLast.map (Config.seqLift A B)).dropLast ++ τ_B := by
-    conv_lhs => rw [← List.dropLast_concat_getLast hPne]
-    rw [hPLgl, List.append_assoc, List.singleton_append, hτcons]
-  have hPLlen : (t_A.dropLast.map (Config.seqLift A B)).length = t_A.length - 1 := by
-    rw [List.length_map, List.length_dropLast]
+  -- the glued trace ends where `τ_B` ends (rewriting it via `hsplit` to `P.dropLast ++ τ_B`)
+  have hgetlast : (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail).getLast? = τ_B.getLast? := by
+    rw [hsplit, hBlast]; exact List.mem_getLast?_append_of_mem_getLast? hBlast
+  -- the suffix-index relation, also a consequence of `hsplit`
   have hQlen : ((t_A.dropLast.map (Config.seqLift A B)).dropLast).length = t_A.length - 2 := by
-    rw [List.length_dropLast, hPLlen]; omega
+    rw [List.length_dropLast, List.length_map, List.length_dropLast]; omega
   have hsnd : ∀ r, (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail)[(t_A.length - 2) + r]?
       = τ_B[r]? := by
     intro r
-    rw [htlist, List.getElem?_append_right (by rw [hQlen]; omega), hQlen]
+    rw [hsplit, List.getElem?_append_right (by rw [hQlen]; omega), hQlen]
     congr 1; omega
-  refine ⟨⟨⟨⟨?_, Config.done sB, hgluelast, Or.inl ⟨sB, rfl⟩⟩, ?_⟩, sB, hgluelast⟩,
-    hgluelast.trans hBlast.symm, hsnd⟩
-  · -- chain
-    apply hPchain.append htailchain
-    intro x hx y hy
-    rw [hPlast, Option.mem_some_iff] at hx; subst hx
-    rw [hτtaileq, List.head?_cons, Option.mem_some_iff] at hy; subst hy
-    exact hstep0
-  · -- head
-    rw [hteq, List.dropLast_cons_cons, List.map_cons, List.cons_append, List.head?_cons,
-      show Config.seqLift A B (Config.run State.initial A)
-        = Config.run State.initial (A.appendTail B) from rfl, CTA.appendTail_eq_seq hids]
+  exact ⟨⟨hICF, sB, hgetlast.trans hBlast⟩, hgetlast, hsnd⟩
 
 /-- **The `m`-fold replay trace.** From a single restoring batch trace `t₁` (a successful
 `A`-trace from `State.initial` ending in `done State.initial`), build a successful trace of
