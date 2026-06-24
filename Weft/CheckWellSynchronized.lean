@@ -2790,6 +2790,4 @@ theorem not_wellSynchronized_of_check_false {T : CTA} {τ : List Config}
       · exact competing_sync_false hτ hws hc1 hc2 hcmd1 hcmd2 hgen hidx hnothb3 hhb
       · exact reverse_barrier_contradiction hτ hws hc1 hc2 hc1bar hbar2 hgen hhb
 
-#print axioms not_wellSynchronized_of_check_false
-
 end Weft
