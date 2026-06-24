@@ -2458,4 +2458,69 @@ theorem CTA.WellSynchronized.last_batch_gen_offset {I : CTA} (h : I.ConsistentAr
     simp only [pointGen, hcmd2, Option.bind_some, hbar, pointTime_eq_of_isTimeOf ht2]
   rw [hg1, hg2, hrec t j c b par m₁ m₂ hcj hbr ht1 ht2]; omega
 
+/-! ## Lemma 4.2 (`structure-r-across-iterations`), simple two- and three-batch cases
+
+The document's Lemma `structure-r-across-iterations` is the happens-before (`R`) analogue of
+the generation lemma `second_batch_gen_offset` (`structure-g-across-iterations`). It has two
+conclusions about the observed happens-before relation `R_T` across consecutive batches of
+the §1 unrolling `I ^ k`:
+
+1. **within a batch:** HB among instructions *inside* batch `n` agrees with HB among the
+   corresponding instructions inside batch `n + 1`;
+2. **across batches:** an HB edge from batch `n` into batch `n + 1` agrees with the
+   corresponding edge from batch `n - 1` into batch `n`.
+
+Here we state the **simplest instances**, as `second_batch_gen_offset` does for Lemma 4.1.
+A program point of a multi-batch program `…` for thread `t` indexes into the concatenation
+of the per-batch programs `(I ^ k).prog t`; writing `L = ((I ^ k).prog t).length`, the copy
+of body instruction `j` (`j < L`) in batch `i` (0-indexed) is `⟨t, i * L + j⟩`. -/
+
+/-- **Lemma 4.2, conclusion 1 (within-batch), two-batch case.** *Stated, not yet proved.*
+For the two back-to-back batches `I ^ k ⨾ I ^ k`, there is a successful trace `τ` whose
+happens-before relation agrees between the two batches *internally*: for any two body
+instructions `⟨t₁, j₁⟩` and `⟨t₂, j₂⟩` of `I ^ k`, the first-batch copies are happens-before
+related exactly when the second-batch copies are. This is conclusion 1 of
+`structure-r-across-iterations` at `n = 0` (the first batch is `I_0^k`, the second `I_1^k`).
+
+Unlike `second_batch_gen_offset`, this is stated for *all* instruction pairs (not only barrier
+instructions): `R` orders read/write instructions too, via program order and the sync edges. -/
+theorem CTA.WellSynchronized.second_batch_hb_within {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h)
+    (hWS0 : (I ^ k).WellSynchronized)
+    (hWS1 : ((I ^ k).seq (I ^ k) rfl).WellSynchronized) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k).seq (I ^ k) rfl)) τ ∧
+      ∀ (t₁ t₂ : ThreadId) (j₁ j₂ : Nat),
+        j₁ < ((I ^ k).prog t₁).length → j₂ < ((I ^ k).prog t₂).length →
+        (happensBefore ((I ^ k).seq (I ^ k) rfl) τ ⟨t₁, j₁⟩ ⟨t₂, j₂⟩
+          ↔ happensBefore ((I ^ k).seq (I ^ k) rfl) τ
+              ⟨t₁, ((I ^ k).prog t₁).length + j₁⟩ ⟨t₂, ((I ^ k).prog t₂).length + j₂⟩) := by
+  sorry
+
+/-- **Lemma 4.2, conclusion 2 (across batches), three-batch case.** *Stated, not yet proved.*
+This conclusion compares the happens-before edge running from batch `n` into batch `n + 1`
+with the corresponding edge from batch `n - 1` into batch `n`. Those are *two distinct*
+adjacent-batch pairs, so the simplest non-degenerate instance needs **three** consecutive
+batches `I ^ k ⨾ I ^ k ⨾ I ^ k` (it cannot be expressed on only two): take `n = 1`, with the
+middle batch `I_1^k`, its predecessor `I_0^k`, and its successor `I_2^k`.
+
+With `L₁ = ((I ^ k).prog t₁).length` and `L₂ = ((I ^ k).prog t₂).length`, the claim is that the
+edge from batch 1's copy of `⟨t₁, j₁⟩` (at index `L₁ + j₁`) into batch 2's copy of `⟨t₂, j₂⟩`
+(at index `2 * L₂ + j₂`) holds exactly when the edge from batch 0's copy of `⟨t₁, j₁⟩`
+(at index `j₁`) into batch 1's copy of `⟨t₂, j₂⟩` (at index `L₂ + j₂`) holds. -/
+theorem CTA.WellSynchronized.second_batch_hb_across {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h)
+    (hWS0 : (I ^ k).WellSynchronized)
+    (hWS1 : ((I ^ k).seq (I ^ k) rfl).WellSynchronized)
+    (hWS2 : (((I ^ k).seq (I ^ k) rfl).seq (I ^ k) rfl).WellSynchronized) :
+    ∃ τ, IsSuccessfulTraceFrom
+        (Config.run State.initial (((I ^ k).seq (I ^ k) rfl).seq (I ^ k) rfl)) τ ∧
+      ∀ (t₁ t₂ : ThreadId) (j₁ j₂ : Nat),
+        j₁ < ((I ^ k).prog t₁).length → j₂ < ((I ^ k).prog t₂).length →
+        (happensBefore (((I ^ k).seq (I ^ k) rfl).seq (I ^ k) rfl) τ
+              ⟨t₁, ((I ^ k).prog t₁).length + j₁⟩
+              ⟨t₂, 2 * ((I ^ k).prog t₂).length + j₂⟩
+          ↔ happensBefore (((I ^ k).seq (I ^ k) rfl).seq (I ^ k) rfl) τ
+              ⟨t₁, j₁⟩ ⟨t₂, ((I ^ k).prog t₂).length + j₂⟩) := by
+  sorry
+
 end Weft
