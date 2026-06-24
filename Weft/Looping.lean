@@ -2119,4 +2119,437 @@ theorem CTA.WellSynchronized.second_batch_gen_offset {I : CTA} (h : I.Consistent
     simp only [pointGen, hcmd2, Option.bind_some, hbar, pointTime_eq_of_isTimeOf ht2]
   rw [hg1, hg2, hrec t j c b n m₁ m₂ hcj hbr ht1 ht2]; omega
 
+/-! ### Structural lemmas for the `n`-batch program layout
+
+`(A ^ m).prog t` is `m` consecutive copies of one batch `A.prog t`. These lemmas expose
+that layout: programs split additively in the exponent (`pow_add_prog`), lengths scale
+(`pow_prog_length`), and the small cases `m = 1, 2` collapse to the obvious forms. They are
+what lets the `n`-batch program regroup as `(A ^ (n-2)) ⨾ (A ⨾ A)` — the first `n-2`
+batches followed by the last two. -/
+
+/-- `(A ^ (a + b)).prog t = (A ^ a).prog t ++ (A ^ b).prog t`: the program of `a + b`
+batches is the `a`-batch program followed by the `b`-batch program (every batch is the same
+`A.prog t`, so the split is purely by count). -/
+theorem CTA.pow_add_prog (A : CTA) (a b : Nat) (t : ThreadId) :
+    (A ^ (a + b)).prog t = (A ^ a).prog t ++ (A ^ b).prog t := by
+  induction a with
+  | zero => rw [Nat.zero_add]; simp [CTA.pow_zero, CTA.emptied]
+  | succ a ih =>
+    rw [show a + 1 + b = (a + b) + 1 by omega, CTA.pow_succ_prog, ih, ← List.append_assoc,
+      ← CTA.pow_succ_prog]
+
+/-- `((A ^ m).prog t).length = m * (A.prog t).length`: `m` batches of length `|A.prog t|`. -/
+theorem CTA.pow_prog_length (A : CTA) (m : Nat) (t : ThreadId) :
+    ((A ^ m).prog t).length = m * (A.prog t).length := by
+  induction m with
+  | zero => simp [CTA.pow_zero, CTA.emptied]
+  | succ m ih => rw [CTA.pow_succ_prog, List.length_append, ih, Nat.succ_mul]; omega
+
+/-- `(A ^ 1).prog t = A.prog t`: one batch is just `A` (the trailing `A ^ 0 = emptied` adds
+nothing). -/
+theorem CTA.pow_one_prog (A : CTA) (t : ThreadId) : (A ^ 1).prog t = A.prog t := by
+  rw [show (1 : Nat) = 0 + 1 from rfl, CTA.pow_succ_prog]; simp [CTA.pow_zero, CTA.emptied]
+
+/-- `(A ^ 2).prog t = A.prog t ++ A.prog t`: two batches back to back — the program of
+`A ⨾ A`. -/
+theorem CTA.pow_two_prog (A : CTA) (t : ThreadId) :
+    (A ^ 2).prog t = A.prog t ++ A.prog t := by
+  rw [show (2 : Nat) = 1 + 1 from rfl, CTA.pow_succ_prog, CTA.pow_one_prog]
+
+/-- `A ^ 1 = A`: one batch is `A` itself. -/
+theorem CTA.pow_one (A : CTA) : A ^ 1 = A := by
+  apply CTA.ext
+  · rw [CTA.pow_ids]
+  · funext t; rw [CTA.pow_one_prog]
+
+/-- `A ^ 2 = A ⨾ A`: two batches *are* the sequential composition `A ⨾ A`. -/
+theorem CTA.pow_two_eq_seq (A : CTA) : A ^ 2 = A.seq A rfl := by
+  apply CTA.ext
+  · show (A ^ 2).ids = A.ids; rw [CTA.pow_ids]
+  · funext t; show (A ^ 2).prog t = A.prog t ++ A.prog t; rw [CTA.pow_two_prog]
+
+/-- **Regroup the last two batches.** For `n ≥ 2`, the `n`-batch program `A ^ n` *is* the
+first `n - 2` batches sequentially composed with the last two: `A ^ n = (A ^ (n-2)) ⨾ (A ⨾ A)`.
+This is the structural identity that lets `last_batch_gen_offset` reuse the two-batch
+`second_batch` machinery on the final `A ⨾ A`, with the first `n - 2` batches as an inert
+prefix. -/
+theorem CTA.pow_regroup_last_two (A : CTA) {n : Nat} (hn : 2 ≤ n) :
+    A ^ n = (A ^ (n - 2)).seq (A.seq A rfl) (CTA.pow_ids A (n - 2)) := by
+  apply CTA.ext
+  · show (A ^ n).ids = (A ^ (n - 2)).ids; rw [CTA.pow_ids, CTA.pow_ids]
+  · funext t
+    show (A ^ n).prog t = (A ^ (n - 2)).prog t ++ (A.prog t ++ A.prog t)
+    conv_lhs => rw [← Nat.sub_add_cancel hn]
+    rw [CTA.pow_add_prog, CTA.pow_two_prog]
+
+/-! ### Gluing traces across a batch boundary
+
+`glue_trace` generalizes `replay_trace`: given a successful `A`-trace ending in
+`done State.initial` (full restoration) and *any* successful `B`-trace from `State.initial`
+(`A.ids = B.ids`), it splices the lifted `A`-execution in front of the `B`-trace to obtain a
+successful trace of `A ⨾ B`. Iterating it (`pow_replay_trace`) builds a trace of `A ^ m` that
+runs `m` batches of `A` back to back. -/
+
+/-- `seqLift_penultimate`, for a general second phase `B`: the configuration just before a
+restoring `A`-trace's terminal `done sd`, lifted into `A ⨾ B`, is `run sd B` ("`A` done, `B`
+poised"). -/
+theorem seqLift_penultimate_gen {A B : CTA} (hids : A.ids = B.ids) {t : List Config}
+    (hchain : List.IsChain CTAStep t) (hhead : t.head? = some (Config.run State.initial A))
+    {sd : State} (hlast : t.getLast? = some (Config.done sd)) (hdrop : t.dropLast ≠ []) :
+    Config.seqLift A B (t.dropLast.getLast hdrop) = Config.run sd B := by
+  have hne : t ≠ [] := fun h => by rw [h] at hlast; simp at hlast
+  have hgl : t.getLast hne = Config.done sd := by
+    have h := List.getLast?_eq_some_getLast hne; rw [hlast, Option.some.injEq] at h; exact h.symm
+  have e1 : t.dropLast ++ [Config.done sd] = t := by
+    have h := List.dropLast_concat_getLast hne; rwa [hgl] at h
+  have e2 : t.dropLast.dropLast ++ [t.dropLast.getLast hdrop] = t.dropLast :=
+    List.dropLast_concat_getLast hdrop
+  have hdecomp : t.dropLast.dropLast ++ (t.dropLast.getLast hdrop) :: Config.done sd :: [] = t := by
+    rw [show (t.dropLast.getLast hdrop) :: Config.done sd :: []
+          = [t.dropLast.getLast hdrop] ++ [Config.done sd] from rfl, ← List.append_assoc, e2, e1]
+  have hstep : CTAStep (t.dropLast.getLast hdrop) (Config.done sd) :=
+    List.isChain_iff_forall_rel_of_append_cons_cons.mp hchain hdecomp.symm
+  have hXmem : (t.dropLast.getLast hdrop) ∈ t :=
+    List.dropLast_subset _ (List.getLast_mem hdrop)
+  obtain ⟨sX, T, hXeq⟩ := hstep.source_run
+  have hTids : T.ids = A.ids :=
+    run_ids_chain hchain hhead
+      (by intro s T' he; rw [Config.run.injEq] at he; rw [← he.2])
+      (t.dropLast.getLast hdrop) hXmem sX T hXeq
+  rw [hXeq] at hstep ⊢
+  cases hstep with
+  | done hdone _ =>
+    have hTprog : ∀ i, T.prog i = [] := by
+      intro i; by_cases hi : i ∈ T.ids
+      · exact hdone i hi
+      · exact T.nil_outside_ids i hi
+    have hBeq : T.appendTail B = B := by
+      apply CTA.ext
+      · show T.ids ∪ B.ids = B.ids; rw [hTids, hids, Finset.union_self]
+      · funext i; show T.prog i ++ B.prog i = B.prog i; rw [hTprog i, List.nil_append]
+    show Config.run sd (T.appendTail B) = Config.run sd B
+    rw [hBeq]
+
+/-- **Splice two batches.** A successful `A`-trace `t_A` that fully restores the state
+(`done State.initial`) followed by any successful `B`-trace `τ_B` from `State.initial` glue
+into a successful trace of `A ⨾ B`: lift `t_A`'s execution (minus its terminal `done`) as the
+`A`-phase, then continue with `τ_B` (minus its head, which the lifted phase already reaches).
+The glued trace ends exactly where `τ_B` ends. -/
+theorem glue_trace {A B : CTA} (hids : A.ids = B.ids) {t_A : List Config}
+    (htA : IsSuccessfulTraceFrom (Config.run State.initial A) t_A)
+    (hAlast : t_A.getLast? = some (Config.done State.initial))
+    {τ_B : List Config} (hτB : IsSuccessfulTraceFrom (Config.run State.initial B) τ_B) :
+    IsSuccessfulTraceFrom (Config.run State.initial (A.seq B hids))
+        (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail) ∧
+      (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail).getLast? = τ_B.getLast? ∧
+      ∀ r, (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail)[(t_A.length - 2) + r]?
+          = τ_B[r]? := by
+  have hchain : List.IsChain CTAStep t_A := htA.1.1.subtrace
+  have hhead : t_A.head? = some (Config.run State.initial A) := htA.1.2
+  obtain ⟨c1, trest, hteq⟩ : ∃ c1 trest, t_A = Config.run State.initial A :: c1 :: trest := by
+    rcases t_A with _ | ⟨a, _ | ⟨b, l⟩⟩
+    · simp at hhead
+    · rw [List.head?_cons, Option.some.injEq] at hhead
+      rw [List.getLast?_singleton, Option.some.injEq] at hAlast
+      rw [hhead] at hAlast; exact absurd hAlast (by simp)
+    · rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead; exact ⟨b, l, rfl⟩
+  have hdrop : t_A.dropLast ≠ [] := by rw [hteq]; simp
+  have hPchain : List.IsChain CTAStep (t_A.dropLast.map (Config.seqLift A B)) :=
+    isChain_seqLift A B (mem_dropLast_isRun hchain) hchain.dropLast
+  have hCstar : Config.seqLift A B (t_A.dropLast.getLast hdrop) = Config.run State.initial B :=
+    seqLift_penultimate_gen hids hchain hhead hAlast hdrop
+  have hBchain : List.IsChain CTAStep τ_B := hτB.1.1.subtrace
+  have hBhead : τ_B.head? = some (Config.run State.initial B) := hτB.1.2
+  obtain ⟨sB, hBlast⟩ := hτB.2
+  obtain ⟨d1, τrest, hτeq⟩ : ∃ d1 τrest, τ_B = Config.run State.initial B :: d1 :: τrest := by
+    rcases τ_B with _ | ⟨a, _ | ⟨b, l⟩⟩
+    · simp at hBhead
+    · rw [List.head?_cons, Option.some.injEq] at hBhead
+      rw [List.getLast?_singleton, Option.some.injEq] at hBlast
+      rw [hBhead] at hBlast; exact absurd hBlast (by simp)
+    · rw [List.head?_cons, Option.some.injEq] at hBhead; subst hBhead; exact ⟨b, l, rfl⟩
+  have hτtaileq : τ_B.tail = d1 :: τrest := by rw [hτeq]; rfl
+  have hBchain2 := hBchain
+  rw [hτeq, List.isChain_cons_cons] at hBchain2
+  have htailchain : List.IsChain CTAStep τ_B.tail := by rw [hτtaileq]; exact hBchain2.2
+  have hstep0 : CTAStep (Config.run State.initial B) d1 := hBchain2.1
+  have hPlast : (t_A.dropLast.map (Config.seqLift A B)).getLast?
+      = some (Config.run State.initial B) := by
+    rw [List.getLast?_map, List.getLast?_eq_some_getLast hdrop, Option.map_some, hCstar]
+  have hPne : (t_A.dropLast.map (Config.seqLift A B)) ≠ [] := by
+    rw [Ne, List.map_eq_nil_iff]; exact hdrop
+  have htailglast : τ_B.tail.getLast? = τ_B.getLast? := by
+    rw [hτtaileq, hτeq, List.getLast?_cons_cons]
+  have hgluelast : (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail).getLast?
+      = some (Config.done sB) :=
+    List.mem_getLast?_append_of_mem_getLast? (htailglast.trans hBlast)
+  have hPLgl : (t_A.dropLast.map (Config.seqLift A B)).getLast hPne
+      = Config.run State.initial B := by
+    have hh := List.getLast?_eq_some_getLast hPne; rw [hPlast] at hh
+    exact (Option.some.injEq _ _).mp hh.symm
+  have hτcons : Config.run State.initial B :: τ_B.tail = τ_B := by rw [hτeq]; rfl
+  have htlist : t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail
+      = (t_A.dropLast.map (Config.seqLift A B)).dropLast ++ τ_B := by
+    conv_lhs => rw [← List.dropLast_concat_getLast hPne]
+    rw [hPLgl, List.append_assoc, List.singleton_append, hτcons]
+  have hPLlen : (t_A.dropLast.map (Config.seqLift A B)).length = t_A.length - 1 := by
+    rw [List.length_map, List.length_dropLast]
+  have hQlen : ((t_A.dropLast.map (Config.seqLift A B)).dropLast).length = t_A.length - 2 := by
+    rw [List.length_dropLast, hPLlen]; omega
+  have hsnd : ∀ r, (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail)[(t_A.length - 2) + r]?
+      = τ_B[r]? := by
+    intro r
+    rw [htlist, List.getElem?_append_right (by rw [hQlen]; omega), hQlen]
+    congr 1; omega
+  refine ⟨⟨⟨⟨?_, Config.done sB, hgluelast, Or.inl ⟨sB, rfl⟩⟩, ?_⟩, sB, hgluelast⟩,
+    hgluelast.trans hBlast.symm, hsnd⟩
+  · -- chain
+    apply hPchain.append htailchain
+    intro x hx y hy
+    rw [hPlast, Option.mem_some_iff] at hx; subst hx
+    rw [hτtaileq, List.head?_cons, Option.mem_some_iff] at hy; subst hy
+    exact hstep0
+  · -- head
+    rw [hteq, List.dropLast_cons_cons, List.map_cons, List.cons_append, List.head?_cons,
+      show Config.seqLift A B (Config.run State.initial A)
+        = Config.run State.initial (A.appendTail B) from rfl, CTA.appendTail_eq_seq hids]
+
+/-- **The `m`-fold replay trace.** From a single restoring batch trace `t₁` (a successful
+`A`-trace from `State.initial` ending in `done State.initial`), build a successful trace of
+`A ^ m` that runs `m` batches of `A` back to back, each one replaying `t₁`. Every such trace
+again ends in `done State.initial` (full restoration is preserved across batches), so the
+next batch can be spliced in front. The construction needs only `t₁` — no well-synchronization
+of `A ^ m` itself. -/
+theorem pow_replay_trace (A : CTA) {t₁ : List Config}
+    (ht₁ : IsSuccessfulTraceFrom (Config.run State.initial A) t₁)
+    (h1last : t₁.getLast? = some (Config.done State.initial)) :
+    ∀ (m : Nat), ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial (A ^ m)) τ ∧
+      τ.getLast? = some (Config.done State.initial) := by
+  intro m
+  induction m with
+  | zero =>
+    have hstep : CTAStep (Config.run State.initial (A ^ 0)) (Config.done State.initial) := by
+      apply CTAStep.done
+      · intro i _; simp [CTA.pow_zero, CTA.emptied]
+      · intro b I A' n hb; simp [State.initial, BarrierState.unconfigured] at hb
+    exact ⟨[Config.run State.initial (A ^ 0), Config.done State.initial],
+      ⟨⟨⟨List.isChain_cons_cons.mpr ⟨hstep, List.isChain_singleton _⟩,
+            Config.done State.initial, rfl, Or.inl ⟨State.initial, rfl⟩⟩, rfl⟩,
+        State.initial, rfl⟩, rfl⟩
+  | succ m ih =>
+    obtain ⟨τ, hτ, hτlast⟩ := ih
+    obtain ⟨hglue, hgluelast, _⟩ := glue_trace (A.pow_ids m).symm ht₁ h1last hτ
+    refine ⟨t₁.dropLast.map (Config.seqLift A (A ^ m)) ++ τ.tail, ?_, ?_⟩
+    · rw [CTA.pow_succ]; exact hglue
+    · rw [hgluelast, hτlast]
+
+/-- Every batch-prefix of the `n`-fold composition `A ^ n` is well-synchronized: each of
+`A ^ 1, A ^ 2, …, A ^ n` is well-synchronized — i.e. running `1, 2, …, n` consecutive batches
+of `A` is well-synchronized in every case. This is the hypothesis the `n`-batch Lemma 3 needs:
+the two-batch `second_batch_gen_offset` assumed `A` and `A ⨾ A` separately (the `m = 1` and
+`m = 2` prefixes); the general statement relates batch `m` to batch `m - 1` inside each
+`m`-batch run, so it needs the analogous well-synchronization of every prefix `A ^ m`,
+`1 ≤ m ≤ n`. -/
+def CTA.BatchesWellSynchronized (A : CTA) (n : Nat) : Prop :=
+  ∀ m, 1 ≤ m → m ≤ n → (A ^ m).WellSynchronized
+
+/-- **The recycle-count core of the `n`-batch Lemma 3.** There is a successful trace `τ` of
+`(I ^ k) ^ n` along which, for every barrier instruction, the recycle count of `b` just
+before the **last** batch's copy executes exceeds the count just before the **second-to-last**
+batch's copy by exactly `k · arrivers(b) / arrival-count(b)` — one batch's worth of recycles.
+
+The trace is built by `glue`-ing the two-batch trace of `second_batch_recycle_offset` (the
+last two batches) onto an `(n-2)`-fold replay (`pow_replay_trace`) of the first batches, using
+the regrouping `(I ^ k) ^ n = (I ^ k) ^ (n-2) ⨾ ((I ^ k) ⨾ (I ^ k))`. The first `n-2` batches
+add the *same* constant recycle count before both of the final two copies, so it cancels in
+the difference, leaving exactly the two-batch offset. -/
+theorem CTA.WellSynchronized.last_batch_recycle_offset {I : CTA}
+    (h : I.ConsistentArrivalCounts) {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 2 ≤ n)
+    (hWS : (I ^ k).BatchesWellSynchronized n) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
+      ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (m₁ m₂ : Nat),
+        ((I ^ k).prog t)[j]? = some c → Cmd.barrierRef c = some (b, par) →
+        IsTimeOf (Config.run State.initial ((I ^ k) ^ n)) τ
+            ⟨t, (n - 2) * ((I ^ k).prog t).length + j⟩ m₁ →
+        IsTimeOf (Config.run State.initial ((I ^ k) ^ n)) τ
+            ⟨t, (n - 1) * ((I ^ k).prog t).length + j⟩ m₂ →
+        recycleCount b τ (m₂ - 1)
+          = recycleCount b τ (m₁ - 1) + k * I.arrivers b / I.arrivalCount h b := by
+  subst hk
+  -- well-synchronization of one batch and of two batches, from the prefix hypothesis
+  have hWSA : (I ^ I.loopK h).WellSynchronized := by
+    have := hWS 1 (le_refl 1) (by omega); rwa [CTA.pow_one] at this
+  have hWSAA : ((I ^ I.loopK h).seq (I ^ I.loopK h) rfl).WellSynchronized := by
+    have := hWS 2 (by omega) hn; rwa [CTA.pow_two_eq_seq] at this
+  -- single batch trace, restoring the state to `initial`
+  obtain ⟨t₁, ht₁⟩ := hWSA.exists_successfulTrace
+  obtain ⟨sd₁, ht₁L⟩ := ht₁.2
+  have hinit : sd₁ = State.initial := pow_done_state_initial h ht₁ ht₁L
+  rw [hinit] at ht₁L
+  -- two-batch trace with the per-instruction offset (the hard two-batch case)
+  obtain ⟨τAA, hτAA, hrecAA⟩ := CTA.WellSynchronized.second_batch_recycle_offset h rfl hWSA hWSAA
+  -- `(n-2)`-fold replay of the first batches
+  obtain ⟨tC, htC, htCL⟩ := pow_replay_trace (I ^ I.loopK h) ht₁ ht₁L (n - 2)
+  set A := I ^ I.loopK h with hA
+  -- glue the first `n-2` batches in front of the last two
+  obtain ⟨hglue, -, hsnd⟩ := glue_trace (B := A.seq A rfl) (CTA.pow_ids A (n - 2)) htC htCL hτAA
+  have hAn : A ^ n = (A ^ (n - 2)).seq (A.seq A rfl) (CTA.pow_ids A (n - 2)) :=
+    CTA.pow_regroup_last_two A hn
+  refine ⟨tC.dropLast.map (Config.seqLift (A ^ (n - 2)) (A.seq A rfl)) ++ τAA.tail, ?_, ?_⟩
+  · rw [hAn]; exact hglue
+  · intro t j c b par m₁ m₂ hcj hbr ht1 ht2
+    obtain ⟨hjL, -⟩ := List.getElem?_eq_some_iff.mp hcj
+    have hSucc : IsSuccessfulTraceFrom (Config.run State.initial (A ^ n))
+        (tC.dropLast.map (Config.seqLift (A ^ (n - 2)) (A.seq A rfl)) ++ τAA.tail) := by
+      rw [hAn]; exact hglue
+    -- program-length bookkeeping for thread `t`
+    have hCLen : ((A ^ (n - 2)).prog t).length = (n - 2) * (A.prog t).length :=
+      CTA.pow_prog_length A (n - 2) t
+    have hAAlen : ((A.seq A rfl).prog t).length = (A.prog t).length + (A.prog t).length := by
+      show (A.prog t ++ A.prog t).length = _; rw [List.length_append]
+    have hnL : n * (A.prog t).length
+        = (n - 2) * (A.prog t).length + ((A.prog t).length + (A.prog t).length) := by
+      conv_lhs => rw [← Nat.sub_add_cancel hn, Nat.add_mul]
+      omega
+    have hnLen : ((A ^ n).prog t).length = n * (A.prog t).length := CTA.pow_prog_length A n t
+    have hprogeq : (A ^ n).prog t = (A ^ (n - 2)).prog t ++ (A.seq A rfl).prog t :=
+      congrFun (congrArg CTA.prog hAn) t
+    -- transport a two-batch instruction time into the `n`-batch trace (shifted by the prefix)
+    have transport : ∀ (q M' : Nat), q < ((A.seq A rfl).prog t).length →
+        IsTimeOf (Config.run State.initial (A.seq A rfl)) τAA ⟨t, q⟩ M' →
+        IsTimeOf (Config.run State.initial (A ^ n))
+          (tC.dropLast.map (Config.seqLift (A ^ (n - 2)) (A.seq A rfl)) ++ τAA.tail)
+          ⟨t, (n - 2) * (A.prog t).length + q⟩ ((tC.length - 2) + M') := by
+      intro q M' hq hT'
+      obtain ⟨-, -, j', D, D', hM'eq, hDj, hDj1, hDprog, hD'prog⟩ := hT'
+      rw [hAAlen] at hq
+      refine ⟨hSucc.1, ?_, (tC.length - 2) + j', D, D', by omega, ?_, ?_, ?_, ?_⟩
+      · show (n - 2) * (A.prog t).length + q < ((A ^ n).prog t).length
+        rw [hnLen, hnL]; omega
+      · exact (hsnd j').trans hDj
+      · rw [show (tC.length - 2) + j' + 1 = (tC.length - 2) + (j' + 1) from by omega]
+        exact (hsnd (j' + 1)).trans hDj1
+      · show D.progOf t = ((A ^ n).prog t).drop ((n - 2) * (A.prog t).length + q)
+        rw [hprogeq, List.drop_append, List.drop_eq_nil_of_le (by rw [hCLen]; omega),
+          List.nil_append,
+          show (n - 2) * (A.prog t).length + q - ((A ^ (n - 2)).prog t).length = q from by
+            rw [hCLen]; omega]
+        exact hDprog
+      · show D'.progOf t = ((A ^ n).prog t).drop ((n - 2) * (A.prog t).length + q + 1)
+        rw [hprogeq, List.drop_append, List.drop_eq_nil_of_le (by rw [hCLen]; omega),
+          List.nil_append,
+          show (n - 2) * (A.prog t).length + q + 1 - ((A ^ (n - 2)).prog t).length = q + 1 from by
+            rw [hCLen]; omega]
+        exact hD'prog
+    -- the two corresponding instruction times in the two-batch trace
+    obtain ⟨sdAA, hAAlast⟩ := hτAA.2
+    obtain ⟨m₁', hT1'⟩ := exists_time_of_ends_done hτAA.1 hAAlast (η := ⟨t, j⟩)
+      (by show j < ((A.seq A rfl).prog t).length; rw [hAAlen]; omega)
+    obtain ⟨m₂', hT2'⟩ := exists_time_of_ends_done hτAA.1 hAAlast
+      (η := ⟨t, (A.prog t).length + j⟩)
+      (by show (A.prog t).length + j < ((A.seq A rfl).prog t).length; rw [hAAlen]; omega)
+    have hΔAA := hrecAA t j c b par m₁' m₂' hcj hbr hT1' hT2'
+    -- match the given times against the transported ones
+    have hidx2 : (n - 1) * (A.prog t).length + j
+        = (n - 2) * (A.prog t).length + ((A.prog t).length + j) := by
+      rw [show n - 1 = (n - 2) + 1 from by omega, Nat.succ_mul]; omega
+    have hTr1 := transport j m₁' (by rw [hAAlen]; omega) hT1'
+    have hTr2 := transport ((A.prog t).length + j) m₂' (by rw [hAAlen]; omega) hT2'
+    rw [hidx2] at ht2
+    have hm₁ : m₁ = (tC.length - 2) + m₁' := IsTimeOf.unique ht1 hTr1
+    have hm₂ : m₂ = (tC.length - 2) + m₂' := IsTimeOf.unique ht2 hTr2
+    have hm1' : 1 ≤ m₁' := by obtain ⟨_, _, _, he, _⟩ := hT1'.2.2; omega
+    have hm2' : 1 ≤ m₂' := by obtain ⟨_, _, _, he, _⟩ := hT2'.2.2; omega
+    have e1 : m₁ - 1 = (tC.length - 2) + (m₁' - 1) := by rw [hm₁]; omega
+    have e2 : m₂ - 1 = (tC.length - 2) + (m₂' - 1) := by rw [hm₂]; omega
+    rw [e1, e2, recycleCount_suffix b hsnd, recycleCount_suffix b hsnd, hΔAA]
+    omega
+
+/-- **Lemma 3, `n`-batch case (last two batches).** Let
+`k = I.loopK h` be the §1 iteration count and fix a batch count `n ≥ 2`. The `n`-fold
+repeated composition `(I ^ k) ^ n` lays each thread's program out as `n` consecutive
+copies of one batch `(I ^ k).prog t` (`CTA.pow_succ_prog`, iterated). Assuming **every
+batch-prefix** `(I ^ k) ^ m` (`1 ≤ m ≤ n`) is well-synchronized (`hWS`, a
+`CTA.BatchesWellSynchronized` hypothesis — generalizing the two `WellSynchronized`
+assumptions of `second_batch_gen_offset`, which were exactly the `m = 1` and `m = 2`
+prefixes), there is a successful trace `τ` of `(I ^ k) ^ n` whose recovered generation mapping
+(`pointGen`) exhibits the document's Lemma 3 relationship between the **last two** batches:
+every barrier instruction of the **last** batch has the same generation as the corresponding
+instruction of the **second-to-last** batch, incremented by `k · arrivers(b) / arrival-count(b)`,
+the number of times one batch recycles that instruction's barrier `b`.
+
+A program point `⟨t, j⟩` with `((I ^ k).prog t)[j]? = some c` is instruction `j` of thread
+`t` within one batch (`j < |(I ^ k).prog t|`). With `L = |(I ^ k).prog t|`, the copy of that
+instruction in batch `i` (0-indexed) is `⟨t, i · L + j⟩`; the last batch is `i = n - 1` and
+the second-to-last is `i = n - 2`. The statement is given only for barrier instructions
+(`Cmd.barrierRef c = some (b, m)`), the ones generations are defined on. This is the two-batch
+`second_batch_gen_offset` with the first/second pair replaced by the second-to-last/last pair,
+which the absence of backward happens-before edges between batches
+(`seq_no_happensBefore_B_to_A`) makes equivalent: the earlier batches cannot perturb the
+generations of the final two, so only their *relative* recycle offset (one batch's worth)
+survives. -/
+theorem CTA.WellSynchronized.last_batch_gen_offset {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 2 ≤ n)
+    (hWS : (I ^ k).BatchesWellSynchronized n) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
+      ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (m : ℕ+),
+        ((I ^ k).prog t)[j]? = some c → Cmd.barrierRef c = some (b, m) →
+        pointGen ((I ^ k) ^ n) τ ⟨t, (n - 1) * ((I ^ k).prog t).length + j⟩
+          = pointGen ((I ^ k) ^ n) τ ⟨t, (n - 2) * ((I ^ k).prog t).length + j⟩
+            + k * I.arrivers b / I.arrivalCount h b := by
+  -- The recycle-count core supplies the trace and the per-instruction offset between the
+  -- last two batches; this is the routine `pointGen`-to-`recycleCount` repackaging.
+  obtain ⟨τ, hτ, hrec⟩ := CTA.WellSynchronized.last_batch_recycle_offset h hk hn hWS
+  refine ⟨τ, hτ, ?_⟩
+  intro t j c b par hcj hbr
+  obtain ⟨hjlt, -⟩ := List.getElem?_eq_some_iff.mp hcj
+  obtain ⟨sd, hlast⟩ := hτ.2
+  -- length bookkeeping for thread `t`'s `n`-batch program
+  have hnLen : (((I ^ k) ^ n).prog t).length = n * ((I ^ k).prog t).length :=
+    CTA.pow_prog_length (I ^ k) n t
+  have hnL : n * ((I ^ k).prog t).length
+      = (n - 2) * ((I ^ k).prog t).length
+        + (((I ^ k).prog t).length + ((I ^ k).prog t).length) := by
+    conv_lhs => rw [← Nat.sub_add_cancel hn, Nat.add_mul]
+    omega
+  have hn1L : (n - 1) * ((I ^ k).prog t).length
+      = (n - 2) * ((I ^ k).prog t).length + ((I ^ k).prog t).length := by
+    rw [show n - 1 = (n - 2) + 1 from by omega, Nat.succ_mul]
+  -- the command at each of the two copies is `c`, a barrier op on `b`
+  have hcmdat : ∀ q, q < n →
+      (((I ^ k) ^ n).prog t)[q * ((I ^ k).prog t).length + j]? = some c := by
+    intro q hq
+    have hqLen : (((I ^ k) ^ q).prog t).length = q * ((I ^ k).prog t).length :=
+      CTA.pow_prog_length (I ^ k) q t
+    have hsplit : ((I ^ k) ^ n).prog t = ((I ^ k) ^ q).prog t ++ ((I ^ k) ^ (n - q)).prog t := by
+      conv_lhs => rw [show n = q + (n - q) from by omega]
+      rw [CTA.pow_add_prog]
+    rw [hsplit, List.getElem?_append_right (by rw [hqLen]; omega), hqLen,
+      show q * ((I ^ k).prog t).length + j - q * ((I ^ k).prog t).length = j from by omega,
+      show n - q = (n - q - 1) + 1 from by omega, CTA.pow_succ_prog,
+      List.getElem?_append_left hjlt]
+    exact hcj
+  have hcmd1 : ((I ^ k) ^ n).cmdAt ⟨t, (n - 2) * ((I ^ k).prog t).length + j⟩ = some c :=
+    hcmdat (n - 2) (by omega)
+  have hcmd2 : ((I ^ k) ^ n).cmdAt ⟨t, (n - 1) * ((I ^ k).prog t).length + j⟩ = some c :=
+    hcmdat (n - 1) (by omega)
+  have hbar : Cmd.barrier? c = some b := Cmd.barrier?_of_barrierRef hbr
+  -- both copies execute in the successful trace `τ`
+  obtain ⟨m₁, ht1⟩ := exists_time_of_ends_done hτ.1 hlast
+    (η := ⟨t, (n - 2) * ((I ^ k).prog t).length + j⟩)
+    (by show (n - 2) * ((I ^ k).prog t).length + j < (((I ^ k) ^ n).prog t).length
+        rw [hnLen, hnL]; omega)
+  obtain ⟨m₂, ht2⟩ := exists_time_of_ends_done hτ.1 hlast
+    (η := ⟨t, (n - 1) * ((I ^ k).prog t).length + j⟩)
+    (by show (n - 1) * ((I ^ k).prog t).length + j < (((I ^ k) ^ n).prog t).length
+        rw [hnLen, hnL, hn1L]; omega)
+  -- each generation is its barrier's recycle count just before its execution time, plus one
+  have hg1 : pointGen ((I ^ k) ^ n) τ ⟨t, (n - 2) * ((I ^ k).prog t).length + j⟩
+      = recycleCount b τ (m₁ - 1) + 1 := by
+    simp only [pointGen, hcmd1, Option.bind_some, hbar, pointTime_eq_of_isTimeOf ht1]
+  have hg2 : pointGen ((I ^ k) ^ n) τ ⟨t, (n - 1) * ((I ^ k).prog t).length + j⟩
+      = recycleCount b τ (m₂ - 1) + 1 := by
+    simp only [pointGen, hcmd2, Option.bind_some, hbar, pointTime_eq_of_isTimeOf ht2]
+  rw [hg1, hg2, hrec t j c b par m₁ m₂ hcj hbr ht1 ht2]; omega
+
 end Weft
