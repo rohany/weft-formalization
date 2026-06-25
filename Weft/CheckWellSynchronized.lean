@@ -2355,6 +2355,28 @@ theorem exists_failing_pair {T : CTA} {τ : List Config}
         exact ⟨hbar2, hgen, hidx, hf2⟩
       · rw [if_neg hcond] at hf2; exact (hf2 rfl).elim
 
+/-- **Dual of `exists_failing_pair`.** From `check = true`, *every* flagged line-18 pair is
+ordered: given a `sync b'` `c1` and a same-barrier op `c2` (with `1 ≤ c2.idx`) of generation
+`pointGen c1 + 1`, the predecessor `c3 = ⟨c2.thread, c2.idx - 1⟩` satisfies
+`(c1, c3) ∈ transClosure (initRelation T τ)`. This unwinds the two nested `List.all`s of
+`fst_checkWellSynchronized` at the witnesses `c1, c2`, then reads off the `decide` in the
+`if`-`then` branch (whose guard holds by hypothesis). -/
+theorem mem_transClosure_of_check {T : CTA} {τ : List Config}
+    (hcheck : (CheckWellSynchronized T τ).1 = true)
+    {c1 : ProgPoint} (hc1 : c1 ∈ T.progPoints) {b' : Barrier} {nn : ℕ+}
+    (hsync1 : T.cmdAt c1 = some (.sync b' nn))
+    {c2 : ProgPoint} (hc2 : c2 ∈ T.progPoints)
+    (hbar2 : (T.cmdAt c2).bind Cmd.barrier? = some b')
+    (hgen : pointGen T τ c2 = pointGen T τ c1 + 1) (hidx : 1 ≤ c2.idx) :
+    (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈ transClosure (initRelation T τ) := by
+  rw [fst_checkWellSynchronized] at hcheck
+  have hf1 := List.all_eq_true.mp hcheck c1 hc1
+  simp only [hsync1] at hf1
+  have hf2 := List.all_eq_true.mp hf1 c2 hc2
+  simp only [hbar2] at hf2
+  rw [if_pos ⟨True.intro, hgen, hidx⟩, decide_eq_true_eq] at hf2
+  exact hf2
+
 /-! ## Theorem 1 — soundness of `CheckWellSynchronized`
 
 The paper's **Theorem 1**: a successful run of the check witnesses
