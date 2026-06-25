@@ -4590,7 +4590,7 @@ batches in sequence are `(I ^ k) ^ m`. So the hypothesis — every prefix of `1 
 well-synchronized — is `(I ^ k).BatchesWellSynchronized (n + 1)`, and the conclusion is
 well-synchronization of the `(n + 2)`-batch program `(I ^ k) ^ (n + 2)`. -/
 theorem CTA.WellSynchronized.batches_inductive_step_impl {I : CTA} (h : I.ConsistentArrivalCounts)
-    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 3)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 2)
     (hWS : (I ^ k).BatchesWellSynchronized n) :
     ((I ^ k) ^ (n + 1)).WellSynchronized := by
   -- The shared replay trace `τ` of `(I^k)^(n+1)` with everything Phases C–E built on it:
@@ -5171,13 +5171,13 @@ theorem CTA.WellSynchronized.batches_inductive_step_impl {I : CTA} (h : I.Consis
           omega
 
 theorem CTA.WellSynchronized.loop_well_synchronized_impl {I : CTA} (h : I.ConsistentArrivalCounts)
-    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 3)
-    (hWS : (I ^ k).BatchesWellSynchronized 3) :
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 2)
+    (hWS : (I ^ k).BatchesWellSynchronized 2) :
     ((I ^ k) ^ (n)).WellSynchronized := by
   -- Strengthen to `BatchesWellSynchronized N` for every `N ≥ 3`, by induction from the base
   -- case `3` (the hypothesis); each step adds the new top batch via `batches_inductive_step_impl`
   -- (`BatchesWellSynchronized N → (I ^ k) ^ (N + 1)` well-synchronized).
-  have key : ∀ N, 3 ≤ N → (I ^ k).BatchesWellSynchronized N := by
+  have key : ∀ N, 2 ≤ N → (I ^ k).BatchesWellSynchronized N := by
     intro N hN
     induction N, hN using Nat.le_induction with
     | base => exact hWS
@@ -5186,7 +5186,7 @@ theorem CTA.WellSynchronized.loop_well_synchronized_impl {I : CTA} (h : I.Consis
       rcases Nat.lt_or_ge m (N + 1) with hlt | hge
       · exact ih m hm1 (by omega)
       · rw [show m = N + 1 from by omega]
-        exact CTA.WellSynchronized.batches_inductive_step_impl h hk hN ih
+        exact CTA.WellSynchronized.batches_inductive_step_impl h hk (by omega) ih
   exact key n hn n (by omega) (le_refl n)
 
 end Weft

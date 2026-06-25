@@ -114,15 +114,15 @@ end LoopBatchStructure
 section LoopProofs
 
 theorem CTA.WellSynchronized.batches_inductive_step {I : CTA} (h : I.ConsistentArrivalCounts)
-    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 3)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 2)
     (hWS : (I ^ k).BatchesWellSynchronized n) :
     ((I ^ k) ^ (n + 1)).WellSynchronized :=
-  CTA.WellSynchronized.batches_inductive_step_impl h hk hn hWS
+  CTA.WellSynchronized.batches_inductive_step_impl h hk (by omega) hWS
 
 
 theorem CTA.WellSynchronized.loop_well_synchronized {I : CTA} (h : I.ConsistentArrivalCounts)
-    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 3)
-    (hWS : (I ^ k).BatchesWellSynchronized 3) :
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 2)
+    (hWS : (I ^ k).BatchesWellSynchronized 2) :
     ((I ^ k) ^ (n)).WellSynchronized :=
   CTA.WellSynchronized.loop_well_synchronized_impl h hk hn hWS
 
