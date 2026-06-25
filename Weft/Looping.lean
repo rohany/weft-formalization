@@ -2205,6 +2205,21 @@ theorem CTA.pow_regroup_last_one (A : CTA) {n : Nat} (hn : 1 ≤ n) :
     conv_lhs => rw [← Nat.sub_add_cancel hn]
     rw [CTA.pow_add_prog, CTA.pow_one_prog]
 
+/-- **Regroup the last three batches.** For `n ≥ 3`, `A ^ n = (A ^ (n-3)) ⨾ (A ⨾ (A ⨾ A))`:
+the first `n-3` batches sequentially composed with the last three (right-associated, matching
+the program shape of `third_batch_recycle_offset`). Lets the `n`-batch Lemma 4.2 reuse the
+three-batch machinery on the final `A ⨾ (A ⨾ A)`. -/
+theorem CTA.pow_regroup_last_three (A : CTA) {n : Nat} (hn : 3 ≤ n) :
+    A ^ n = (A ^ (n - 3)).seq (A.seq (A.seq A rfl) rfl) (CTA.pow_ids A (n - 3)) := by
+  apply CTA.ext
+  · change (A ^ n).ids = (A ^ (n - 3)).ids; rw [CTA.pow_ids, CTA.pow_ids]
+  · funext t
+    change (A ^ n).prog t = (A ^ (n - 3)).prog t ++ (A.prog t ++ (A.prog t ++ A.prog t))
+    have h3 : (A ^ 3).prog t = A.prog t ++ (A.prog t ++ A.prog t) := by
+      rw [show (3 : Nat) = 2 + 1 from rfl, CTA.pow_succ_prog, CTA.pow_two_prog]
+    conv_lhs => rw [← Nat.sub_add_cancel hn]
+    rw [CTA.pow_add_prog, h3]
+
 /-! ### Gluing traces across a batch boundary
 
 `glue_trace` generalizes `replay_trace`: given a successful `A`-trace ending in
@@ -3405,6 +3420,196 @@ theorem CTA.WellSynchronized.third_batch_gen_offset {I : CTA} (h : I.ConsistentA
       pointTime_eq_of_isTimeOf ht2]
   rw [hg1, hg2, hrec t j c b n i m₁ m₂ hi2 hcj hbr ht1 ht2]; omega
 
+/-- **Consecutive-batch recycle offset for the last three batches of `(I ^ k) ^ n`.**
+*(Helper for `last_batches_gen_offset`.)* The `n`-batch generalization of
+`third_batch_recycle_offset`: there is a successful trace `τ` of `(I ^ k) ^ n` (`n ≥ 3`) along
+which, for every barrier instruction and every `i < 2`, the recycle count of `b` just before
+the copy in batch `n - 3 + i + 1` exceeds the count just before the copy in batch `n - 3 + i`
+by exactly `k · arrivers(b) / arrival-count(b)`. The trace glues the first `n - 3` batches
+(`pow_replay_trace`) in front of the three-batch trace of `third_batch_recycle_offset` via the
+regrouping `(I ^ k) ^ n = (I ^ k) ^ (n-3) ⨾ ((I ^ k) ⨾ ((I ^ k) ⨾ (I ^ k)))`. The front
+batches contribute the *same* constant recycle count before each of the final three copies, so
+it cancels in the differences, leaving the three-batch offsets. -/
+theorem CTA.WellSynchronized.last_batches_recycle_offset {I : CTA}
+    (h : I.ConsistentArrivalCounts) {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 3 ≤ n)
+    (hWS : (I ^ k).BatchesWellSynchronized n) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
+      ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (i : Nat) (m₁ m₂ : Nat),
+        i < 2 → ((I ^ k).prog t)[j]? = some c → Cmd.barrierRef c = some (b, par) →
+        IsTimeOf (Config.run State.initial ((I ^ k) ^ n)) τ
+            ⟨t, (n - 3 + i) * ((I ^ k).prog t).length + j⟩ m₁ →
+        IsTimeOf (Config.run State.initial ((I ^ k) ^ n)) τ
+            ⟨t, (n - 3 + i + 1) * ((I ^ k).prog t).length + j⟩ m₂ →
+        recycleCount b τ (m₂ - 1)
+          = recycleCount b τ (m₁ - 1) + k * I.arrivers b / I.arrivalCount h b := by
+  subst hk
+  have hWSA : (I ^ I.loopK h).WellSynchronized := by
+    have := hWS 1 (le_refl 1) (by omega); rwa [CTA.pow_one] at this
+  have hWSAA : ((I ^ I.loopK h).seq (I ^ I.loopK h) rfl).WellSynchronized := by
+    have := hWS 2 (by omega) (by omega); rwa [CTA.pow_two_eq_seq] at this
+  obtain ⟨t₁, ht₁⟩ := hWSA.exists_successfulTrace
+  obtain ⟨sd₁, ht₁L⟩ := ht₁.2
+  have hinit : sd₁ = State.initial := pow_done_state_initial h ht₁ ht₁L
+  rw [hinit] at ht₁L
+  -- three-batch trace with the per-instruction offsets (the hard case)
+  obtain ⟨τAAA, hτAAA, hrecAAA⟩ := CTA.WellSynchronized.third_batch_recycle_offset h rfl hWSA hWSAA
+  -- `(n-3)`-fold replay of the first batches
+  obtain ⟨tC, htC, htCL⟩ := pow_replay_trace (I ^ I.loopK h) ht₁ ht₁L (n - 3)
+  set A := I ^ I.loopK h with hA
+  obtain ⟨hglue, -, hsnd⟩ :=
+    glue_trace (B := A.seq (A.seq A rfl) rfl) (CTA.pow_ids A (n - 3)) htC htCL hτAAA
+  have hAn : A ^ n = (A ^ (n - 3)).seq (A.seq (A.seq A rfl) rfl) (CTA.pow_ids A (n - 3)) :=
+    CTA.pow_regroup_last_three A hn
+  refine ⟨tC.dropLast.map (Config.seqLift (A ^ (n - 3)) (A.seq (A.seq A rfl) rfl)) ++ τAAA.tail,
+    ?_, ?_⟩
+  · rw [hAn]; exact hglue
+  · intro t j c b par i m₁ m₂ hi2 hcj hbr ht1 ht2
+    obtain ⟨hjL, -⟩ := List.getElem?_eq_some_iff.mp hcj
+    have hSucc : IsSuccessfulTraceFrom (Config.run State.initial (A ^ n))
+        (tC.dropLast.map (Config.seqLift (A ^ (n - 3)) (A.seq (A.seq A rfl) rfl))
+          ++ τAAA.tail) := by
+      rw [hAn]; exact hglue
+    have hCLen : ((A ^ (n - 3)).prog t).length = (n - 3) * (A.prog t).length :=
+      CTA.pow_prog_length A (n - 3) t
+    have hAAAlen : ((A.seq (A.seq A rfl) rfl).prog t).length
+        = (A.prog t).length + ((A.prog t).length + (A.prog t).length) := by
+      change (A.prog t ++ (A.prog t ++ A.prog t)).length = _
+      rw [List.length_append, List.length_append]
+    have hnL : n * (A.prog t).length
+        = (n - 3) * (A.prog t).length
+          + ((A.prog t).length + ((A.prog t).length + (A.prog t).length)) := by
+      conv_lhs => rw [← Nat.sub_add_cancel hn, Nat.add_mul]
+      omega
+    have hnLen : ((A ^ n).prog t).length = n * (A.prog t).length := CTA.pow_prog_length A n t
+    have hprogeq : (A ^ n).prog t = (A ^ (n - 3)).prog t ++ (A.seq (A.seq A rfl) rfl).prog t :=
+      congrFun (congrArg CTA.prog hAn) t
+    -- transport a three-batch instruction time into the `n`-batch trace (shifted by the prefix)
+    have transport : ∀ (q M' : Nat), q < ((A.seq (A.seq A rfl) rfl).prog t).length →
+        IsTimeOf (Config.run State.initial (A.seq (A.seq A rfl) rfl)) τAAA ⟨t, q⟩ M' →
+        IsTimeOf (Config.run State.initial (A ^ n))
+          (tC.dropLast.map (Config.seqLift (A ^ (n - 3)) (A.seq (A.seq A rfl) rfl)) ++ τAAA.tail)
+          ⟨t, (n - 3) * (A.prog t).length + q⟩ ((tC.length - 2) + M') := by
+      intro q M' hq hT'
+      obtain ⟨-, -, j', D, D', hM'eq, hDj, hDj1, hDprog, hD'prog⟩ := hT'
+      rw [hAAAlen] at hq
+      refine ⟨hSucc.1, ?_, (tC.length - 2) + j', D, D', by omega, ?_, ?_, ?_, ?_⟩
+      · change (n - 3) * (A.prog t).length + q < ((A ^ n).prog t).length
+        rw [hnLen, hnL]; omega
+      · exact (hsnd j').trans hDj
+      · rw [show (tC.length - 2) + j' + 1 = (tC.length - 2) + (j' + 1) from by omega]
+        exact (hsnd (j' + 1)).trans hDj1
+      · change D.progOf t = ((A ^ n).prog t).drop ((n - 3) * (A.prog t).length + q)
+        rw [hprogeq, List.drop_append, List.drop_eq_nil_of_le (by rw [hCLen]; omega),
+          List.nil_append,
+          show (n - 3) * (A.prog t).length + q - ((A ^ (n - 3)).prog t).length = q from by
+            rw [hCLen]; omega]
+        exact hDprog
+      · change D'.progOf t = ((A ^ n).prog t).drop ((n - 3) * (A.prog t).length + q + 1)
+        rw [hprogeq, List.drop_append, List.drop_eq_nil_of_le (by rw [hCLen]; omega),
+          List.nil_append,
+          show (n - 3) * (A.prog t).length + q + 1 - ((A ^ (n - 3)).prog t).length = q + 1 from by
+            rw [hCLen]; omega]
+        exact hD'prog
+    -- the two corresponding instruction times in the three-batch trace
+    obtain ⟨sdAAA, hAAAlast⟩ := hτAAA.2
+    have hb1 : i * (A.prog t).length + j < ((A.seq (A.seq A rfl) rfl).prog t).length := by
+      rw [hAAAlen]
+      have hle : i * (A.prog t).length ≤ 1 * (A.prog t).length := Nat.mul_le_mul_right _ (by omega)
+      simp only [Nat.one_mul] at hle; omega
+    have hb2 : (i + 1) * (A.prog t).length + j < ((A.seq (A.seq A rfl) rfl).prog t).length := by
+      rw [hAAAlen]
+      have hle : (i + 1) * (A.prog t).length ≤ 2 * (A.prog t).length :=
+        Nat.mul_le_mul_right _ (by omega)
+      omega
+    obtain ⟨m₁', hT1'⟩ := exists_time_of_ends_done hτAAA.1 hAAAlast
+      (η := ⟨t, i * (A.prog t).length + j⟩) hb1
+    obtain ⟨m₂', hT2'⟩ := exists_time_of_ends_done hτAAA.1 hAAAlast
+      (η := ⟨t, (i + 1) * (A.prog t).length + j⟩) hb2
+    have hΔAAA := hrecAAA t j c b par i m₁' m₂' hi2 hcj hbr hT1' hT2'
+    have hidx1 : (n - 3 + i) * (A.prog t).length + j
+        = (n - 3) * (A.prog t).length + (i * (A.prog t).length + j) := by
+      rw [Nat.add_mul]; omega
+    have hidx2 : (n - 3 + i + 1) * (A.prog t).length + j
+        = (n - 3) * (A.prog t).length + ((i + 1) * (A.prog t).length + j) := by
+      rw [show n - 3 + i + 1 = (n - 3) + (i + 1) from by omega, Nat.add_mul]; omega
+    have hTr1 := transport (i * (A.prog t).length + j) m₁' hb1 hT1'
+    have hTr2 := transport ((i + 1) * (A.prog t).length + j) m₂' hb2 hT2'
+    rw [hidx1] at ht1
+    rw [hidx2] at ht2
+    have hm₁ : m₁ = (tC.length - 2) + m₁' := IsTimeOf.unique ht1 hTr1
+    have hm₂ : m₂ = (tC.length - 2) + m₂' := IsTimeOf.unique ht2 hTr2
+    have hm1' : 1 ≤ m₁' := by obtain ⟨_, _, _, he, _⟩ := hT1'.2.2; omega
+    have hm2' : 1 ≤ m₂' := by obtain ⟨_, _, _, he, _⟩ := hT2'.2.2; omega
+    have e1 : m₁ - 1 = (tC.length - 2) + (m₁' - 1) := by rw [hm₁]; omega
+    have e2 : m₂ - 1 = (tC.length - 2) + (m₂' - 1) := by rw [hm₂]; omega
+    rw [e1, e2, recycleCount_suffix b hsnd, recycleCount_suffix b hsnd, hΔAAA]
+    omega
+
+/-- **Consecutive-batch generation offset for the last three batches of `(I ^ k) ^ n`.**
+*(Helper for `last_batch_hb_across`.)* The `n`-batch generalization of `third_batch_gen_offset`:
+for `(I ^ k) ^ n` (`n ≥ 3`) there is a successful trace `τ` whose recovered generation mapping
+(`pointGen`) increases by exactly `k · arrivers(b) / arrival-count(b)` from each of the last
+three batches to the next: for a barrier body instruction `⟨t, j⟩` and `i < 2`, the generation
+of the copy in batch `n - 3 + i + 1` exceeds that of the copy in batch `n - 3 + i` by one
+batch's worth of recycles. Supplies both adjacent-batch offsets along a *single* trace, which
+is what `last_batch_hb_across` needs to shift barrier (`R`) edges by one batch. -/
+theorem CTA.WellSynchronized.last_batches_gen_offset {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 3 ≤ n)
+    (hWS : (I ^ k).BatchesWellSynchronized n) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
+      ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (i : Nat),
+        i < 2 → ((I ^ k).prog t)[j]? = some c → Cmd.barrierRef c = some (b, par) →
+        pointGen ((I ^ k) ^ n) τ ⟨t, (n - 3 + i + 1) * ((I ^ k).prog t).length + j⟩
+          = pointGen ((I ^ k) ^ n) τ ⟨t, (n - 3 + i) * ((I ^ k).prog t).length + j⟩
+            + k * I.arrivers b / I.arrivalCount h b := by
+  obtain ⟨τ, hτ, hrec⟩ := CTA.WellSynchronized.last_batches_recycle_offset h hk hn hWS
+  refine ⟨τ, hτ, ?_⟩
+  intro t j c b par i hi2 hcj hbr
+  obtain ⟨hjlt, -⟩ := List.getElem?_eq_some_iff.mp hcj
+  obtain ⟨sd, hlast⟩ := hτ.2
+  have hnLen : (((I ^ k) ^ n).prog t).length = n * ((I ^ k).prog t).length :=
+    CTA.pow_prog_length (I ^ k) n t
+  have hcmdat : ∀ q, q < n →
+      (((I ^ k) ^ n).prog t)[q * ((I ^ k).prog t).length + j]? = some c := by
+    intro q hq
+    have hqLen : (((I ^ k) ^ q).prog t).length = q * ((I ^ k).prog t).length :=
+      CTA.pow_prog_length (I ^ k) q t
+    have hsplit : ((I ^ k) ^ n).prog t = ((I ^ k) ^ q).prog t ++ ((I ^ k) ^ (n - q)).prog t := by
+      conv_lhs => rw [show n = q + (n - q) from by omega]
+      rw [CTA.pow_add_prog]
+    rw [hsplit, List.getElem?_append_right (by rw [hqLen]; omega), hqLen,
+      show q * ((I ^ k).prog t).length + j - q * ((I ^ k).prog t).length = j from by omega,
+      show n - q = (n - q - 1) + 1 from by omega, CTA.pow_succ_prog,
+      List.getElem?_append_left hjlt]
+    exact hcj
+  have hple : ∀ p, p ≤ n - 1 →
+      p * ((I ^ k).prog t).length + j < (((I ^ k) ^ n).prog t).length := by
+    intro p hp
+    rw [hnLen]
+    have hle : p * ((I ^ k).prog t).length ≤ (n - 1) * ((I ^ k).prog t).length :=
+      Nat.mul_le_mul_right _ hp
+    have hn1 : n * ((I ^ k).prog t).length
+        = (n - 1) * ((I ^ k).prog t).length + ((I ^ k).prog t).length := by
+      conv_lhs => rw [← Nat.sub_add_cancel (show 1 ≤ n by omega), Nat.add_mul]
+      omega
+    omega
+  have hbar : Cmd.barrier? c = some b := Cmd.barrier?_of_barrierRef hbr
+  obtain ⟨m₁, ht1⟩ := exists_time_of_ends_done hτ.1 hlast
+    (η := ⟨t, (n - 3 + i) * ((I ^ k).prog t).length + j⟩) (hple (n - 3 + i) (by omega))
+  obtain ⟨m₂, ht2⟩ := exists_time_of_ends_done hτ.1 hlast
+    (η := ⟨t, (n - 3 + i + 1) * ((I ^ k).prog t).length + j⟩) (hple (n - 3 + i + 1) (by omega))
+  have hcmd1 : ((I ^ k) ^ n).cmdAt ⟨t, (n - 3 + i) * ((I ^ k).prog t).length + j⟩ = some c :=
+    hcmdat (n - 3 + i) (by omega)
+  have hcmd2 : ((I ^ k) ^ n).cmdAt ⟨t, (n - 3 + i + 1) * ((I ^ k).prog t).length + j⟩ = some c :=
+    hcmdat (n - 3 + i + 1) (by omega)
+  have hg1 : pointGen ((I ^ k) ^ n) τ ⟨t, (n - 3 + i) * ((I ^ k).prog t).length + j⟩
+      = recycleCount b τ (m₁ - 1) + 1 := by
+    simp only [pointGen, hcmd1, Option.bind_some, hbar, pointTime_eq_of_isTimeOf ht1]
+  have hg2 : pointGen ((I ^ k) ^ n) τ ⟨t, (n - 3 + i + 1) * ((I ^ k).prog t).length + j⟩
+      = recycleCount b τ (m₂ - 1) + 1 := by
+    simp only [pointGen, hcmd2, Option.bind_some, hbar, pointTime_eq_of_isTimeOf ht2]
+  rw [hg1, hg2, hrec t j c b par i m₁ m₂ hi2 hcj hbr ht1 ht2]; omega
+
 /-- **Lemma 4.2, conclusion 2 (across batches), three-batch case.** *Stated, not yet proved.*
 This conclusion compares the happens-before edge running from batch `n` into batch `n + 1`
 with the corresponding edge from batch `n - 1` into batch `n`. Those are *two distinct*
@@ -3711,6 +3916,390 @@ theorem CTA.WellSynchronized.last_batch_hb_across {I : CTA} (h : I.ConsistentArr
           ↔ happensBefore ((I ^ k) ^ n) τ
               ⟨t₁, (n - 3) * ((I ^ k).prog t₁).length + j₁⟩
               ⟨t₂, (n - 2) * ((I ^ k).prog t₂).length + j₂⟩) := by
-  sorry
+  -- the trace and the per-instruction generation offsets between the last three batches
+  obtain ⟨τ, hτ, hgen0⟩ := CTA.WellSynchronized.last_batches_gen_offset h hk hn hWS
+  refine ⟨τ, hτ, ?_⟩
+  set A := I ^ k with hA
+  -- arithmetic relating the batch boundaries `n-3, n-2, n-1, n` for a fixed thread
+  have hE2 : ∀ (t : ThreadId), (n - 2) * (A.prog t).length
+      = (n - 3) * (A.prog t).length + (A.prog t).length := by
+    intro t; rw [show n - 2 = (n - 3) + 1 from by omega, Nat.add_mul, Nat.one_mul]
+  have hE1 : ∀ (t : ThreadId), (n - 1) * (A.prog t).length
+      = (n - 3) * (A.prog t).length + ((A.prog t).length + (A.prog t).length) := by
+    intro t; rw [show n - 1 = (n - 3) + 2 from by omega, Nat.add_mul]; omega
+  have hE0 : ∀ (t : ThreadId), n * (A.prog t).length
+      = (n - 3) * (A.prog t).length
+        + ((A.prog t).length + (A.prog t).length + (A.prog t).length) := by
+    intro t
+    conv_lhs => rw [← Nat.sub_add_cancel hn, Nat.add_mul]
+    omega
+  have hPlen : ∀ (t : ThreadId), ((A ^ n).prog t).length = n * (A.prog t).length :=
+    fun t => CTA.pow_prog_length A n t
+  -- the command at the copy of body instruction `j` in batch `p` is the body command
+  have hcmdbatch : ∀ (t : ThreadId) (j p : Nat), j < (A.prog t).length → p < n →
+      (A ^ n).cmdAt ⟨t, p * (A.prog t).length + j⟩ = (A.prog t)[j]? := by
+    intro t j p hj hp
+    have hqLen : ((A ^ p).prog t).length = p * (A.prog t).length := CTA.pow_prog_length A p t
+    have hsplit : (A ^ n).prog t = (A ^ p).prog t ++ (A ^ (n - p)).prog t := by
+      conv_lhs => rw [show n = p + (n - p) from by omega]
+      rw [CTA.pow_add_prog]
+    change ((A ^ n).prog t)[p * (A.prog t).length + j]? = (A.prog t)[j]?
+    rw [hsplit, List.getElem?_append_right (by rw [hqLen]; omega), hqLen,
+      show p * (A.prog t).length + j - p * (A.prog t).length = j from by omega,
+      show n - p = (n - p - 1) + 1 from by omega, CTA.pow_succ_prog,
+      List.getElem?_append_left hj]
+  -- program points of the lower (batches n-3, n-2) and upper (batches n-2, n-1) regions
+  have hppLow : ∀ (t : ThreadId) (idx : Nat),
+      (n - 3) * (A.prog t).length ≤ idx → idx < (n - 1) * (A.prog t).length →
+      (⟨t, idx⟩ : ProgPoint) ∈ (A ^ n).progPoints := by
+    intro t idx hlo hhi
+    rw [mem_progPoints_iff]
+    refine ⟨?_, ?_⟩
+    · change t ∈ (A ^ n).ids
+      rw [CTA.pow_ids]
+      exact mem_ids_of_idx_lt A (show (0 : Nat) < (A.prog t).length by have := hE1 t; omega)
+    · change idx < ((A ^ n).prog t).length
+      rw [hPlen]; have := hE0 t; have := hE1 t; omega
+  have hppUp : ∀ (t : ThreadId) (idx : Nat),
+      (n - 3) * (A.prog t).length ≤ idx → idx < (n - 1) * (A.prog t).length →
+      (⟨t, idx + (A.prog t).length⟩ : ProgPoint) ∈ (A ^ n).progPoints := by
+    intro t idx hlo hhi
+    rw [mem_progPoints_iff]
+    refine ⟨?_, ?_⟩
+    · change t ∈ (A ^ n).ids
+      rw [CTA.pow_ids]
+      exact mem_ids_of_idx_lt A (show (0 : Nat) < (A.prog t).length by have := hE1 t; omega)
+    · change idx + (A.prog t).length < ((A ^ n).prog t).length
+      rw [hPlen]; have := hE0 t; have := hE1 t; omega
+  -- commands agree under a one-batch shift inside the lower region (two batches wide)
+  have hcmdA : ∀ (t : ThreadId) (idx : Nat),
+      (n - 3) * (A.prog t).length ≤ idx → idx < (n - 1) * (A.prog t).length →
+      (A ^ n).cmdAt ⟨t, idx + (A.prog t).length⟩ = (A ^ n).cmdAt ⟨t, idx⟩ := by
+    intro t idx hlo hhi
+    rcases Nat.lt_or_ge idx ((n - 2) * (A.prog t).length) with hcase | hcase
+    · have hr : idx - (n - 3) * (A.prog t).length < (A.prog t).length := by have := hE2 t; omega
+      have e1 := hcmdbatch t (idx - (n - 3) * (A.prog t).length) (n - 3) hr (by omega)
+      have e2 := hcmdbatch t (idx - (n - 3) * (A.prog t).length) (n - 2) hr (by omega)
+      rw [show (n - 3) * (A.prog t).length + (idx - (n - 3) * (A.prog t).length) = idx
+            from by omega] at e1
+      rw [show (n - 2) * (A.prog t).length + (idx - (n - 3) * (A.prog t).length)
+            = idx + (A.prog t).length from by have := hE2 t; omega] at e2
+      rw [e2, e1]
+    · have hr : idx - (n - 2) * (A.prog t).length < (A.prog t).length := by
+        have := hE2 t; have := hE1 t; omega
+      have e1 := hcmdbatch t (idx - (n - 2) * (A.prog t).length) (n - 2) hr (by omega)
+      have e2 := hcmdbatch t (idx - (n - 2) * (A.prog t).length) (n - 1) hr (by omega)
+      rw [show (n - 2) * (A.prog t).length + (idx - (n - 2) * (A.prog t).length) = idx
+            from by omega] at e1
+      rw [show (n - 1) * (A.prog t).length + (idx - (n - 2) * (A.prog t).length)
+            = idx + (A.prog t).length from by have := hE1 t; have := hE2 t; omega] at e2
+      rw [e2, e1]
+  -- **Generation neighbour offset (NEIGHBOR form).** Shifting a lower barrier point up by one
+  -- batch adds `Δ` to its generation; from `hgen0`, casing on which of the two lower batches.
+  have hgen : ∀ (t : ThreadId) (idx : Nat) (c : Cmd) (b : Barrier) (par : ℕ+),
+      (n - 3) * (A.prog t).length ≤ idx → idx < (n - 1) * (A.prog t).length →
+      (A ^ n).cmdAt ⟨t, idx⟩ = some c → Cmd.barrierRef c = some (b, par) →
+      pointGen (A ^ n) τ ⟨t, idx + (A.prog t).length⟩
+        = pointGen (A ^ n) τ ⟨t, idx⟩ + k * I.arrivers b / I.arrivalCount h b := by
+    intro t idx c b par hlo hhi hcmd hbr
+    rcases Nat.lt_or_ge idx ((n - 2) * (A.prog t).length) with hcase | hcase
+    · -- batch n-3, i = 0
+      have hr : idx - (n - 3) * (A.prog t).length < (A.prog t).length := by have := hE2 t; omega
+      have hbody : (A.prog t)[idx - (n - 3) * (A.prog t).length]? = some c := by
+        have e := hcmdbatch t (idx - (n - 3) * (A.prog t).length) (n - 3) hr (by omega)
+        rw [show (n - 3) * (A.prog t).length + (idx - (n - 3) * (A.prog t).length) = idx
+              from by omega] at e
+        rw [← e]; exact hcmd
+      have hh := hgen0 t (idx - (n - 3) * (A.prog t).length) c b par 0 (by omega) hbody hbr
+      have hb1 : (n - 3 + 0 + 1) * (A.prog t).length
+          = (n - 3) * (A.prog t).length + (A.prog t).length := by
+        rw [Nat.add_zero, Nat.add_mul, Nat.one_mul]
+      have hb0 : (n - 3 + 0) * (A.prog t).length = (n - 3) * (A.prog t).length := by
+        rw [Nat.add_zero]
+      rw [show (n - 3 + 0 + 1) * (A.prog t).length + (idx - (n - 3) * (A.prog t).length)
+              = idx + (A.prog t).length from by rw [hb1]; omega,
+          show (n - 3 + 0) * (A.prog t).length + (idx - (n - 3) * (A.prog t).length) = idx
+              from by rw [hb0]; omega] at hh
+      exact hh
+    · -- batch n-2, i = 1
+      have hr : idx - (n - 2) * (A.prog t).length < (A.prog t).length := by
+        have := hE2 t; have := hE1 t; omega
+      have hbody : (A.prog t)[idx - (n - 2) * (A.prog t).length]? = some c := by
+        have e := hcmdbatch t (idx - (n - 2) * (A.prog t).length) (n - 2) hr (by omega)
+        rw [show (n - 2) * (A.prog t).length + (idx - (n - 2) * (A.prog t).length) = idx
+              from by omega] at e
+        rw [← e]; exact hcmd
+      have hh := hgen0 t (idx - (n - 2) * (A.prog t).length) c b par 1 (by omega) hbody hbr
+      have hb1 : (n - 3 + 1 + 1) * (A.prog t).length
+          = (n - 3) * (A.prog t).length + ((A.prog t).length + (A.prog t).length) := by
+        rw [Nat.add_mul, Nat.add_mul]; simp only [Nat.one_mul]; omega
+      have hb0 : (n - 3 + 1) * (A.prog t).length
+          = (n - 3) * (A.prog t).length + (A.prog t).length := by
+        rw [Nat.add_mul, Nat.one_mul]
+      rw [show (n - 3 + 1 + 1) * (A.prog t).length + (idx - (n - 2) * (A.prog t).length)
+              = idx + (A.prog t).length from by rw [hb1]; have := hE2 t; omega,
+          show (n - 3 + 1) * (A.prog t).length + (idx - (n - 2) * (A.prog t).length) = idx
+              from by rw [hb0]; have := hE2 t; omega] at hh
+      exact hh
+  -- **Edge shift.** An `initRelation` edge between two lower-region points exists iff the edge
+  -- between their one-batch-shifted copies does (barrier edges via generation equality, `hgen`).
+  have hshift : ∀ (a b : ProgPoint),
+      (n - 3) * (A.prog a.thread).length ≤ a.idx → a.idx < (n - 1) * (A.prog a.thread).length →
+      (n - 3) * (A.prog b.thread).length ≤ b.idx → b.idx < (n - 1) * (A.prog b.thread).length →
+      ((a, b) ∈ initRelation (A ^ n) τ ↔
+        (⟨a.thread, a.idx + (A.prog a.thread).length⟩,
+          ⟨b.thread, b.idx + (A.prog b.thread).length⟩) ∈ initRelation (A ^ n) τ) := by
+    intro a b haLo haHi hbLo hbHi
+    obtain ⟨s₁, i₁⟩ := a
+    obtain ⟨s₂, i₂⟩ := b
+    dsimp only at haLo haHi hbLo hbHi
+    rw [mem_initRelation_iff, mem_initRelation_iff]
+    constructor
+    · rintro (⟨_, _, heq⟩ | ⟨bb, par, _, _, hc1, hc2, hg⟩ | ⟨bb, par, _, _, hc1, hc2, hg⟩)
+      · simp only [ProgPoint.mk.injEq] at heq
+        obtain ⟨rfl, rfl⟩ := heq
+        refine Or.inl ⟨hppUp s₂ i₁ haLo haHi, ?_, ?_⟩
+        · change i₁ + (A.prog s₂).length + 1 < ((A ^ n).prog s₂).length
+          rw [hPlen]; have := hE0 s₂; have := hE1 s₂; omega
+        · change (⟨s₂, i₁ + 1 + (A.prog s₂).length⟩ : ProgPoint)
+              = ⟨s₂, i₁ + (A.prog s₂).length + 1⟩
+          exact congrArg (ProgPoint.mk s₂) (by omega)
+      · refine Or.inr (Or.inl
+          ⟨bb, par, hppUp s₁ i₁ haLo haHi, hppUp s₂ i₂ hbLo hbHi, ?_, ?_, ?_⟩)
+        · rw [hcmdA s₁ i₁ haLo haHi]; exact hc1
+        · rw [hcmdA s₂ i₂ hbLo hbHi]; exact hc2
+        · rw [hgen s₁ i₁ _ bb par haLo haHi hc1 rfl, hgen s₂ i₂ _ bb par hbLo hbHi hc2 rfl, hg]
+      · refine Or.inr (Or.inr
+          ⟨bb, par, hppUp s₁ i₁ haLo haHi, hppUp s₂ i₂ hbLo hbHi, ?_, ?_, ?_⟩)
+        · rw [hcmdA s₁ i₁ haLo haHi]; exact hc1
+        · rw [hcmdA s₂ i₂ hbLo hbHi]; exact hc2
+        · rw [hgen s₁ i₁ _ bb par haLo haHi hc1 rfl, hgen s₂ i₂ _ bb par hbLo hbHi hc2 rfl, hg]
+    · rintro (⟨_, _, heq⟩ | ⟨bb, par, _, _, hc1, hc2, hg⟩ | ⟨bb, par, _, _, hc1, hc2, hg⟩)
+      · simp only [ProgPoint.mk.injEq] at heq
+        obtain ⟨rfl, hidx⟩ := heq
+        refine Or.inl ⟨hppLow s₂ i₁ haLo haHi, ?_, ?_⟩
+        · change i₁ + 1 < ((A ^ n).prog s₂).length
+          rw [hPlen]; have := hE0 s₂; have := hE1 s₂; omega
+        · change (⟨s₂, i₂⟩ : ProgPoint) = ⟨s₂, i₁ + 1⟩
+          exact congrArg (ProgPoint.mk s₂) (by omega)
+      · have he1 : (A ^ n).cmdAt ⟨s₁, i₁⟩ = some (Cmd.arrive bb par) := by
+          rw [← hcmdA s₁ i₁ haLo haHi]; exact hc1
+        have he2 : (A ^ n).cmdAt ⟨s₂, i₂⟩ = some (Cmd.sync bb par) := by
+          rw [← hcmdA s₂ i₂ hbLo hbHi]; exact hc2
+        refine Or.inr (Or.inl
+          ⟨bb, par, hppLow s₁ i₁ haLo haHi, hppLow s₂ i₂ hbLo hbHi, he1, he2, ?_⟩)
+        rw [hgen s₁ i₁ _ bb par haLo haHi he1 rfl, hgen s₂ i₂ _ bb par hbLo hbHi he2 rfl] at hg
+        omega
+      · have he1 : (A ^ n).cmdAt ⟨s₁, i₁⟩ = some (Cmd.sync bb par) := by
+          rw [← hcmdA s₁ i₁ haLo haHi]; exact hc1
+        have he2 : (A ^ n).cmdAt ⟨s₂, i₂⟩ = some (Cmd.sync bb par) := by
+          rw [← hcmdA s₂ i₂ hbLo hbHi]; exact hc2
+        refine Or.inr (Or.inr
+          ⟨bb, par, hppLow s₁ i₁ haLo haHi, hppLow s₂ i₂ hbLo hbHi, he1, he2, ?_⟩)
+        rw [hgen s₁ i₁ _ bb par haLo haHi he1 rfl, hgen s₂ i₂ _ bb par hbLo hbHi he2 rfl] at hg
+        omega
+  -- **No backward edges into the last batch** (`seq_no_happensBefore` on `(A ^ (n-1)) ⨾ A`).
+  have NB_up : ¬ ∃ s d : ProgPoint, happensBefore (A ^ n) τ s d ∧
+      ((n - 1) * (A.prog s.thread).length ≤ s.idx ∧ s.idx < n * (A.prog s.thread).length) ∧
+      d.idx < (n - 1) * (A.prog d.thread).length := by
+    rintro ⟨s, d, hR, ⟨h1, h2⟩, h3⟩
+    have hreg : A ^ n = (A ^ (n - 1)).seq A (CTA.pow_ids A (n - 1)) :=
+      CTA.pow_regroup_last_one A (by omega)
+    have hWSn1 : (A ^ (n - 1)).WellSynchronized := hWS (n - 1) (by omega) (by omega)
+    have hWSr : ((A ^ (n - 1)).seq A (CTA.pow_ids A (n - 1))).WellSynchronized := by
+      rw [← hreg]; exact hWS n (by omega) (le_refl n)
+    have hτr : IsSuccessfulTraceFrom
+        (Config.run State.initial ((A ^ (n - 1)).seq A (CTA.pow_ids A (n - 1)))) τ := by
+      rw [← hreg]; exact hτ
+    have hRr : happensBefore ((A ^ (n - 1)).seq A (CTA.pow_ids A (n - 1))) τ s d := by
+      rw [← hreg]; exact hR
+    refine CTA.WellSynchronized.seq_no_happensBefore_B_to_A_impl (CTA.pow_ids A (n - 1))
+      hWSn1 hWSr hτr ⟨s, d, hRr, ⟨?_, ?_⟩, ?_⟩
+    · rw [CTA.pow_prog_length]; exact h1
+    · rw [CTA.pow_prog_length]; have := hE0 s.thread; have := hE1 s.thread; omega
+    · rw [CTA.pow_prog_length]; exact h3
+  -- **No backward edges from the last two batches** (`seq_no_happensBefore`, regroup last two).
+  have NB_mid : ¬ ∃ s d : ProgPoint, happensBefore (A ^ n) τ s d ∧
+      ((n - 2) * (A.prog s.thread).length ≤ s.idx ∧ s.idx < n * (A.prog s.thread).length) ∧
+      d.idx < (n - 2) * (A.prog d.thread).length := by
+    rintro ⟨s, d, hR, ⟨h1, h2⟩, h3⟩
+    have hreg : A ^ n = (A ^ (n - 2)).seq (A.seq A rfl) (CTA.pow_ids A (n - 2)) :=
+      CTA.pow_regroup_last_two A (by omega)
+    have hWSn2 : (A ^ (n - 2)).WellSynchronized := hWS (n - 2) (by omega) (by omega)
+    have hWSr : ((A ^ (n - 2)).seq (A.seq A rfl) (CTA.pow_ids A (n - 2))).WellSynchronized := by
+      rw [← hreg]; exact hWS n (by omega) (le_refl n)
+    have hτr : IsSuccessfulTraceFrom
+        (Config.run State.initial ((A ^ (n - 2)).seq (A.seq A rfl) (CTA.pow_ids A (n - 2)))) τ := by
+      rw [← hreg]; exact hτ
+    have hRr : happensBefore ((A ^ (n - 2)).seq (A.seq A rfl) (CTA.pow_ids A (n - 2))) τ s d := by
+      rw [← hreg]; exact hR
+    refine CTA.WellSynchronized.seq_no_happensBefore_B_to_A_impl (A := A ^ (n - 2))
+      (B := A.seq A rfl) (CTA.pow_ids A (n - 2)) hWSn2 hWSr hτr ⟨s, d, hRr, ⟨?_, ?_⟩, ?_⟩
+    · rw [CTA.pow_prog_length]; exact h1
+    · rw [CTA.pow_prog_length]
+      have hAA : ((A.seq A rfl).prog s.thread).length
+          = (A.prog s.thread).length + (A.prog s.thread).length := by
+        change (A.prog s.thread ++ A.prog s.thread).length = _; rw [List.length_append]
+      rw [hAA]; have := hE0 s.thread; have := hE2 s.thread; omega
+    · rw [CTA.pow_prog_length]; exact h3
+  -- **No backward edges from the last three batches** (`seq_no_happensBefore` on
+  -- `(A^(n-3)) ⨾ (A ⨾ (A ⨾ A))`); vacuous for `n = 3`, where there is nothing below.
+  have NB_lo : ¬ ∃ s d : ProgPoint, happensBefore (A ^ n) τ s d ∧
+      ((n - 3) * (A.prog s.thread).length ≤ s.idx ∧ s.idx < n * (A.prog s.thread).length) ∧
+      d.idx < (n - 3) * (A.prog d.thread).length := by
+    rintro ⟨s, d, hR, ⟨h1, h2⟩, h3⟩
+    rcases Nat.lt_or_ge n 4 with hlt4 | hge4
+    · have hz : (n - 3) * (A.prog d.thread).length = 0 := by
+        have hn3 : n - 3 = 0 := by omega
+        rw [hn3, Nat.zero_mul]
+      omega
+    · have hreg : A ^ n = (A ^ (n - 3)).seq (A.seq (A.seq A rfl) rfl) (CTA.pow_ids A (n - 3)) :=
+        CTA.pow_regroup_last_three A (by omega)
+      have hWSn3 : (A ^ (n - 3)).WellSynchronized := hWS (n - 3) (by omega) (by omega)
+      have hWSr : ((A ^ (n - 3)).seq (A.seq (A.seq A rfl) rfl)
+          (CTA.pow_ids A (n - 3))).WellSynchronized := by
+        rw [← hreg]; exact hWS n (by omega) (le_refl n)
+      have hτr : IsSuccessfulTraceFrom (Config.run State.initial
+          ((A ^ (n - 3)).seq (A.seq (A.seq A rfl) rfl) (CTA.pow_ids A (n - 3)))) τ := by
+        rw [← hreg]; exact hτ
+      have hRr : happensBefore ((A ^ (n - 3)).seq (A.seq (A.seq A rfl) rfl)
+          (CTA.pow_ids A (n - 3))) τ s d := by
+        rw [← hreg]; exact hR
+      refine CTA.WellSynchronized.seq_no_happensBefore_B_to_A_impl (A := A ^ (n - 3))
+        (B := A.seq (A.seq A rfl) rfl) (CTA.pow_ids A (n - 3)) hWSn3 hWSr hτr
+        ⟨s, d, hRr, ⟨?_, ?_⟩, ?_⟩
+      · rw [CTA.pow_prog_length]; exact h1
+      · rw [CTA.pow_prog_length]
+        have hAAA : ((A.seq (A.seq A rfl) rfl).prog s.thread).length
+            = (A.prog s.thread).length + ((A.prog s.thread).length + (A.prog s.thread).length) := by
+          change (A.prog s.thread ++ (A.prog s.thread ++ A.prog s.thread)).length = _
+          rw [List.length_append, List.length_append]
+        rw [hAAA]; have := hE0 s.thread; omega
+      · rw [CTA.pow_prog_length]; exact h3
+  intro t₁ t₂ j₁ j₂ hj₁ hj₂
+  -- **Confinement (lower).** A path landing in batches `n-3, n-2` stays there.
+  have confLow : ∀ (c : ProgPoint),
+      happensBefore (A ^ n) τ c ⟨t₂, (n - 2) * (A.prog t₂).length + j₂⟩ →
+      ((n - 3) * (A.prog c.thread).length ≤ c.idx ∧ c.idx < (n - 1) * (A.prog c.thread).length) →
+      Relation.ReflTransGen
+        (fun x y => (x, y) ∈ initRelation (A ^ n) τ ∧
+          ((n - 3) * (A.prog x.thread).length ≤ x.idx ∧
+            x.idx < (n - 1) * (A.prog x.thread).length) ∧
+          ((n - 3) * (A.prog y.thread).length ≤ y.idx ∧
+            y.idx < (n - 1) * (A.prog y.thread).length))
+        c ⟨t₂, (n - 2) * (A.prog t₂).length + j₂⟩ := by
+    intro c hcd
+    induction hcd using Relation.ReflTransGen.head_induction_on with
+    | refl => exact fun _ => Relation.ReflTransGen.refl
+    | @head x y hxy hyd ih =>
+      intro hxL
+      obtain ⟨_, hypp, _⟩ := initRelation_cases hxy
+      rw [mem_progPoints_iff, hPlen] at hypp
+      have hyL : (n - 3) * (A.prog y.thread).length ≤ y.idx ∧
+          y.idx < (n - 1) * (A.prog y.thread).length := by
+        refine ⟨?_, ?_⟩
+        · by_contra hcon
+          exact NB_lo ⟨x, y, Relation.ReflTransGen.single hxy,
+            ⟨hxL.1, by have := hE0 x.thread; have := hE1 x.thread; omega⟩, by omega⟩
+        · by_contra hcon
+          have hdb : (n - 2) * (A.prog t₂).length + j₂ < (n - 1) * (A.prog t₂).length := by
+            have := hE1 t₂; have := hE2 t₂; omega
+          exact NB_up ⟨y, ⟨t₂, (n - 2) * (A.prog t₂).length + j₂⟩, hyd,
+            ⟨by omega, hypp.2⟩, hdb⟩
+      exact Relation.ReflTransGen.head ⟨hxy, hxL, hyL⟩ (ih hyL)
+  -- **Confinement (upper).** A path leaving batches `n-2, n-1` stays there.
+  have confUp : ∀ (c d : ProgPoint), happensBefore (A ^ n) τ c d →
+      ((n - 2) * (A.prog c.thread).length ≤ c.idx ∧ c.idx < n * (A.prog c.thread).length) →
+      Relation.ReflTransGen
+        (fun x y => (x, y) ∈ initRelation (A ^ n) τ ∧
+          ((n - 2) * (A.prog x.thread).length ≤ x.idx ∧ x.idx < n * (A.prog x.thread).length) ∧
+          ((n - 2) * (A.prog y.thread).length ≤ y.idx ∧ y.idx < n * (A.prog y.thread).length))
+        c d := by
+    intro c d hcd
+    induction hcd using Relation.ReflTransGen.head_induction_on with
+    | refl => exact fun _ => Relation.ReflTransGen.refl
+    | @head x y hxy hyd ih =>
+      intro hxU
+      obtain ⟨_, hypp, _⟩ := initRelation_cases hxy
+      rw [mem_progPoints_iff, hPlen] at hypp
+      have hyU : (n - 2) * (A.prog y.thread).length ≤ y.idx ∧
+          y.idx < n * (A.prog y.thread).length := by
+        refine ⟨?_, hypp.2⟩
+        by_contra hcon
+        exact NB_mid ⟨x, y, Relation.ReflTransGen.single hxy, hxU, by omega⟩
+      exact Relation.ReflTransGen.head ⟨hxy, hxU, hyU⟩ (ih hyU)
+  constructor
+  · -- forward: confine the upper edge to batches n-2, n-1, shift down to batches n-3, n-2
+    intro hHB
+    have hcU : (n - 2) * (A.prog t₁).length ≤ (n - 2) * (A.prog t₁).length + j₁ ∧
+        (n - 2) * (A.prog t₁).length + j₁ < n * (A.prog t₁).length :=
+      ⟨Nat.le_add_right _ _, by have := hE0 t₁; have := hE2 t₁; omega⟩
+    have hLow : Relation.ReflTransGen
+        (fun x y => (x, y) ∈ initRelation (A ^ n) τ ∧
+          ((n - 3) * (A.prog x.thread).length ≤ x.idx ∧
+            x.idx < (n - 1) * (A.prog x.thread).length) ∧
+          ((n - 3) * (A.prog y.thread).length ≤ y.idx ∧
+            y.idx < (n - 1) * (A.prog y.thread).length))
+        ⟨t₁, (n - 2) * (A.prog t₁).length + j₁ - (A.prog t₁).length⟩
+        ⟨t₂, (n - 1) * (A.prog t₂).length + j₂ - (A.prog t₂).length⟩ :=
+      Relation.ReflTransGen.lift
+        (fun η => (⟨η.thread, η.idx - (A.prog η.thread).length⟩ : ProgPoint))
+        (fun a b hab => by
+          obtain ⟨at', ai⟩ := a; obtain ⟨bt, bi⟩ := b
+          obtain ⟨hab', haU, hbU⟩ := hab
+          dsimp only at haU hbU
+          have ha2 := hE2 at'; have ha1 := hE1 at'; have ha0 := hE0 at'
+          have hb2 := hE2 bt; have hb1 := hE1 bt; have hb0 := hE0 bt
+          have hp1lo : (n - 3) * (A.prog at').length ≤ ai - (A.prog at').length := by omega
+          have hp1hi : ai - (A.prog at').length < (n - 1) * (A.prog at').length := by omega
+          have hp2lo : (n - 3) * (A.prog bt).length ≤ bi - (A.prog bt).length := by omega
+          have hp2hi : bi - (A.prog bt).length < (n - 1) * (A.prog bt).length := by omega
+          refine ⟨?_, ⟨hp1lo, hp1hi⟩, ⟨hp2lo, hp2hi⟩⟩
+          rw [hshift ⟨at', ai - (A.prog at').length⟩ ⟨bt, bi - (A.prog bt).length⟩
+              hp1lo hp1hi hp2lo hp2hi,
+            show ai - (A.prog at').length + (A.prog at').length = ai from by omega,
+            show bi - (A.prog bt).length + (A.prog bt).length = bi from by omega]
+          exact hab')
+        (confUp ⟨t₁, (n - 2) * (A.prog t₁).length + j₁⟩
+          ⟨t₂, (n - 1) * (A.prog t₂).length + j₂⟩ hHB hcU)
+    rw [show (n - 2) * (A.prog t₁).length + j₁ - (A.prog t₁).length
+          = (n - 3) * (A.prog t₁).length + j₁ from by have := hE2 t₁; omega,
+        show (n - 1) * (A.prog t₂).length + j₂ - (A.prog t₂).length
+          = (n - 2) * (A.prog t₂).length + j₂ from by have := hE1 t₂; have := hE2 t₂; omega] at hLow
+    exact Relation.ReflTransGen.mono (fun a b hab => hab.1) hLow
+  · -- backward: confine the lower edge to batches n-3, n-2, shift up to batches n-2, n-1
+    intro hHB
+    have hcL : (n - 3) * (A.prog t₁).length ≤ (n - 3) * (A.prog t₁).length + j₁ ∧
+        (n - 3) * (A.prog t₁).length + j₁ < (n - 1) * (A.prog t₁).length :=
+      ⟨Nat.le_add_right _ _, by have := hE1 t₁; omega⟩
+    have hUp : Relation.ReflTransGen
+        (fun x y => (x, y) ∈ initRelation (A ^ n) τ ∧
+          ((n - 2) * (A.prog x.thread).length ≤ x.idx ∧ x.idx < n * (A.prog x.thread).length) ∧
+          ((n - 2) * (A.prog y.thread).length ≤ y.idx ∧ y.idx < n * (A.prog y.thread).length))
+        ⟨t₁, (n - 3) * (A.prog t₁).length + j₁ + (A.prog t₁).length⟩
+        ⟨t₂, (n - 2) * (A.prog t₂).length + j₂ + (A.prog t₂).length⟩ :=
+      Relation.ReflTransGen.lift
+        (fun η => (⟨η.thread, η.idx + (A.prog η.thread).length⟩ : ProgPoint))
+        (fun a b hab => by
+          obtain ⟨at', ai⟩ := a; obtain ⟨bt, bi⟩ := b
+          obtain ⟨hab', haL, hbL⟩ := hab
+          dsimp only at haL hbL
+          have ha2 := hE2 at'; have ha1 := hE1 at'; have ha0 := hE0 at'
+          have hb2 := hE2 bt; have hb1 := hE1 bt; have hb0 := hE0 bt
+          refine ⟨(hshift ⟨at', ai⟩ ⟨bt, bi⟩ haL.1 haL.2 hbL.1 hbL.2).mp hab', ⟨?_, ?_⟩, ⟨?_, ?_⟩⟩
+          · change (n - 2) * (A.prog at').length ≤ ai + (A.prog at').length
+            omega
+          · change ai + (A.prog at').length < n * (A.prog at').length
+            omega
+          · change (n - 2) * (A.prog bt).length ≤ bi + (A.prog bt).length
+            omega
+          · change bi + (A.prog bt).length < n * (A.prog bt).length
+            omega)
+        (confLow ⟨t₁, (n - 3) * (A.prog t₁).length + j₁⟩ hHB hcL)
+    rw [show (n - 3) * (A.prog t₁).length + j₁ + (A.prog t₁).length
+          = (n - 2) * (A.prog t₁).length + j₁ from by have := hE2 t₁; omega,
+        show (n - 2) * (A.prog t₂).length + j₂ + (A.prog t₂).length
+          = (n - 1) * (A.prog t₂).length + j₂ from by have := hE1 t₂; have := hE2 t₂; omega] at hUp
+    exact Relation.ReflTransGen.mono (fun a b hab => hab.1) hUp
 
 end Weft
