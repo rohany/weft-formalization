@@ -2389,7 +2389,7 @@ which the absence of backward happens-before edges between batches
 (`seq_no_happensBefore_B_to_A`) makes equivalent: the earlier batches cannot perturb the
 generations of the final two, so only their *relative* recycle offset (one batch's worth)
 survives. -/
-theorem CTA.WellSynchronized.last_batch_gen_offset {I : CTA} (h : I.ConsistentArrivalCounts)
+theorem CTA.WellSynchronized.last_batch_gen_offset_impl {I : CTA} (h : I.ConsistentArrivalCounts)
     {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 2 ≤ n)
     (hWS : (I ^ k).BatchesWellSynchronized n) :
     ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
@@ -2496,7 +2496,7 @@ theorem CTA.WellSynchronized.second_batch_gen_offset {I : CTA} (h : I.Consistent
     rcases (by omega : m = 1 ∨ m = 2) with rfl | rfl
     · rw [CTA.pow_one]; exact hWS0
     · rw [CTA.pow_two_eq_seq]; exact hWS1
-  obtain ⟨τ, hτ, hg⟩ := CTA.WellSynchronized.last_batch_gen_offset (n := 2) h hk (by omega) hWS
+  obtain ⟨τ, hτ, hg⟩ := CTA.WellSynchronized.last_batch_gen_offset_impl (n := 2) h hk (by omega) hWS
   rw [CTA.pow_two_eq_seq] at hτ
   refine ⟨τ, hτ, ?_⟩
   intro t j c b n hcj hbr
@@ -2539,7 +2539,7 @@ family — every batch-prefix `(I ^ k) ^ m` (`1 ≤ m ≤ n`) is well-synchroniz
 the two `WellSynchronized` assumptions of `second_batch_hb_within`. As there, the statement
 is for *all* instruction pairs, not only barrier instructions (`R` orders read/write
 instructions too, via program order and the sync edges). -/
-theorem CTA.WellSynchronized.last_batch_hb_within {I : CTA} (h : I.ConsistentArrivalCounts)
+theorem CTA.WellSynchronized.last_batch_hb_within_impl {I : CTA} (h : I.ConsistentArrivalCounts)
     {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 2 ≤ n)
     (hWS : (I ^ k).BatchesWellSynchronized n) :
     ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
@@ -2552,7 +2552,7 @@ theorem CTA.WellSynchronized.last_batch_hb_within {I : CTA} (h : I.ConsistentArr
               ⟨t₁, (n - 1) * ((I ^ k).prog t₁).length + j₁⟩
               ⟨t₂, (n - 1) * ((I ^ k).prog t₂).length + j₂⟩) := by
   -- the trace and the per-instruction generation offset between the last two batches (Lemma 4.1)
-  obtain ⟨τ, hτ, hgen⟩ := CTA.WellSynchronized.last_batch_gen_offset h hk hn hWS
+  obtain ⟨τ, hτ, hgen⟩ := CTA.WellSynchronized.last_batch_gen_offset_impl h hk hn hWS
   refine ⟨τ, hτ, ?_⟩
   set A := I ^ k with hA
   -- length bookkeeping for the `n`-batch program (`L = (A.prog t).length`)
@@ -2903,7 +2903,7 @@ theorem CTA.WellSynchronized.second_batch_hb_within {I : CTA} (h : I.ConsistentA
     rcases (by omega : m = 1 ∨ m = 2) with rfl | rfl
     · rw [CTA.pow_one]; exact hWS0
     · rw [CTA.pow_two_eq_seq]; exact hWS1
-  obtain ⟨τ, hτ, hw⟩ := CTA.WellSynchronized.last_batch_hb_within (n := 2) h hk (by omega) hWS
+  obtain ⟨τ, hτ, hw⟩ := CTA.WellSynchronized.last_batch_hb_within_impl (n := 2) h hk (by omega) hWS
   rw [CTA.pow_two_eq_seq] at hτ
   refine ⟨τ, hτ, ?_⟩
   intro t₁ t₂ j₁ j₂ hj₁ hj₂
@@ -3277,7 +3277,7 @@ three batches to the next: for a barrier body instruction `⟨t, j⟩` and `i < 
 of the copy in batch `n - 3 + i + 1` exceeds that of the copy in batch `n - 3 + i` by one
 batch's worth of recycles. Supplies both adjacent-batch offsets along a *single* trace, which
 is what `last_batch_hb_across` needs to shift barrier (`R`) edges by one batch. -/
-theorem CTA.WellSynchronized.last_batches_gen_offset {I : CTA} (h : I.ConsistentArrivalCounts)
+theorem CTA.WellSynchronized.last_batches_gen_offset_impl {I : CTA} (h : I.ConsistentArrivalCounts)
     {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 3 ≤ n)
     (hWS : (I ^ k).BatchesWellSynchronized n) :
     ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
@@ -3366,7 +3366,7 @@ theorem CTA.WellSynchronized.third_batch_gen_offset {I : CTA} (h : I.ConsistentA
     · rw [CTA.pow_one]; exact hWS0
     · rw [CTA.pow_two_eq_seq]; exact hWS1
     · rw [CTA.pow_three_eq_seq]; exact _hWS2
-  obtain ⟨τ, hτ, hg⟩ := CTA.WellSynchronized.last_batches_gen_offset (n := 3) h hk (by omega) hWS
+  obtain ⟨τ, hτ, hg⟩ := CTA.WellSynchronized.last_batches_gen_offset_impl (n := 3) h hk (by omega) hWS
   rw [CTA.pow_three_eq_seq] at hτ
   refine ⟨τ, hτ, ?_⟩
   intro t j c b n i hi2 hcj hbr
@@ -3408,7 +3408,7 @@ theorem CTA.WellSynchronized.last_batch_hb_across {I : CTA} (h : I.ConsistentArr
               ⟨t₁, (n - 3) * ((I ^ k).prog t₁).length + j₁⟩
               ⟨t₂, (n - 2) * ((I ^ k).prog t₂).length + j₂⟩) := by
   -- the trace and the per-instruction generation offsets between the last three batches
-  obtain ⟨τ, hτ, hgen0⟩ := CTA.WellSynchronized.last_batches_gen_offset h hk hn hWS
+  obtain ⟨τ, hτ, hgen0⟩ := CTA.WellSynchronized.last_batches_gen_offset_impl h hk hn hWS
   refine ⟨τ, hτ, ?_⟩
   set A := I ^ k with hA
   -- arithmetic relating the batch boundaries `n-3, n-2, n-1, n` for a fixed thread
