@@ -64,17 +64,17 @@ end AngelicTraceSelection
 section LoopBatchStructure
 
 /-- Per-instruction generation offset between the last two batches of an unrolled loop:
-    for a well-synchronized batched loop body `(I ^ k)` run `n ≥ 2` times, every barrier
+    for a well-synchronized batched loop body `(I ^ k)` run `n ≥ 1` times, every barrier
     instruction's generation in batch `n-1` exceeds its generation in batch `n-2` by the
     fixed amount `k * arrivers b / arrivalCount b`. -/
 theorem CTA.WellSynchronized.last_batch_gen_offset {I : CTA} (h : I.ConsistentArrivalCounts)
-    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 2 ≤ n)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 1 ≤ n)
     (hWS : (I ^ k).BatchesWellSynchronized n) :
-    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ (n+1))) τ ∧
       ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (m : ℕ+),
         ((I ^ k).prog t)[j]? = some c → Cmd.barrierRef c = some (b, m) →
-        pointGen ((I ^ k) ^ n) τ ⟨t, (n - 1) * ((I ^ k).prog t).length + j⟩
-          = pointGen ((I ^ k) ^ n) τ ⟨t, (n - 2) * ((I ^ k).prog t).length + j⟩
+        pointGen ((I ^ k) ^ (n+1)) τ ⟨t, (n) * ((I ^ k).prog t).length + j⟩
+          = pointGen ((I ^ k) ^ (n+1)) τ ⟨t, (n - 1) * ((I ^ k).prog t).length + j⟩
             + k * I.arrivers b / I.arrivalCount h b :=
   CTA.WellSynchronized.last_batch_gen_offset_impl h hk hn hWS
 
@@ -82,32 +82,32 @@ theorem CTA.WellSynchronized.last_batch_gen_offset {I : CTA} (h : I.ConsistentAr
     structure: a happens-before edge between instructions of batch `n-2` holds iff the
     corresponding edge between the same instructions of batch `n-1` holds. -/
 theorem CTA.WellSynchronized.last_batch_hb_within {I : CTA} (h : I.ConsistentArrivalCounts)
-    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 2 ≤ n)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 1 ≤ n)
     (hWS : (I ^ k).BatchesWellSynchronized n) :
-    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ (n+1))) τ ∧
       ∀ (t₁ t₂ : ThreadId) (j₁ j₂ : Nat),
         j₁ < ((I ^ k).prog t₁).length → j₂ < ((I ^ k).prog t₂).length →
-        (happensBefore ((I ^ k) ^ n) τ
-              ⟨t₁, (n - 2) * ((I ^ k).prog t₁).length + j₁⟩
-              ⟨t₂, (n - 2) * ((I ^ k).prog t₂).length + j₂⟩
-          ↔ happensBefore ((I ^ k) ^ n) τ
+        (happensBefore ((I ^ k) ^ (n+1)) τ
               ⟨t₁, (n - 1) * ((I ^ k).prog t₁).length + j₁⟩
-              ⟨t₂, (n - 1) * ((I ^ k).prog t₂).length + j₂⟩) :=
+              ⟨t₂, (n - 1) * ((I ^ k).prog t₂).length + j₂⟩
+          ↔ happensBefore ((I ^ k) ^ (n+1)) τ
+              ⟨t₁, (n) * ((I ^ k).prog t₁).length + j₁⟩
+              ⟨t₂, (n) * ((I ^ k).prog t₂).length + j₂⟩) :=
   CTA.WellSynchronized.last_batch_hb_within_impl h hk hn hWS
 
-/-- Generation offset across the last few batches of an unrolled loop (`n ≥ 3`): for each
-    of the final two inter-batch steps (`i < 2`), every barrier instruction's generation
-    increases by the fixed amount `k * arrivers b / arrivalCount b`. -/
-theorem CTA.WellSynchronized.last_batches_gen_offset {I : CTA} (h : I.ConsistentArrivalCounts)
-    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 3 ≤ n)
+theorem CTA.WellSynchronized.last_batch_hb_across {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : 2 ≤ n)
     (hWS : (I ^ k).BatchesWellSynchronized n) :
-    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ n)) τ ∧
-      ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (i : Nat),
-        i < 2 → ((I ^ k).prog t)[j]? = some c → Cmd.barrierRef c = some (b, par) →
-        pointGen ((I ^ k) ^ n) τ ⟨t, (n - 3 + i + 1) * ((I ^ k).prog t).length + j⟩
-          = pointGen ((I ^ k) ^ n) τ ⟨t, (n - 3 + i) * ((I ^ k).prog t).length + j⟩
-            + k * I.arrivers b / I.arrivalCount h b :=
-  CTA.WellSynchronized.last_batches_gen_offset_impl h hk hn hWS
+    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ (n+1))) τ ∧
+      ∀ (t₁ t₂ : ThreadId) (j₁ j₂ : Nat),
+        j₁ < ((I ^ k).prog t₁).length → j₂ < ((I ^ k).prog t₂).length →
+        (happensBefore ((I ^ k) ^ (n+1)) τ
+              ⟨t₁, (n - 1) * ((I ^ k).prog t₁).length + j₁⟩
+              ⟨t₂, (n) * ((I ^ k).prog t₂).length + j₂⟩
+          ↔ happensBefore ((I ^ k) ^ (n+1)) τ
+              ⟨t₁, (n - 2) * ((I ^ k).prog t₁).length + j₁⟩
+              ⟨t₂, (n - 1) * ((I ^ k).prog t₂).length + j₂⟩) :=
+  CTA.WellSynchronized.last_batch_hb_across_impl h hk hn hWS
 
 end LoopBatchStructure
 
