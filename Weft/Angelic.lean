@@ -384,7 +384,7 @@ well-synchronized, then there *is* a successful trace `t` of `A`, and it is a pr
 of a successful trace `t'` of `A ⨾ B`. This is the headline result: it composes
 `exists_successfulTrace` (which uses `WS(A)` to produce `t`) with `seq_angelic_prefix`
 (which uses `WS(A ⨾ B)` to extend it). -/
-theorem CTA.WellSynchronized.seq_angelic_completion {A B : CTA} (hids : A.ids = B.ids)
+theorem CTA.WellSynchronized.seq_angelic_completion_impl {A B : CTA} (hids : A.ids = B.ids)
     (hA : A.WellSynchronized) (hAB : (A.seq B hids).WellSynchronized) :
     ∃ t t', IsSuccessfulTraceFrom (Config.run State.initial A) t ∧
             IsSuccessfulTraceFrom (Config.run State.initial (A.seq B hids)) t' ∧
@@ -454,7 +454,7 @@ every `B`-instruction (so `s`), i.e. `t(d) < t(s)`. Contradiction.
 NOTE: rohany (this is not a major theorem, but one that wouldn't be possible if the
 angelic approach was not actually true. )
 -/
-theorem CTA.WellSynchronized.seq_no_happensBefore_B_to_A {A B : CTA} (hids : A.ids = B.ids)
+theorem CTA.WellSynchronized.seq_no_happensBefore_B_to_A_impl {A B : CTA} (hids : A.ids = B.ids)
     (hA : A.WellSynchronized) (hAB : (A.seq B hids).WellSynchronized)
     {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial (A.seq B hids)) τ) :
@@ -477,7 +477,7 @@ theorem CTA.WellSynchronized.seq_no_happensBefore_B_to_A {A B : CTA} (hids : A.i
   -- runs `A` entirely to completion and only then runs `B` (from `WS(A)` and `WS(A ⨾ B)`
   -- via `seq_angelic_completion`). Its `A`-phase is the lifted `A`-execution `P`, a
   -- prefix of `t'`.
-  obtain ⟨t, t', ht, ht', hpre⟩ := CTA.WellSynchronized.seq_angelic_completion hids hA hAB
+  obtain ⟨t, t', ht, ht', hpre⟩ := CTA.WellSynchronized.seq_angelic_completion_impl hids hA hAB
   set P := t.dropLast.map (Config.seqLift A B) with hPdef
   obtain ⟨rest, hrest⟩ := hpre              -- `hrest : P ++ rest = t'`
   obtain ⟨sdone, htlast⟩ := ht'.2

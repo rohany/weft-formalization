@@ -2201,8 +2201,9 @@ The valid-point restriction (`η₁ η₂ ∈ T.progPoints`) is required: the un
 `SoundAndPrecise` is false, because for a never-executing point the timing side is
 vacuously true while `happensBefore` cannot relate it (see `happensBefore_precise`).
 Assembled from the two directions `happensBefore_sound` and `happensBefore_precise`.
-NOTE (rohany): This is a top-level theorem. -/
-theorem soundAndPrecise_happensBefore {T : CTA} {τ : List Config}
+
+Implementation of the top-level `Weft.soundAndPrecise_happensBefore` (in `Weft.lean`). -/
+theorem soundAndPrecise_happensBefore_impl {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hws : T.WellSynchronized) :
     ∀ η₁ η₂ : ProgPoint, η₁ ∈ T.progPoints → η₂ ∈ T.progPoints →
@@ -2789,5 +2790,19 @@ theorem not_wellSynchronized_of_check_false {T : CTA} {τ : List Config}
       by_cases hhb : happensBefore T τ c1 c2
       · exact competing_sync_false hτ hws hc1 hc2 hcmd1 hcmd2 hgen hidx hnothb3 hhb
       · exact reverse_barrier_contradiction hτ hws hc1 hc2 hc1bar hbar2 hgen hhb
+
+/-- **Correctness of `CheckWellSynchronized`** (Theorems 1 and 2 combined). For a CTA `T`
+with a successful trace `τ`, the checker accepts iff `T` is well-synchronized. This
+aggregates soundness (`wellSynchronized_of_check`, the `check = true → WS` direction) and
+completeness (`not_wellSynchronized_of_check_false`, the `check = false → ¬WS` direction).
+
+Implementation of the top-level `Weft.checkWellSynchronized_correct` (in `Weft.lean`). -/
+theorem checkWellSynchronized_correct_impl {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ) :
+    (CheckWellSynchronized T τ).1 = true ↔ T.WellSynchronized := by
+  refine ⟨wellSynchronized_of_check hτ, fun hws => ?_⟩
+  by_contra hne
+  rw [Bool.not_eq_true] at hne
+  exact not_wellSynchronized_of_check_false hτ hne hws
 
 end Weft
