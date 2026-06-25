@@ -3838,4 +3838,21 @@ theorem CTA.WellSynchronized.second_batch_hb_across {I : CTA} (h : I.ConsistentA
     show (3 - 2) * ((I ^ k).prog t₂).length + j₂ = ((I ^ k).prog t₂).length + j₂ from by omega]
     at key
   exact key
+
+/-- **Lemma 1 (§3 "Weft++").** The strengthened inductive step that yields Theorem 3 — every
+iteration count of a singly-nested loop is well-synchronized.
+
+Paper statement: *Assume that for some `n`, `∀ i ∈ [0, n], WS(I₀ᵏ; … ; Iᵢᵏ)`, where `k` is
+the §1 iteration count. Then `WS(I₀ᵏ; … ; Iₙᵏ; I_{n+1}ᵏ)`.*
+
+A "batch" `Iⱼᵏ` is the loop body `I` unrolled `k = I.loopK h` times, written `I ^ k`, and `m`
+batches in sequence are `(I ^ k) ^ m`. So the hypothesis — every prefix of `1 … n+1` batches is
+well-synchronized — is `(I ^ k).BatchesWellSynchronized (n + 1)`, and the conclusion is
+well-synchronization of the `(n + 2)`-batch program `(I ^ k) ^ (n + 2)`. -/
+theorem CTA.WellSynchronized.batches_inductive_step {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 3)
+    (hWS : (I ^ k).BatchesWellSynchronized n) :
+    ((I ^ k) ^ (n + 1)).WellSynchronized := by
+  sorry
+
 end Weft
