@@ -119,12 +119,18 @@ theorem CTA.WellSynchronized.batches_inductive_step {I : CTA} (h : I.ConsistentA
     ((I ^ k) ^ (n + 1)).WellSynchronized :=
   CTA.WellSynchronized.batches_inductive_step_impl h hk (by omega) hWS
 
-
 theorem CTA.WellSynchronized.loop_well_synchronized {I : CTA} (h : I.ConsistentArrivalCounts)
     {k : Nat} (hk : k = I.loopK h) {n : Nat} (hn : n >= 2)
     (hWS : (I ^ k).BatchesWellSynchronized 2) :
     ((I ^ k) ^ (n)).WellSynchronized :=
   CTA.WellSynchronized.loop_well_synchronized_impl h hk hn hWS
+
+theorem checkLoopWellSynchronized_correct {I : CTA} (h : I.ConsistentArrivalCounts)
+    {τ : Fin (2 * I.loopK h + 1) → List Config}
+    (hτ : ∀ i : Fin (2 * I.loopK h + 1),
+      IsSuccessfulTraceFrom (Config.run State.initial (I ^ i.val)) (τ i)) :
+    checkLoopWellSynchronized I h τ = true ↔ ∀ n : Nat, (I ^ n).WellSynchronized :=
+    checkLoopWellSynchronized_correct_impl h hτ
 
 end LoopProofs
 
