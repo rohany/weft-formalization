@@ -247,37 +247,37 @@ The lemma is deliberately agnostic about where `cont` comes from: `seq_angelic_p
 a strong-normalization completion (needing `WS(A ⨾ B)`), while the looping replay lemmas feed
 it a *specific* successful `B`-trace (needing only that `t` restores the state). It carries no
 well-synchronization hypothesis itself. -/
-theorem seq_splice {A B : CTA} (hids : A.ids = B.ids) {t : List Config}
-    (ht : IsSuccessfulTraceFrom (Config.run State.initial A) t) (hdrop : t.dropLast ≠ [])
+theorem seq_splice {A B : CTA} (hids : A.ids = B.ids) {s_A : State} {t : List Config}
+    (ht : IsSuccessfulTraceFrom (Config.run s_A A) t) (hdrop : t.dropLast ≠ [])
     {cont : List Config}
     (hcont : IsCompleteTraceFrom (Config.seqLift A B (t.dropLast.getLast hdrop)) cont) :
-    IsCompleteTraceFrom (Config.run State.initial (A.seq B hids))
+    IsCompleteTraceFrom (Config.run s_A (A.seq B hids))
         (t.dropLast.map (Config.seqLift A B) ++ cont.tail)
       ∧ t.dropLast.map (Config.seqLift A B) ++ cont.tail
           = (t.dropLast.map (Config.seqLift A B)).dropLast ++ cont := by
   obtain ⟨⟨htIC, hthead⟩, s_d, ht_done⟩ := ht
-  -- `t` has length ≥ 2 (starts `run init A`, ends `done`); expose its head/dropLast structure
+  -- `t` has length ≥ 2 (starts `run s_A A`, ends `done`); expose its head/dropLast structure
   obtain ⟨c1, trest, rfl⟩ :
-      ∃ c1 trest, t = Config.run State.initial A :: c1 :: trest := by
+      ∃ c1 trest, t = Config.run s_A A :: c1 :: trest := by
     rcases t with _ | ⟨c, _ | ⟨c1, tr⟩⟩
     · simp at hthead
     · simp only [List.head?_cons, Option.some.injEq] at hthead
       simp only [List.getLast?_singleton, Option.some.injEq] at ht_done
       rw [hthead] at ht_done; simp at ht_done
     · simp only [List.head?_cons, Option.some.injEq] at hthead; subst hthead; exact ⟨c1, tr, rfl⟩
-  set P := (Config.run State.initial A :: c1 :: trest).dropLast.map (Config.seqLift A B) with hPdef
+  set P := (Config.run s_A A :: c1 :: trest).dropLast.map (Config.seqLift A B) with hPdef
   have hPchain : List.IsChain CTAStep P :=
     isChain_seqLift A B (mem_dropLast_isRun htIC.subtrace) htIC.subtrace.dropLast
   have hPne : P ≠ [] := by rw [hPdef]; simp
-  have hPhead : P.head? = some (Config.run State.initial (A.seq B hids)) := by
+  have hPhead : P.head? = some (Config.run s_A (A.seq B hids)) := by
     rw [hPdef, List.dropLast_cons_cons, List.map_cons, List.head?_cons,
       Config.seqLift, CTA.appendTail_eq_seq hids]
   -- the boundary config `C⋆` is the last of the lifted phase and the head of `cont`
   have hPlast : P.getLast? = some (Config.seqLift A B
-      ((Config.run State.initial A :: c1 :: trest).dropLast.getLast hdrop)) := by
+      ((Config.run s_A A :: c1 :: trest).dropLast.getLast hdrop)) := by
     rw [hPdef, List.getLast?_map, List.getLast?_eq_some_getLast hdrop, Option.map_some]
   obtain ⟨conttail, rfl⟩ : ∃ l, cont = Config.seqLift A B
-      ((Config.run State.initial A :: c1 :: trest).dropLast.getLast hdrop) :: l := by
+      ((Config.run s_A A :: c1 :: trest).dropLast.getLast hdrop) :: l := by
     cases cont with
     | nil => have := hcont.2; simp at this
     | cons a l =>
@@ -285,16 +285,16 @@ theorem seq_splice {A B : CTA} (hids : A.ids = B.ids) {t : List Config}
       subst h; exact ⟨l, rfl⟩
   simp only [List.tail_cons]
   have hcontchain : List.IsChain CTAStep
-      (Config.seqLift A B ((Config.run State.initial A :: c1 :: trest).dropLast.getLast hdrop)
+      (Config.seqLift A B ((Config.run s_A A :: c1 :: trest).dropLast.getLast hdrop)
         :: conttail) := hcont.1.subtrace
   rw [List.isChain_cons] at hcontchain
   have hgl : P.getLast hPne = Config.seqLift A B
-      ((Config.run State.initial A :: c1 :: trest).dropLast.getLast hdrop) := by
+      ((Config.run s_A A :: c1 :: trest).dropLast.getLast hdrop) := by
     have h := List.getLast?_eq_some_getLast hPne; rw [hPlast] at h
     exact (Option.some.injEq _ _).mp h.symm
   -- the structural identity `result = P.dropLast ++ cont`
   have hsplit : P ++ conttail = P.dropLast ++ (Config.seqLift A B
-      ((Config.run State.initial A :: c1 :: trest).dropLast.getLast hdrop) :: conttail) := by
+      ((Config.run s_A A :: c1 :: trest).dropLast.getLast hdrop) :: conttail) := by
     conv_lhs => rw [← List.dropLast_concat_getLast hPne, hgl]
     simp
   refine ⟨⟨⟨?_, ?_⟩, ?_⟩, hsplit⟩
@@ -306,7 +306,7 @@ theorem seq_splice {A B : CTA} (hids : A.ids = B.ids) {t : List Config}
   · -- ends in a terminal configuration, the same one `cont` does
     obtain ⟨Cₙ, hclast, hterm⟩ := hcont.1.ends
     exact ⟨Cₙ, by rw [hsplit]; exact List.mem_getLast?_append_of_mem_getLast? hclast, hterm⟩
-  · -- starts at `init (A ⨾ B)`
+  · -- starts at `s_A (A ⨾ B)`
     rw [List.head?_append_of_ne_nil _ hPne, hPhead]
 
 /-- **Angelic completion** (the extension half). If the composition `A ⨾ B` is

@@ -1621,4 +1621,16 @@ theorem CTA.WellSynchronized.exists_successfulTrace {T : CTA} (h : T.WellSynchro
   obtain ⟨τ, hτ, hdone⟩ := h.exists_completeTrace_ends_done
   exact ⟨τ, hτ, hdone⟩
 
+/-- A CTA with no instructions on any thread is trivially well-synchronized: it has no
+synchronization commands, so the condition holds vacuously. -/
+theorem CTA.WellSynchronized.of_empty {P : CTA} (hP : ∀ t, P.prog t = []) :
+    P.WellSynchronized := by
+  refine ⟨⟨State.initial, P, rfl⟩, fun _ _ _ _ η hη => ?_⟩
+  obtain ⟨b, hb⟩ := hη
+  have hnone : η.cmd (Config.run State.initial P) = none := by
+    change (P.prog η.thread)[η.idx]? = none
+    rw [hP η.thread]; rfl
+  rw [hnone] at hb
+  simp at hb
+
 end Weft

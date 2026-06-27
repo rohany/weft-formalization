@@ -592,15 +592,15 @@ complete trace from `(I, T)`, then `pointTime T τ η = some m`. (The matcher re
 `some` only at genuine execution steps — `hfwd`, by suffix uniqueness of the
 remaining program — and there is one, at `m - 1`; uniqueness of time pins the
 `findSome?` result to `m`.) -/
-theorem pointTime_eq_of_isTimeOf {T : CTA} {τ : List Config} {η : ProgPoint} {m : Nat}
-    (hexec : IsTimeOf (Config.run State.initial T) τ η m) : pointTime T τ η = some m := by
+theorem pointTime_eq_of_isTimeOf {T : CTA} {s : State} {τ : List Config} {η : ProgPoint} {m : Nat}
+    (hexec : IsTimeOf (Config.run s T) τ η m) : pointTime T τ η = some m := by
   have hτ := hexec.1
   have hidxL : η.idx < (T.prog η.thread).length := hexec.2.1
   have hchain := hτ.1.subtrace
-  have h0 : τ[0]? = some (Config.run State.initial T) := by
+  have h0 : τ[0]? = some (Config.run s T) := by
     have hgen : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
     rw [hgen]; exact hτ.2
-  have hC₀ : (Config.run State.initial T).progOf η.thread = T.prog η.thread := rfl
+  have hC₀ : (Config.run s T).progOf η.thread = T.prog η.thread := rfl
   set f : Nat → Option Nat := fun j =>
     match τ[j]?, τ[j + 1]? with
     | some C, some C' =>
@@ -608,7 +608,7 @@ theorem pointTime_eq_of_isTimeOf {T : CTA} {τ : List Config} {η : ProgPoint} {
             && (C'.progOf η.thread).length == (T.prog η.thread).length - η.idx - 1 then
           some (j + 1) else none
     | _, _ => none with hf
-  have hfwd : ∀ a x, f a = some x → IsTimeOf (Config.run State.initial T) τ η x := by
+  have hfwd : ∀ a x, f a = some x → IsTimeOf (Config.run s T) τ η x := by
     intro a x hfa
     simp only [hf] at hfa
     rcases hCa : τ[a]? with _ | C₁
@@ -2826,5 +2826,252 @@ theorem checkWellSynchronized_correct_impl {T : CTA} {τ : List Config}
   by_contra hne
   rw [Bool.not_eq_true] at hne
   exact not_wellSynchronized_of_check_false hτ hne hws
+
+/-- A configured-and-full barrier is incompatible with the `interleave` guard (which requires
+every barrier under-full): the two cannot both hold of the same state. Used to discharge every
+`recycle`/`interleave` cross-case — when a recycle can fire, no `interleave` (or `done`) can. -/
+theorem interleaveGuard_full_absurd {S : State} {b : Barrier} {I : List ThreadId}
+    {A : ℕ} {n : ℕ+} (hb : S.B b = ⟨I, A, some n⟩) (hfull : I.length + A = (n : ℕ))
+    (hbar : ∀ b, S.B b = BarrierState.unconfigured ∨
+      ∃ I A n, S.B b = ⟨I, A, some n⟩ ∧ I.length + A < (n : ℕ)) : False := by
+  rcases hbar b with h | ⟨I', A', n', hb', hlt⟩
+  · rw [hb] at h; exact absurd h (by simp [BarrierState.unconfigured])
+  · rw [hb] at hb'
+    simp only [BarrierState.mk.injEq, Option.some.injEq] at hb'
+    obtain ⟨rfl, rfl, rfl⟩ := hb'
+    omega
+
+/-- *(Stated, not yet proved.)* **Local confluence with generation agreement for a
+well-synchronized continuation.** From a configuration `(S, T)`, suppose:
+
+* `σ₁` is a step `(S, T) → C'` (`hσ₁`), the continuation `C'` is well-synchronized
+  (`hWS`) and has a successful trace `τ` (`hτ`);
+* the executable check accepts the joined trace `σ₁ :: τ` of `T` (`hcheck`);
+* a second first step `σ₂`, namely `(S, T) → C''` (`hσ₂`) — *not* required to differ
+  from `σ₁` (so `C''` may equal `C'`).
+
+Then the two one-step divergences reconverge — there are steps `σ₃ : C' → Cd` and
+`σ₄ : C'' → Cd` into a common configuration `Cd` — and the recovered generations agree:
+for every complete trace `τ'` from `Cd` and every barrier instruction `η` of `(S, T)`, the
+two joined traces `(S, T) :: C' :: τ'` and `(S, T) :: C'' :: τ'` assign `η` a *common,
+nonzero* generation. The conclusion is phrased with `IsGenOf` in the exact shape of the
+`Config.WellSynchronized` body (`∃ g, g ≠ 0 ∧ IsGenOf … ∧ IsGenOf …`), so it is a drop-in
+when discharging well-synchronization of `(S, T)` on this pair of complete traces.
+
+(`σ₂` need not differ from `σ₁`: if `C'' = C'` the two joined traces coincide and the claim
+is immediate, so neither `σ₁ ≠ σ₂` nor `C'' ≠ C'` is assumed. A natural witness for the
+common generation `g` is `pointGen T … η`, related to `IsGenOf` by `isGenOf_pointGen`.)
+
+Rohan notes: This is a one-step diamond property that may be useful for proving the soundness
+of the well-sync algorithm.
+-/
+theorem soundness_lemma_one_step_diamond
+    {S : State} {T : CTA} {C' C'' : Config}
+    (hσ₁ : CTAStep (Config.run S T) C')
+    {τ : List Config} (hτ : IsSuccessfulTraceFrom C' τ)
+    (hWS : C'.WellSynchronized)
+    (hcheck : (CheckWellSynchronized T (Config.run S T :: τ)).1 = true)
+    (hσ₂ : CTAStep (Config.run S T) C'') :
+    ∃ (Cd : Config) (_σ₃ : CTAStep C' Cd) (_σ₄ : CTAStep C'' Cd),
+      ∀ τ', IsCompleteTraceFrom Cd τ' →
+        ∀ η : ProgPoint, (∃ b, (η.cmd (Config.run S T)).bind Cmd.barrier? = some b) →
+          ∃ g, g ≠ 0 ∧
+            IsGenOf (Config.run S T) (Config.run S T :: C' :: τ') η g ∧
+            IsGenOf (Config.run S T) (Config.run S T :: C'' :: τ') η g := by
+  -- Case on both first steps. A `CTAStep` is `interleave` (a thread takes a `ThreadStep`),
+  -- `recycle`, `done`, or `error`; on `interleave` we further case the `ThreadStep` rule
+  -- (only the six non-error rules produce a `run` target, after generalizing the
+  -- stepping thread's opaque program `T.prog i`). State-preserving no-op steps
+  -- (`read`/`write`) commute with everything and change no generation, so they are
+  -- discharged uniformly without a sub-split. `done`/`error` of σ₁ are impossible
+  -- (`C'` is well-synchronized, hence `run`); `done` of σ₂ is impossible too.
+  --
+  -- σ₂-error note: σ₂ = `error` (`C''` an `err` config) is left open. It *should*
+  -- contradict `hWS`: an erroring competing step from `(S, T)` would let the sibling
+  -- `C'` reach `err`/deadlock too, which a WS config forbids
+  -- (`Config.WellSynchronized.completeTrace_ends_done`). The missing piece is that the
+  -- error/deadlock *persists to `C'`* across σ₁'s step (plus `C'.WF`) — not available yet.
+  cases hσ₁ with
+  | @interleave _ _ _ i₁ P'₁ hi₁ _ hstep₁ =>
+    generalize hP₁ : T.prog i₁ = P₁ at hstep₁
+    cases hstep₁ with
+    | read_noop | write_noop =>
+      -- σ₁ is a state-preserving no-op (`read`/`write`): `C' = run S (T.set i₁ _ P'₁)`,
+      -- thread `i₁` advanced past its non-barrier head, state `(E, B)` untouched. Case σ₂.
+      -- For σ₂ ∈ {interleave, recycle} reconverge at `Cd` = "σ₂ applied to `C'`": σ₃ replays
+      -- σ₂ from `C'` (legal — same state `S`, σ₂'s thread/barrier untouched by the no-op),
+      -- σ₄ replays the no-op from `C''` (legal — reads/writes have no premises). The two
+      -- conclusion traces then differ only at index 1; since the no-op recycles nothing and
+      -- never executes a barrier (`η.idx ≥ 1` on `i₁`), the generations agree, and `WS(C')`
+      -- (`Cd` is a descendant of `C'`) makes them nonzero.
+      cases hσ₂ with
+      | @interleave _ _ _ i₂ _ _hi₂ _hbar₂ _hstep₂ =>
+        -- commute (σ₃ = σ₂ from `C'`, σ₄ = no-op from `C''`) then generation agreement
+        sorry
+      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
+        -- σ₂ = recycle needs barrier `b₂` *full*, but σ₁ = interleave's guard requires every
+        -- barrier under-full — impossible.
+        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
+      | done hdone _ =>
+        -- σ₂ = done: `T.IsDone` ⇒ `T.prog i₁ = []`, contradicting σ₁'s read/write head.
+        simp [hdone i₁ hi₁] at hP₁
+      | @error _ _ i₂ P'₂ hstep₂ =>
+        -- σ₂ = error: σ₁ is state-preserving and leaves thread `i₂` untouched, so the
+        -- erroring step replays verbatim from `C'`, giving `C' ⤳ err`. That complete trace
+        -- from `C'` ends in `err`, contradicting `hWS` (no WS config has an unexecuted sync:
+        -- `err_has_unexec_sync` + `wellSync_no_unexec_sync`).
+        exfalso
+        have hne : i₂ ≠ i₁ := by rintro rfl; rw [hP₁] at hstep₂; cases hstep₂
+        have hprog : (T.set i₁ hi₁ P'₁).prog i₂ = T.prog i₂ := by
+          change Function.update T.prog i₁ P'₁ i₂ = T.prog i₂
+          exact Function.update_of_ne hne P'₁ T.prog
+        have hC'err : CTAStep (Config.run S (T.set i₁ hi₁ P'₁))
+            (Config.err (T.set i₁ hi₁ P'₁)) := by
+          refine CTAStep.error (i := i₂) (P' := P'₂) ?_
+          rw [hprog]; exact hstep₂
+        have hcomplete : IsCompleteTraceFrom (Config.run S (T.set i₁ hi₁ P'₁))
+            [Config.run S (T.set i₁ hi₁ P'₁), Config.err (T.set i₁ hi₁ P'₁)] :=
+          ⟨⟨List.isChain_pair.mpr hC'err, Config.err (T.set i₁ hi₁ P'₁), by simp,
+            Or.inr (Or.inl ⟨T.set i₁ hi₁ P'₁, rfl⟩)⟩, by simp⟩
+        obtain ⟨η, hηbar, hηno⟩ :=
+          err_has_unexec_sync hcomplete ⟨S, T.set i₁ hi₁ P'₁, rfl⟩ rfl
+        exact wellSync_no_unexec_sync hWS hcomplete hηbar hηno
+    | arrive_configure _ _ =>
+      cases hσ₂ with
+      | @interleave _ _ _ i₂ _ _ _ hstep₂ =>
+        generalize _hP₂ : T.prog i₂ = P₂ at hstep₂
+        cases hstep₂ with
+        | read_noop | write_noop =>
+          -- σ₁ arrive/configure, σ₂ read/write no-op (state-preserving; trivial, symmetric)
+          sorry
+        | arrive_configure _ _ =>
+          -- σ₁ arrive/configure, σ₂ arrive/configure
+          sorry
+        | arrive_register _ _ _ _ =>
+          -- σ₁ arrive/configure, σ₂ arrive/register
+          sorry
+        | sync_configure _ _ =>
+          -- σ₁ arrive/configure, σ₂ sync/configure
+          sorry
+        | sync_block _ _ _ _ =>
+          -- σ₁ arrive/configure, σ₂ sync/block
+          sorry
+      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
+        -- σ₂ = recycle needs a full barrier, contradicting σ₁ = interleave's guard.
+        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
+      | done hdone _ =>
+        -- σ₁ arrive/configure, σ₂ done: `T.IsDone` forces `T.prog i₁ = []`, but σ₁ stepped `i₁`
+        simp [hdone i₁ hi₁] at hP₁
+      | error _ =>
+        -- σ₁ arrive/configure, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
+        sorry
+    | arrive_register _ _ _ _ =>
+      cases hσ₂ with
+      | @interleave _ _ _ i₂ _ _ _ hstep₂ =>
+        generalize _hP₂ : T.prog i₂ = P₂ at hstep₂
+        cases hstep₂ with
+        | read_noop | write_noop =>
+          -- σ₁ arrive/register, σ₂ read/write no-op (state-preserving; trivial, symmetric)
+          sorry
+        | arrive_configure _ _ =>
+          -- σ₁ arrive/register, σ₂ arrive/configure
+          sorry
+        | arrive_register _ _ _ _ =>
+          -- σ₁ arrive/register, σ₂ arrive/register
+          sorry
+        | sync_configure _ _ =>
+          -- σ₁ arrive/register, σ₂ sync/configure
+          sorry
+        | sync_block _ _ _ _ =>
+          -- σ₁ arrive/register, σ₂ sync/block
+          sorry
+      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
+        -- σ₂ = recycle needs a full barrier, contradicting σ₁ = interleave's guard.
+        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
+      | done hdone _ =>
+        -- σ₁ arrive/register, σ₂ done: `T.IsDone` forces `T.prog i₁ = []`, but σ₁ stepped `i₁`
+        simp [hdone i₁ hi₁] at hP₁
+      | error _ =>
+        -- σ₁ arrive/register, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
+        sorry
+    | sync_configure _ _ =>
+      cases hσ₂ with
+      | @interleave _ _ _ i₂ _ _ _ hstep₂ =>
+        generalize _hP₂ : T.prog i₂ = P₂ at hstep₂
+        cases hstep₂ with
+        | read_noop | write_noop =>
+          -- σ₁ sync/configure, σ₂ read/write no-op (state-preserving; trivial, symmetric)
+          sorry
+        | arrive_configure _ _ =>
+          -- σ₁ sync/configure, σ₂ arrive/configure
+          sorry
+        | arrive_register _ _ _ _ =>
+          -- σ₁ sync/configure, σ₂ arrive/register
+          sorry
+        | sync_configure _ _ =>
+          -- σ₁ sync/configure, σ₂ sync/configure
+          sorry
+        | sync_block _ _ _ _ =>
+          -- σ₁ sync/configure, σ₂ sync/block
+          sorry
+      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
+        -- σ₂ = recycle needs a full barrier, contradicting σ₁ = interleave's guard.
+        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
+      | done hdone _ =>
+        -- σ₁ sync/configure, σ₂ done: `T.IsDone` forces `T.prog i₁ = []`, but σ₁ stepped `i₁`
+        simp [hdone i₁ hi₁] at hP₁
+      | error _ =>
+        -- σ₁ sync/configure, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
+        sorry
+    | sync_block _ _ _ _ =>
+      cases hσ₂ with
+      | @interleave _ _ _ i₂ _ _ _ hstep₂ =>
+        generalize _hP₂ : T.prog i₂ = P₂ at hstep₂
+        cases hstep₂ with
+        | read_noop | write_noop =>
+          -- σ₁ sync/block, σ₂ read/write no-op (state-preserving; trivial, symmetric)
+          sorry
+        | arrive_configure _ _ =>
+          -- σ₁ sync/block, σ₂ arrive/configure
+          sorry
+        | arrive_register _ _ _ _ =>
+          -- σ₁ sync/block, σ₂ arrive/register
+          sorry
+        | sync_configure _ _ =>
+          -- σ₁ sync/block, σ₂ sync/configure
+          sorry
+        | sync_block _ _ _ _ =>
+          -- σ₁ sync/block, σ₂ sync/block
+          sorry
+      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
+        -- σ₂ = recycle needs a full barrier, contradicting σ₁ = interleave's guard.
+        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
+      | done hdone _ =>
+        -- σ₁ sync/block, σ₂ done: `T.IsDone` forces `T.prog i₁ = []`, but σ₁ stepped `i₁`
+        simp [hdone i₁ hi₁] at hP₁
+      | error _ =>
+        -- σ₁ sync/block, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
+        sorry
+  | recycle hb₁ hfull₁ _ =>
+    cases hσ₂ with
+    | @interleave _ _ _ _ _ _ hbar₂ _ =>
+      -- σ₂ = interleave's guard requires every barrier under-full, but σ₁ = recycle
+      -- leaves barrier `b₁` full — impossible.
+      exact (interleaveGuard_full_absurd hb₁ hfull₁ hbar₂).elim
+    | recycle _ _ _ =>
+      -- σ₁ recycle, σ₂ recycle
+      sorry
+    | done _ hnofull =>
+      -- σ₁ recycle, σ₂ done: `done` needs no full barrier, but σ₁ recycled a full one
+      exact absurd hfull₁ (by have := hnofull _ _ _ _ hb₁; omega)
+    | error _ =>
+      -- σ₁ recycle, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
+      sorry
+  | done _ _ =>
+    -- σ₁ = done: `C'` is `done`, but `hWS` forces it to be a `run` configuration — impossible.
+    exact absurd hWS.1 (by rintro ⟨_, _, h⟩; exact absurd h (by simp))
+  | error _ =>
+    -- σ₁ = error: `C'` is `err`, but `hWS` forces it to be a `run` configuration — impossible.
+    exact absurd hWS.1 (by rintro ⟨_, _, h⟩; exact absurd h (by simp))
 
 end Weft

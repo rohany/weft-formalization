@@ -158,6 +158,23 @@ barrier is referenced with a single arrival count. The proof is threaded into
 noncomputable def CTA.loopK (I : CTA) (h : I.ConsistentArrivalCounts) : Nat :=
   I.barriers.lcm fun b => loopFactor (I.arrivers b) (I.arrivalCount h b)
 
+/-- The program of a loop with prefix `P`, body `I`, and epilogue `E`, with the body unrolled
+`n` times: `P ⨾ I^n ⨾ E`. The thread-set obligations of the two `CTA.seq`s are discharged from
+`h1 : P.ids = I.ids` and `h2 : I.ids = E.ids` (using `CTA.pow_ids` to see that `I^n` has `I`'s
+threads, and `(CTA.seq A B _).ids = A.ids` to reduce the outer obligation to `P.ids = E.ids`). -/
+def CTA.loopProgram (P I E : CTA) (h1 : P.ids = I.ids) (h2 : I.ids = E.ids) (n : Nat) : CTA :=
+  (P.seq (I ^ n) (h1.trans (CTA.pow_ids I n).symm)).seq E (h1.trans h2)
+
+/-- `loopProgram`'s thread set is the prefix's (every `CTA.seq` keeps its left operand's ids). -/
+@[simp] theorem CTA.loopProgram_ids (P I E : CTA) (h1 : P.ids = I.ids) (h2 : I.ids = E.ids)
+    (n : Nat) : (CTA.loopProgram P I E h1 h2 n).ids = P.ids := rfl
+
+/-- `loopProgram`'s per-thread program is the prefix, then `n` copies of the body, then the
+epilogue. -/
+theorem CTA.loopProgram_prog (P I E : CTA) (h1 : P.ids = I.ids) (h2 : I.ids = E.ids)
+    (n : Nat) (t : ThreadId) :
+    (CTA.loopProgram P I E h1 h2 n).prog t = P.prog t ++ (I ^ n).prog t ++ E.prog t := rfl
+
 /-- **The loop well-synchronization check.** Decides whether a loop with body `I` is
 well-synchronized by running `CheckWellSynchronized` on every unrolling of the body
 out to `2k` copies, where `k = I.loopK h` is the loop exponent (so `h :
@@ -188,10 +205,16 @@ safe for any iteration count. The range `[0, 2k]` is read inclusively.
 
 `noncomputable` because `loopK` is (it is an LCM defined via the arrival-count
 witness). -/
-noncomputable def checkLoopWellSynchronized (I : CTA) (h : I.ConsistentArrivalCounts)
+noncomputable def checkLoopWellSynchronized (P : CTA) (I : CTA) (E : CTA)
+    (h : I.ConsistentArrivalCounts)
+    (h1 : P.ids = I.ids) (h2 : I.ids = E.ids)
+    (τp : List Config) (τpk : List Config)
     (τ : Fin (2 * I.loopK h + 1) → List Config) : Bool :=
+  (CheckWellSynchronized P τp).1 &&
+  (CheckWellSynchronized (P.seq (I ^ I.loopK h)
+      (h1.trans (CTA.pow_ids I (I.loopK h)).symm)) τpk).1 &&
   (List.finRange (2 * I.loopK h + 1)).all fun i =>
-    (CheckWellSynchronized (I ^ i.val) (τ i)).1
+    (CheckWellSynchronized (CTA.loopProgram P I E h1 h2 i.val) (τ i)).1
 
 /-!
 ## Step 2 of Theorem 1: the arrival-count lower bound
@@ -1653,6 +1676,157 @@ theorem pow_done_state_initial {I : CTA} (h : I.ConsistentArrivalCounts) {τ : L
       _ = ⟨State.initial.E, State.initial.B⟩ := by rw [hEeq, hBeq]
       _ = State.initial := rfl
 
+/-- **Full state restoration from a `done` start.** A successful run of `I ^ k` (`k = I.loopK h`)
+from a state `s` that is *itself a valid done state* — every thread enabled (`hsE`), no thread
+parked (`hsync`), well-formed (`hwf`), no barrier full (`hfull`) — returns the *entire* state to
+`s`: the terminal `done s_d` has `s_d = s`.
+
+This generalizes `pow_done_state_initial` (the `s = State.initial` case). Arrived counts are
+restored by `pow_barriers_restored`; the `synced` lists empty and `E` returns to all-`true` at any
+`done` configuration. The configured *count* is restored because a successful (error-free) run
+forces every reference's count to agree with the entry count — `headCount_consistent_of_successful`
+pins the entry count to `arrivalCount h b` and `bcount_chain` propagates it to `done`
+(`sync_err_count`/`arrive_err_count` would otherwise fire). Unreferenced barriers are frozen. This
+is what lets the loop body replay verbatim from a non-initial post-prefix state. -/
+theorem pow_done_state_restored {I : CTA} (h : I.ConsistentArrivalCounts) {s : State}
+    (hwf : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false)
+    (hsE : ∀ i, s.E i = true) (hsync : ∀ b, (s.B b).synced = [])
+    {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) τ)
+    {s_d : State} (hlast : τ.getLast? = some (Config.done s_d)) :
+    s_d = s := by
+  have hchain : List.IsChain CTAStep τ := hτ.1.1.subtrace
+  have hhead : τ.head? = some (Config.run s (I ^ I.loopK h)) := hτ.1.2
+  have hAC : s_d.ArrivedCountEquiv s :=
+    Config.WellSynchronized.pow_barriers_restored h hwf hfull hτ hlast
+  obtain ⟨y, hy_mem, hy_step⟩ : ∃ y ∈ τ, CTAStep y (Config.done s_d) := by
+    rcases getLast_has_pred_mem hchain hlast with hh | hp
+    · rw [hhead] at hh; exact absurd hh (by simp)
+    · exact hp
+  have hwf_y : y.WF := WF_chain hchain hhead hwf y hy_mem
+  obtain ⟨hcfg_s, huncfg_s, -⟩ := hwf
+  have hEnab : ∀ s', y.state? = some s' → s'.EnabledInv :=
+    enabledInv_chain hchain hhead
+      (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+          intro i hi; rw [hsE i] at hi; exact absurd hi (by simp)) y hy_mem
+  cases hy_step with
+  | @done sd T hdone hnofull =>
+    obtain ⟨hcfg_d, huncfg_d, -⟩ := hwf_y
+    have hEnabled : s_d.EnabledInv := hEnab s_d rfl
+    -- synced lists are empty at the terminal `done`
+    have hSync_d : ∀ b, (s_d.B b).synced = [] := by
+      intro b
+      obtain ⟨sy, ar, cnt, hbeq⟩ : ∃ sy ar cnt, s_d.B b = ⟨sy, ar, cnt⟩ := ⟨_, _, _, rfl⟩
+      have hsy : sy = [] := by
+        cases cnt with
+        | none => exact (huncfg_d b sy ar hbeq).1
+        | some n =>
+          obtain ⟨_, hpark, _⟩ := hcfg_d b sy ar n hbeq
+          cases sy with
+          | nil => rfl
+          | cons i₀ rest =>
+            exfalso
+            have hh := hpark i₀ (by simp)
+            have hTnil : T.prog i₀ = [] := by
+              by_cases hmem : i₀ ∈ T.ids
+              · exact hdone i₀ hmem
+              · exact T.nil_outside_ids i₀ hmem
+            rw [hTnil] at hh; simp at hh
+      rw [hbeq]; exact hsy
+    -- all threads enabled at the terminal state
+    have hE_d : ∀ i, s_d.E i = true := by
+      intro i; by_contra hcon; rw [Bool.not_eq_true] at hcon
+      obtain ⟨b, hb'⟩ := hEnabled i hcon
+      rw [hSync_d b] at hb'; simp at hb'
+    -- a `BarrierState` is determined by its three projections
+    have hmkeq : ∀ {β₁ β₂ : BarrierState}, β₁.synced = β₂.synced → β₁.arrived = β₂.arrived →
+        β₁.count = β₂.count → β₁ = β₂ := by
+      intro β₁ β₂ h1 h2 h3; cases β₁; cases β₂; simp_all
+    -- match the barrier maps
+    have hBeq : s_d.B = s.B := by
+      funext b
+      have hsyd : (s_d.B b).synced = [] := hSync_d b
+      have hsys : (s.B b).synced = [] := hsync b
+      have hard : (s_d.B b).arrived = (s.B b).arrived := hAC b
+      have hcnt : (s_d.B b).count = (s.B b).count := by
+        by_cases hbref : b ∈ (I ^ I.loopK h).barrierSet
+        · -- referenced: head-count consistency + propagation pin the count to `arrivalCount h b`
+          set nb := I.arrivalCount h b with hnb
+          have hhc : ∀ n', (s.B b).count = some n' → (n' : Nat) = nb :=
+            Config.WellSynchronized.headCount_consistent_of_successful h (hfull b) hτ hbref
+          have hcmd_all : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+,
+              Cmd.barrierRef c = some (b, m) → (m : Nat) = nb := by
+            intro C hC i c hc m hbref'
+            have hc0 : c ∈ (Config.run s (I ^ I.loopK h)).progOf i :=
+              (progOf_suffix_head hchain hhead C hC i).subset hc
+            have hc1 : c ∈ (I ^ I.loopK h).prog i := by simpa [Config.progOf] using hc0
+            have hcI : c ∈ I.prog i := I.mem_pow_prog hc1
+            have hi : i ∈ I.ids := by
+              by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
+            rw [hnb]; exact (h.choose_spec i hi c hcI b m hbref').symm
+          have hdc : ∀ n', (s_d.B b).count = some n' → (n' : Nat) = nb := by
+            have hch := bcount_chain hchain hhead (fun n' hn' => hhc n' hn') hcmd_all
+              (Config.done s_d) (List.mem_of_mem_getLast? hlast)
+            intro n' hn'; exact hch n' hn'
+          cases hcd : (s_d.B b).count with
+          | none =>
+            cases hcs : (s.B b).count with
+            | none => rfl
+            | some ns =>
+              exfalso
+              have hbs' : s.B b = ⟨[], (s.B b).arrived, some ns⟩ := hmkeq hsys rfl hcs
+              have hpos := (hcfg_s b [] (s.B b).arrived ns hbs').2.2
+              have hbd' : s_d.B b = ⟨[], (s_d.B b).arrived, none⟩ := hmkeq hsyd rfl hcd
+              have hard0 := (huncfg_d b [] (s_d.B b).arrived hbd').2
+              simp only [List.length_nil, Nat.zero_add] at hpos
+              rw [hard] at hard0; omega
+          | some nd =>
+            cases hcs : (s.B b).count with
+            | none =>
+              exfalso
+              have hbd' : s_d.B b = ⟨[], (s_d.B b).arrived, some nd⟩ := hmkeq hsyd rfl hcd
+              have hpos := (hcfg_d b [] (s_d.B b).arrived nd hbd').2.2
+              have hbs' : s.B b = ⟨[], (s.B b).arrived, none⟩ := hmkeq hsys rfl hcs
+              have hars0 := (huncfg_s b [] (s.B b).arrived hbs').2
+              simp only [List.length_nil, Nat.zero_add] at hpos
+              rw [← hard] at hars0; omega
+            | some ns =>
+              have h1 : (nd : Nat) = nb := hdc nd hcd
+              have h2 : (ns : Nat) = nb := hhc ns hcs
+              congr 1
+              exact PNat.coe_injective (h1.trans h2.symm)
+        · -- unreferenced: the whole barrier state is frozen
+          have hcmd_noref : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+,
+              Cmd.barrierRef c ≠ some (b, m) := by
+            intro C hC i c hc m hbref'
+            apply hbref
+            have hc0 : c ∈ (Config.run s (I ^ I.loopK h)).progOf i :=
+              (progOf_suffix_head hchain hhead C hC i).subset hc
+            have hc1 : c ∈ (I ^ I.loopK h).prog i := by simpa [Config.progOf] using hc0
+            have hi : i ∈ (I ^ I.loopK h).ids := by
+              by_contra hni; rw [(I ^ I.loopK h).nil_outside_ids i hni] at hc1; simp at hc1
+            have hbar : Cmd.barrier? c = some b := by
+              cases c with
+              | read g => simp [Cmd.barrierRef] at hbref'
+              | write g => simp [Cmd.barrierRef] at hbref'
+              | arrive b' n =>
+                simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbref'
+                simp only [Cmd.barrier?, hbref'.1]
+              | sync b' n =>
+                simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbref'
+                simp only [Cmd.barrier?, hbref'.1]
+            rw [CTA.barrierSet, Finset.mem_biUnion]
+            exact ⟨i, hi, List.mem_toFinset.mpr (List.mem_filterMap.mpr ⟨c, hc1, hbar⟩)⟩
+          have hfrozen := bstate_unref_chain (hfull b) hchain hhead
+            (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'; rfl)
+            hcmd_noref (Config.done s_d) (List.mem_of_mem_getLast? hlast) s_d rfl
+          rw [hfrozen]
+      exact hmkeq (hsyd.trans hsys.symm) hard hcnt
+    have hEeq : s_d.E = s.E := funext fun i => by rw [hE_d i, hsE i]
+    calc s_d = ⟨s_d.E, s_d.B⟩ := rfl
+      _ = ⟨s.E, s.B⟩ := by rw [hEeq, hBeq]
+      _ = s := rfl
+
 /-- `Config.seqLift` preserves the state component: appending `B`'s programs to a
 configuration changes only the programs, not the state `(E, B)`. -/
 theorem Config.seqLift_state? (A B : CTA) (X : Config) :
@@ -1747,8 +1921,8 @@ theorem run_ids_chain {A : CTA} : ∀ {τ : List Config} {C₀ : Config}, List.I
 (The penultimate config has all programs empty by `progOf_penultimate_done`, and thread set
 `A.ids` by `run_ids_chain`, so appending `B` recovers exactly `B`.) The `B = A` case is the
 replay boundary used by `replay_trace`; the general case backs `glue_trace`. -/
-theorem seqLift_penultimate_gen {A B : CTA} (hids : A.ids = B.ids) {t : List Config}
-    (hchain : List.IsChain CTAStep t) (hhead : t.head? = some (Config.run State.initial A))
+theorem seqLift_penultimate_gen {A B : CTA} (hids : A.ids = B.ids) {s₀ : State} {t : List Config}
+    (hchain : List.IsChain CTAStep t) (hhead : t.head? = some (Config.run s₀ A))
     {sd : State} (hlast : t.getLast? = some (Config.done sd)) (hdrop : t.dropLast ≠ []) :
     Config.seqLift A B (t.dropLast.getLast hdrop) = Config.run sd B := by
   have hne : t ≠ [] := fun h => by rw [h] at hlast; simp at hlast
@@ -1783,6 +1957,126 @@ theorem seqLift_penultimate_gen {A B : CTA} (hids : A.ids = B.ids) {t : List Con
       · funext i; change T.prog i ++ B.prog i = B.prog i; rw [hTprog i, List.nil_append]
     change Config.run sd (T.appendTail B) = Config.run sd B
     rw [hBeq]
+
+/-- **Done-state properties.** The terminal `done s` of any successful trace (from `initial`) is a
+*valid done state*: every thread enabled, no thread parked (`synced = []`), no barrier full, and —
+since the parked clause of `WF` is then vacuous — `run s T` is well-formed for **any** `T`. These
+are exactly the hypotheses `pow_done_state_restored` / `pow_replay_recycle_structure` need to
+replay the loop body from `s`. -/
+theorem done_state_of_successfulTrace {T₀ : CTA} {s : State} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T₀) τ)
+    (hlast : τ.getLast? = some (Config.done s)) :
+    (∀ i, s.E i = true) ∧ (∀ b, (s.B b).synced = []) ∧ (∀ b, (s.B b).isFull = false) ∧
+      ∀ (T : CTA), (Config.run s T).WF := by
+  have hchain : List.IsChain CTAStep τ := hτ.1.1.subtrace
+  have hhead : τ.head? = some (Config.run State.initial T₀) := hτ.1.2
+  obtain ⟨y, hy_mem, hy_step⟩ : ∃ y ∈ τ, CTAStep y (Config.done s) := by
+    rcases getLast_has_pred_mem hchain hlast with hh | hp
+    · rw [hhead] at hh; exact absurd hh (by simp)
+    · exact hp
+  have hwf_y : y.WF := WF_chain hchain hhead WF_initial y hy_mem
+  have hEnab : ∀ s', y.state? = some s' → s'.EnabledInv :=
+    enabledInv_chain hchain hhead
+      (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
+          exact State.EnabledInv.initial) y hy_mem
+  cases hy_step with
+  | @done sd T hdone hnofull =>
+    obtain ⟨hcfg_d, huncfg_d, hBI_d⟩ := hwf_y
+    have hEnabled : s.EnabledInv := hEnab s rfl
+    have hSync : ∀ b, (s.B b).synced = [] := by
+      intro b
+      obtain ⟨sy, ar, cnt, hbeq⟩ : ∃ sy ar cnt, s.B b = ⟨sy, ar, cnt⟩ := ⟨_, _, _, rfl⟩
+      have hsy : sy = [] := by
+        cases cnt with
+        | none => exact (huncfg_d b sy ar hbeq).1
+        | some n =>
+          obtain ⟨_, hpark, _⟩ := hcfg_d b sy ar n hbeq
+          cases sy with
+          | nil => rfl
+          | cons i₀ rest =>
+            exfalso
+            have hh := hpark i₀ (by simp)
+            have hTnil : T.prog i₀ = [] := by
+              by_cases hmem : i₀ ∈ T.ids
+              · exact hdone i₀ hmem
+              · exact T.nil_outside_ids i₀ hmem
+            rw [hTnil] at hh; simp at hh
+      rw [hbeq]; exact hsy
+    have hE : ∀ i, s.E i = true := by
+      intro i; by_contra hcon; rw [Bool.not_eq_true] at hcon
+      obtain ⟨b, hb'⟩ := hEnabled i hcon
+      rw [hSync b] at hb'; simp at hb'
+    have hfull : ∀ b, (s.B b).isFull = false := by
+      intro b
+      cases hc : (s.B b).count with
+      | none => simp [BarrierState.isFull, hc]
+      | some n =>
+        have hbeq : s.B b = ⟨(s.B b).synced, (s.B b).arrived, some n⟩ := by rw [← hc]
+        have hlt := hnofull b (s.B b).synced (s.B b).arrived n hbeq
+        rw [hSync b, List.length_nil, Nat.zero_add] at hlt
+        simp only [BarrierState.isFull, hc, hSync b, List.length_nil, Nat.zero_add]
+        exact beq_false_of_ne (Nat.ne_of_lt hlt)
+    refine ⟨hE, hSync, hfull, fun T' => ?_⟩
+    refine ⟨fun b I A n hbq => ?_, huncfg_d, hBI_d⟩
+    obtain ⟨hle, -, hpos⟩ := hcfg_d b I A n hbq
+    refine ⟨hle, fun i hi => ?_, hpos⟩
+    have : I = [] := by have := hSync b; rw [hbq] at this; exact this
+    rw [this] at hi; simp at hi
+
+/-- **Angelic tail.** The "completion" half of `seq_angelic_prefix`, isolated. From `WS(A ⨾ B)`
+and a successful `A`-trace ending in `done s_d`, the strong-normalization completion of `B` from
+the boundary `run s_d B` is itself a *successful* `B`-trace from `run s_d B` — `WS(A ⨾ B)` forces
+the spliced trace (hence its suffix, the completion) to terminate in `done`. This extracts a clean
+`B`-from-`s_d` trace *without* assuming `WS(B)`: the prefix-loop construction uses it to obtain the
+loop body's batch trace from the post-prefix done-state, where `WS(I^k)` is unavailable but
+`WS(Pre ⨾ I^k)` is. -/
+theorem CTA.WellSynchronized.seq_angelic_tail {A B : CTA} (hids : A.ids = B.ids)
+    (hAB : (A.seq B hids).WellSynchronized) {t : List Config}
+    (ht : IsSuccessfulTraceFrom (Config.run State.initial A) t)
+    {s_d : State} (hAlast : t.getLast? = some (Config.done s_d)) :
+    ∃ cont, IsSuccessfulTraceFrom (Config.run s_d B) cont := by
+  obtain ⟨⟨htIC, hthead⟩, -⟩ := ht
+  have hchain : List.IsChain CTAStep t := htIC.subtrace
+  obtain ⟨c1, trest, rfl⟩ :
+      ∃ c1 trest, t = Config.run State.initial A :: c1 :: trest := by
+    rcases t with _ | ⟨c, _ | ⟨c1, tr⟩⟩
+    · simp at hthead
+    · simp only [List.head?_cons, Option.some.injEq] at hthead
+      simp only [List.getLast?_singleton, Option.some.injEq] at hAlast
+      rw [hthead] at hAlast; simp at hAlast
+    · simp only [List.head?_cons, Option.some.injEq] at hthead
+      subst hthead; exact ⟨c1, tr, rfl⟩
+  have ht' : IsSuccessfulTraceFrom (Config.run State.initial A)
+      (Config.run State.initial A :: c1 :: trest) := ⟨⟨htIC, hthead⟩, s_d, hAlast⟩
+  have hdrop : (Config.run State.initial A :: c1 :: trest).dropLast ≠ [] := by simp
+  have hCstar : Config.seqLift A B
+      ((Config.run State.initial A :: c1 :: trest).dropLast.getLast hdrop) = Config.run s_d B :=
+    seqLift_penultimate_gen hids hchain hthead hAlast hdrop
+  set P := (Config.run State.initial A :: c1 :: trest).dropLast.map (Config.seqLift A B) with hPdef
+  have hPchain : List.IsChain CTAStep P :=
+    isChain_seqLift A B (mem_dropLast_isRun htIC.subtrace) htIC.subtrace.dropLast
+  have hPhead : P.head? = some (Config.run State.initial (A.seq B hids)) := by
+    rw [hPdef, List.dropLast_cons_cons, List.map_cons, List.head?_cons,
+      Config.seqLift, CTA.appendTail_eq_seq hids]
+  have hPlast : P.getLast? = some (Config.run s_d B) := by
+    rw [hPdef, List.getLast?_map, List.getLast?_eq_some_getLast hdrop, Option.map_some, hCstar]
+  -- strong normalization supplies a completion from the boundary `C⋆ = run s_d B`
+  have hbw : (Config.run s_d B).barriersWithin (A.seq B hids).barrierSet :=
+    barriersWithin_chain _ hPchain hPhead barriersWithin_initial _ (List.mem_of_getLast? hPlast)
+  obtain ⟨cont, hcont⟩ := exists_completeTrace (A.seq B hids).barrierSet _ hbw
+  have hconthead : cont.head? = some (Config.run s_d B) := hcont.2
+  have hcontne : cont ≠ [] := by intro hc; rw [hc] at hconthead; simp at hconthead
+  -- splice; `WS(A ⨾ B)` makes the whole successful, so its suffix `cont` ends in `done`
+  have hcont' : IsCompleteTraceFrom (Config.seqLift A B
+      ((Config.run State.initial A :: c1 :: trest).dropLast.getLast hdrop)) cont := by
+    rw [hCstar]; exact hcont
+  obtain ⟨hICF, hsplit⟩ := seq_splice hids ht' hdrop hcont'
+  obtain ⟨sf, hflast⟩ := completeTrace_ends_done hAB hICF
+  refine ⟨cont, hcont, sf, ?_⟩
+  rw [hsplit] at hflast
+  obtain ⟨x, xs, hxs⟩ := List.exists_cons_of_ne_nil hcontne
+  rw [hxs, List.getLast?_append_cons] at hflast
+  rw [hxs]; exact hflast
 
 /-- **The replay trace.** Given a successful `A`-trace `t₁` from `State.initial` that ends in
 `done State.initial` (full restoration), the list `(t₁.dropLast.map (seqLift A A)) ++ t₁.tail`
@@ -2240,18 +2534,18 @@ runs `m` batches of `A` back to back. -/
 into a successful trace of `A ⨾ B`: lift `t_A`'s execution (minus its terminal `done`) as the
 `A`-phase, then continue with `τ_B` (minus its head, which the lifted phase already reaches).
 The glued trace ends exactly where `τ_B` ends. -/
-theorem glue_trace {A B : CTA} (hids : A.ids = B.ids) {t_A : List Config}
-    (htA : IsSuccessfulTraceFrom (Config.run State.initial A) t_A)
-    (hAlast : t_A.getLast? = some (Config.done State.initial))
-    {τ_B : List Config} (hτB : IsSuccessfulTraceFrom (Config.run State.initial B) τ_B) :
-    IsSuccessfulTraceFrom (Config.run State.initial (A.seq B hids))
+theorem glue_trace {A B : CTA} (hids : A.ids = B.ids) {s_A s_mid : State} {t_A : List Config}
+    (htA : IsSuccessfulTraceFrom (Config.run s_A A) t_A)
+    (hAlast : t_A.getLast? = some (Config.done s_mid))
+    {τ_B : List Config} (hτB : IsSuccessfulTraceFrom (Config.run s_mid B) τ_B) :
+    IsSuccessfulTraceFrom (Config.run s_A (A.seq B hids))
         (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail) ∧
       (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail).getLast? = τ_B.getLast? ∧
       ∀ r, (t_A.dropLast.map (Config.seqLift A B) ++ τ_B.tail)[(t_A.length - 2) + r]?
           = τ_B[r]? := by
   have hchain : List.IsChain CTAStep t_A := htA.1.1.subtrace
-  have hhead : t_A.head? = some (Config.run State.initial A) := htA.1.2
-  obtain ⟨_, _, hteq⟩ : ∃ c1 trest, t_A = Config.run State.initial A :: c1 :: trest := by
+  have hhead : t_A.head? = some (Config.run s_A A) := htA.1.2
+  obtain ⟨_, _, hteq⟩ : ∃ c1 trest, t_A = Config.run s_A A :: c1 :: trest := by
     rcases t_A with _ | ⟨a, _ | ⟨b, l⟩⟩
     · simp at hhead
     · rw [List.head?_cons, Option.some.injEq] at hhead
@@ -2259,10 +2553,10 @@ theorem glue_trace {A B : CTA} (hids : A.ids = B.ids) {t_A : List Config}
       rw [hhead] at hAlast; exact absurd hAlast (by simp)
     · rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead; exact ⟨b, l, rfl⟩
   have hdrop : t_A.dropLast ≠ [] := by rw [hteq]; simp
-  -- The boundary config `C⋆ = seqLift A B (penult t_A)` is `run init B` (full restoration),
-  -- so the given B-trace `τ_B` is itself a complete continuation from `C⋆`; `seq_splice`
-  -- glues it onto the lifted `A`-phase.
-  have hCstar : Config.seqLift A B (t_A.dropLast.getLast hdrop) = Config.run State.initial B :=
+  -- The boundary config `C⋆ = seqLift A B (penult t_A)` is `run s_mid B` (the `A`-run ends at
+  -- `s_mid`), so the given B-trace `τ_B` from `s_mid` is a complete continuation from `C⋆`;
+  -- `seq_splice` glues it onto the lifted `A`-phase.
+  have hCstar : Config.seqLift A B (t_A.dropLast.getLast hdrop) = Config.run s_mid B :=
     seqLift_penultimate_gen hids hchain hhead hAlast hdrop
   have hcont : IsCompleteTraceFrom (Config.seqLift A B (t_A.dropLast.getLast hdrop)) τ_B := by
     rw [hCstar]; exact hτB.1
@@ -2303,6 +2597,35 @@ theorem pow_replay_trace (A : CTA) {t₁ : List Config}
       ⟨⟨⟨List.isChain_cons_cons.mpr ⟨hstep, List.isChain_singleton _⟩,
             Config.done State.initial, rfl, Or.inl ⟨State.initial, rfl⟩⟩, rfl⟩,
         State.initial, rfl⟩, rfl⟩
+  | succ m ih =>
+    obtain ⟨τ, hτ, hτlast⟩ := ih
+    obtain ⟨hglue, hgluelast, _⟩ := glue_trace (A.pow_ids m).symm ht₁ h1last hτ
+    refine ⟨t₁.dropLast.map (Config.seqLift A (A ^ m)) ++ τ.tail, ?_, ?_⟩
+    · rw [CTA.pow_succ]; exact hglue
+    · rw [hgluelast, hτlast]
+
+/-- **The `m`-fold replay trace from a restoring `done` start `s`.** The non-initial-start
+generalization of `pow_replay_trace`: from a single batch trace `t₁` of `A` from `run s A` that
+restores `s` (ends `done s`), plus the no-full premise `hnofull` of `s` (which lets the empty
+`A ^ 0` terminate at `s`), build a successful trace of `A ^ m` from `run s (A ^ m)` again ending
+in `done s`. This replays the loop body verbatim from the post-prefix state. -/
+theorem pow_replay_trace_from (A : CTA) {s : State}
+    (hnofull : ∀ b I A' n, s.B b = ⟨I, A', some n⟩ → I.length + A' < (n : Nat))
+    {t₁ : List Config} (ht₁ : IsSuccessfulTraceFrom (Config.run s A) t₁)
+    (h1last : t₁.getLast? = some (Config.done s)) :
+    ∀ (m : Nat), ∃ τ, IsSuccessfulTraceFrom (Config.run s (A ^ m)) τ ∧
+      τ.getLast? = some (Config.done s) := by
+  intro m
+  induction m with
+  | zero =>
+    have hstep : CTAStep (Config.run s (A ^ 0)) (Config.done s) := by
+      apply CTAStep.done
+      · intro i _; simp [CTA.pow_zero, CTA.emptied]
+      · exact hnofull
+    exact ⟨[Config.run s (A ^ 0), Config.done s],
+      ⟨⟨⟨List.isChain_cons_cons.mpr ⟨hstep, List.isChain_singleton _⟩,
+            Config.done s, rfl, Or.inl ⟨s, rfl⟩⟩, rfl⟩,
+        s, rfl⟩, rfl⟩
   | succ m ih =>
     obtain ⟨τ, hτ, hτlast⟩ := ih
     obtain ⟨hglue, hgluelast, _⟩ := glue_trace (A.pow_ids m).symm ht₁ h1last hτ
@@ -2676,22 +2999,33 @@ later batches' copies are the recursive trace's copies shifted by the front batc
 splits across the front boundary by `recycleCount_suffix`, and the front portion mirrors `t₁`
 itself (`recycleCount_map_seqLift`). Stating the offset relative to the fixed `t₁` (not the
 batch-`0` copy in `τ`) is what keeps the induction non-circular. -/
-theorem pow_replay_recycle_structure {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List Config}
-    (ht₁ : IsSuccessfulTraceFrom (Config.run State.initial (I ^ I.loopK h)) t₁)
-    (ht₁L : t₁.getLast? = some (Config.done State.initial)) (m : Nat) :
-    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ I.loopK h) ^ m)) τ ∧
-      τ.getLast? = some (Config.done State.initial) ∧
+theorem pow_replay_recycle_structure {I : CTA} (h : I.ConsistentArrivalCounts) {s : State}
+    {t₁ : List Config}
+    (ht₁ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) t₁)
+    (ht₁L : t₁.getLast? = some (Config.done s))
+    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false) (m : Nat) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run s ((I ^ I.loopK h) ^ m)) τ ∧
+      τ.getLast? = some (Config.done s) ∧
       ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (p M M₁ : Nat),
         p < m → ((I ^ I.loopK h).prog t)[j]? = some c → Cmd.barrierRef c = some (b, par) →
-        IsTimeOf (Config.run State.initial ((I ^ I.loopK h) ^ m)) τ
+        IsTimeOf (Config.run s ((I ^ I.loopK h) ^ m)) τ
             ⟨t, p * ((I ^ I.loopK h).prog t).length + j⟩ M →
-        IsTimeOf (Config.run State.initial (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁ →
+        IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁ →
         recycleCount b τ (M - 1)
           = recycleCount b t₁ (M₁ - 1) + p * (I.loopK h * I.arrivers b / I.arrivalCount h b) := by
   set A := I ^ I.loopK h with hA
+  -- the no-full premise of `s` (configured ⟹ strictly under-full), from `hwf_s` and `hfull`
+  have hnofull : ∀ b I' A' n, s.B b = ⟨I', A', some n⟩ → I'.length + A' < (n : Nat) := by
+    intro b I' A' n hb
+    have hle := (hwf_s.1 b I' A' n hb).1
+    have hne : I'.length + A' ≠ (n : Nat) := by
+      have hf := hfull b; rw [hb] at hf
+      simp only [BarrierState.isFull] at hf
+      intro heq; rw [heq] at hf; simp at hf
+    omega
   -- `t₁` is long enough that its `dropLast` is nonempty (it starts `run`, ends `done`)
   have hchain1 : List.IsChain CTAStep t₁ := ht₁.1.1.subtrace
-  have hhead1 : t₁.head? = some (Config.run State.initial A) := ht₁.1.2
+  have hhead1 : t₁.head? = some (Config.run s A) := ht₁.1.2
   have hne : t₁ ≠ [] := fun hd => by rw [hd] at hhead1; simp at hhead1
   obtain ⟨a, l, htl⟩ := List.exists_cons_of_ne_nil hne
   have hlne : l ≠ [] := by
@@ -2715,15 +3049,15 @@ theorem pow_replay_recycle_structure {I : CTA} (h : I.ConsistentArrivalCounts) {
     exact progOf_penultimate_done hchain1 ht₁L hgl i
   induction m with
   | zero =>
-    obtain ⟨τ, hτ, hτL⟩ := pow_replay_trace A ht₁ ht₁L 0
+    obtain ⟨τ, hτ, hτL⟩ := pow_replay_trace_from A hnofull ht₁ ht₁L 0
     exact ⟨τ, hτ, hτL, fun t j c b par p M M₁ hp _ _ _ _ => absurd hp (by omega)⟩
   | succ m ih =>
     obtain ⟨τm, hτm, hτmL, hrecm⟩ := ih
     obtain ⟨hglue, hgluelast, hsnd⟩ := glue_trace (A.pow_ids m).symm ht₁ ht₁L hτm
     set τ := t₁.dropLast.map (Config.seqLift A (A ^ m)) ++ τm.tail with hτdef
-    have hτsucc : IsSuccessfulTraceFrom (Config.run State.initial (A ^ (m + 1))) τ := by
+    have hτsucc : IsSuccessfulTraceFrom (Config.run s (A ^ (m + 1))) τ := by
       rw [CTA.pow_succ]; exact hglue
-    have hτsuccL : τ.getLast? = some (Config.done State.initial) := by
+    have hτsuccL : τ.getLast? = some (Config.done s) := by
       rw [hτdef, hgluelast, hτmL]
     refine ⟨τ, hτsucc, hτsuccL, ?_⟩
     intro t j c b par p M M₁ hp hcj hbr htM htM₁
@@ -2736,7 +3070,7 @@ theorem pow_replay_recycle_structure {I : CTA} (h : I.ConsistentArrivalCounts) {
     have hfrontΔ : recycleCount b t₁ (t₁.length - 2)
         = I.loopK h * I.arrivers b / I.arrivalCount h b := by
       rw [← recycleCount_done_last hchain1 ht₁L h2]
-      exact Config.WellSynchronized.pow_barriers_advance_count h WF_initial rfl ht₁ hbA
+      exact Config.WellSynchronized.pow_barriers_advance_count h hwf_s (hfull b) ht₁ hbA
     have hmLen : ((A ^ m).prog t).length = m * (A.prog t).length := CTA.pow_prog_length A m t
     have hsuccLen : ((A ^ (m + 1)).prog t).length = (m + 1) * (A.prog t).length :=
       CTA.pow_prog_length A (m + 1) t
@@ -2753,8 +3087,8 @@ theorem pow_replay_recycle_structure {I : CTA} (h : I.ConsistentArrivalCounts) {
         recycleCount_map_seqLift A (A ^ m) b t₁ M]
     -- transport a front instruction time of `t₁` into `τ` (unshifted)
     have frontTransport : ∀ (q M' : Nat), q < (A.prog t).length →
-        IsTimeOf (Config.run State.initial A) t₁ ⟨t, q⟩ M' →
-        IsTimeOf (Config.run State.initial (A ^ (m + 1))) τ ⟨t, q⟩ M' ∧ M' ≤ t₁.length - 2 := by
+        IsTimeOf (Config.run s A) t₁ ⟨t, q⟩ M' →
+        IsTimeOf (Config.run s (A ^ (m + 1))) τ ⟨t, q⟩ M' ∧ M' ≤ t₁.length - 2 := by
       intro q M' hq hT
       obtain ⟨-, -, j', D, D', hMeq, hDj, hDj1, hDprog, hD'prog⟩ := hT
       have hj'1 : j' + 1 < t₁.length := (List.getElem?_eq_some_iff.mp hDj1).1
@@ -2791,8 +3125,8 @@ theorem pow_replay_recycle_structure {I : CTA} (h : I.ConsistentArrivalCounts) {
         rw [hprogeq, List.drop_append_of_le_length (by omega)]
     -- transport an `A ^ m` instruction time of `τm` into `τ`, shifted by the front batch
     have suffixTransport : ∀ (q M' : Nat), q < ((A ^ m).prog t).length →
-        IsTimeOf (Config.run State.initial (A ^ m)) τm ⟨t, q⟩ M' →
-        IsTimeOf (Config.run State.initial (A ^ (m + 1))) τ
+        IsTimeOf (Config.run s (A ^ m)) τm ⟨t, q⟩ M' →
+        IsTimeOf (Config.run s (A ^ (m + 1))) τ
           ⟨t, (A.prog t).length + q⟩ ((t₁.length - 2) + M') := by
       intro q M' hq hT'
       obtain ⟨-, -, j', D, D', hM'eq, hDj, hDj1, hDprog, hD'prog⟩ := hT'
@@ -2867,14 +3201,17 @@ companion to `pow_barriers_advance_count`: for *any* successful trace `τ` of `(
 `State.initial` ending in `done State.initial`, every barrier `b` referenced by `I ^ k` is
 recycled exactly `m · δ_b` times over `τ`. Proved by the same `barrierPotential`-conservation
 accounting as the single-batch case, using `(A ^ m).arrivers b = m · A.arrivers b`. -/
-theorem pow_full_recycleCount {I : CTA} (h : I.ConsistentArrivalCounts) {m : Nat}
+theorem pow_full_recycleCount {I : CTA} (h : I.ConsistentArrivalCounts) {s : State} {m : Nat}
     {τ : List Config}
-    (hτ : IsSuccessfulTraceFrom (Config.run State.initial ((I ^ I.loopK h) ^ m)) τ)
-    (hτL : τ.getLast? = some (Config.done State.initial))
-    {b : Barrier} (hb : b ∈ (I ^ I.loopK h).barrierSet) :
+    (hτ : IsSuccessfulTraceFrom (Config.run s ((I ^ I.loopK h) ^ m)) τ)
+    (hτL : τ.getLast? = some (Config.done s)) (hBI_s : s.BlockInv)
+    {b : Barrier} (hb : b ∈ (I ^ I.loopK h).barrierSet)
+    (hcount_s : ∀ n', (s.B b).count = some n' → (n' : Nat) = I.arrivalCount h b) :
     recycleCount b τ (τ.length - 1) = m * (I.loopK h * I.arrivers b / I.arrivalCount h b) := by
   set A := I ^ I.loopK h with hA
   obtain ⟨⟨⟨hchain, _hends⟩, hhead⟩, s_d, hlast⟩ := hτ
+  have hsd : s_d = s := by rw [hlast] at hτL; simpa using hτL
+  subst s_d
   set nb := I.arrivalCount h b with hnb
   -- `b ∈ I.barriers`
   have hbI : b ∈ I.barriers := by
@@ -2914,7 +3251,7 @@ theorem pow_full_recycleCount {I : CTA} (h : I.ConsistentArrivalCounts) {m : Nat
   have hcmd_all : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ p : ℕ+, Cmd.barrierRef c = some (b, p) →
       (p : Nat) = nb := by
     intro C hC i c hc p hbref
-    have hc0 : c ∈ (Config.run State.initial (A ^ m)).progOf i :=
+    have hc0 : c ∈ (Config.run s (A ^ m)).progOf i :=
       (progOf_suffix_head hchain hhead C hC i).subset hc
     have hc1 : c ∈ (A ^ m).prog i := by simpa [Config.progOf] using hc0
     have hcA : c ∈ A.prog i := A.mem_pow_prog hc1
@@ -2922,59 +3259,31 @@ theorem pow_full_recycleCount {I : CTA} (h : I.ConsistentArrivalCounts) {m : Nat
     have hi : i ∈ I.ids := by
       by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
     rw [hnb]; exact (h.choose_spec i hi c hcI b p hbref).symm
-  have hbcount0 : ∀ n', (Config.run State.initial (A ^ m)).bcount b = some n' →
-      (n' : Nat) = nb := by
+  have hbcount0 : ∀ n', (Config.run s (A ^ m)).bcount b = some n' → (n' : Nat) = nb := by
     intro n' hn'
-    simp only [Config.bcount, State.initial, BarrierState.unconfigured] at hn'
-    exact absurd hn' (by simp)
+    simp only [Config.bcount] at hn'
+    rw [hnb]; exact hcount_s n' hn'
   have hcount_all := bcount_chain hchain hhead
     (by intro n' hn'; exact hbcount0 n' (by simpa only [Config.bcount] using hn')) hcmd_all
   have hBI_all := blockInv_chain hchain hhead
     (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
-        exact State.BlockInv.initial)
+        exact hBI_s)
   -- conservation with recycles
   have hcons := barrierPotential_with_recycles (b := b) (nb := nb) hchain hhead hlast hno_err
     hcount_all hBI_all
-  have hC₀pot : (Config.run State.initial (A ^ m)).barrierPotential b = (A ^ m).arrivers b := by
-    simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, CTA.arrivers,
-      State.initial, BarrierState.unconfigured, Nat.zero_add]
-  have hdonepot : (Config.done s_d).barrierPotential b = (s_d.B b).arrived := by
+  have hC₀pot : (Config.run s (A ^ m)).barrierPotential b
+      = (s.B b).arrived + (A ^ m).arrivers b := by
+    simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, CTA.arrivers]
+  have hdonepot : (Config.done s).barrierPotential b = (s.B b).arrived := by
     simp [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount]
   rw [hC₀pot, hdonepot] at hcons
-  -- arrived counts: head is `0 < nb`, done is `< nb`
-  have hA0 : (0 : Nat) < nb := hnbpos
-  have hAd : (s_d.B b).arrived < nb := by
-    obtain ⟨y, hy_mem, hy_step⟩ : ∃ y ∈ τ, CTAStep y (Config.done s_d) := by
-      rcases getLast_has_pred_mem hchain hlast with hh | hp
-      · rw [hhead] at hh; exact absurd hh (by simp)
-      · exact hp
-    have hwf_y : y.WF := WF_chain hchain hhead WF_initial y hy_mem
-    cases hy_step with
-    | @done sd T' hdone hnofull =>
-      by_cases hcfg : (s_d.B b).count = none
-      · have heq : s_d.B b = ⟨(s_d.B b).synced, (s_d.B b).arrived, none⟩ := by rw [← hcfg]
-        have harr0 := (hwf_y.2.1 b (s_d.B b).synced (s_d.B b).arrived heq).2
-        rw [harr0]; exact hnbpos
-      · obtain ⟨n', hn'⟩ := Option.ne_none_iff_exists'.mp hcfg
-        have heq : s_d.B b = ⟨(s_d.B b).synced, (s_d.B b).arrived, some n'⟩ := by rw [← hn']
-        have hnn := (hcount_all (Config.done s_d) (List.mem_of_mem_getLast? hlast)) n'
-          (by simp only [Config.bcount]; exact hn')
-        have hlt2 := hnofull b (s_d.B b).synced (s_d.B b).arrived n' heq
-        omega
-  -- the recycle count is the exact quotient `m * A.arrivers b / nb`
+  -- the start's own arrived count cancels (`s` is restored), leaving `m · A.arrivers b / nb`
   rw [hAarr, hqA] at hcons
-  -- `hcons : m * (nb * qA) = (s_d.B b).arrived + nb * recycleCount …`
   set R := recycleCount b τ (τ.length - 1) with hRdef
-  have hcons' : nb * (m * qA) = (s_d.B b).arrived + nb * R := by
-    rw [← hcons, Nat.mul_left_comm]
-  -- `(s_d.B b).arrived = 0` and `R = m * qA` by modular reasoning (`arrived < nb`)
-  have hAeq : (s_d.B b).arrived = 0 := by
-    have e : (nb * (m * qA)) % nb = ((s_d.B b).arrived + nb * R) % nb := by rw [hcons']
-    rw [Nat.mul_mod_right, Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hAd] at e
-    omega
+  have hcancel : m * (nb * qA) = nb * R := Nat.add_left_cancel hcons
   have hqR : R = m * qA := by
-    rw [hAeq, Nat.zero_add] at hcons'
-    exact (Nat.eq_of_mul_eq_mul_left hnbpos hcons').symm
+    have h2 : nb * (m * qA) = nb * R := by rw [Nat.mul_left_comm]; exact hcancel
+    exact (Nat.eq_of_mul_eq_mul_left hnbpos h2).symm
   -- relate `qA` to `δ`: `A.arrivers b = nb * qA` and `δ = loopK * arrivers / nb`
   have hδ : I.loopK h * I.arrivers b / I.arrivalCount h b = qA := by
     have hAa : A.arrivers b = I.loopK h * I.arrivers b := by rw [hA]; exact I.arrivers_pow b _
@@ -3066,18 +3375,18 @@ theorem bstate_unconfigured_chain {b : Barrier} :
 is not in `I.barriers` then no command of `A^m = (I^k)^m` references it, so it never becomes
 full and is never recycled; the total recycle count is `0`. The complement of
 `pow_full_recycleCount` (where then `δ_b = 0` as well, since `arrivers b = 0`). -/
-theorem pow_full_recycleCount_zero {I : CTA} (h : I.ConsistentArrivalCounts) {m : Nat}
+theorem pow_full_recycleCount_zero {I : CTA} (h : I.ConsistentArrivalCounts) {s : State} {m : Nat}
     {τ : List Config}
-    (hτ : IsSuccessfulTraceFrom (Config.run State.initial ((I ^ I.loopK h) ^ m)) τ)
-    (hτL : τ.getLast? = some (Config.done State.initial))
+    (hτ : IsSuccessfulTraceFrom (Config.run s ((I ^ I.loopK h) ^ m)) τ)
+    (_hτL : τ.getLast? = some (Config.done s)) (hfull : ∀ b, (s.B b).isFull = false)
     {b : Barrier} (hbI : b ∉ I.barriers) :
     recycleCount b τ (τ.length - 1) = 0 := by
   set A := I ^ I.loopK h with hA
-  obtain ⟨⟨⟨hchain, _hends⟩, hhead⟩, s_d, hlast⟩ := hτ
+  obtain ⟨⟨⟨hchain, _hends⟩, hhead⟩, _s_d, _hlast⟩ := hτ
   -- no command of `A^m` references `b` (else `b ∈ I.barriers`)
   have hnoref : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ p : ℕ+, Cmd.barrierRef c ≠ some (b, p) := by
     intro C hC i c hc p hbref
-    have hc0 : c ∈ (Config.run State.initial (A ^ m)).progOf i :=
+    have hc0 : c ∈ (Config.run s (A ^ m)).progOf i :=
       (progOf_suffix_head hchain hhead C hC i).subset hc
     have hc1 : c ∈ (A ^ m).prog i := by simpa [Config.progOf] using hc0
     have hcA : c ∈ A.prog i := A.mem_pow_prog hc1
@@ -3088,79 +3397,40 @@ theorem pow_full_recycleCount_zero {I : CTA} (h : I.ConsistentArrivalCounts) {m 
     rw [CTA.barriers, Finset.mem_biUnion]
     exact ⟨i, hi, List.mem_toFinset.mpr
       (List.mem_map.mpr ⟨(b, p), List.mem_filterMap.mpr ⟨c, hcI, hbref⟩, rfl⟩)⟩
-  -- err-freeness
-  have hno_err : ∀ C ∈ τ, ∀ T, C ≠ Config.err T := by
-    intro C hC T hCerr
-    have hτne : τ ≠ [] := by rintro rfl; simp at hhead
-    rw [← List.dropLast_append_getLast hτne, List.mem_append, List.mem_singleton] at hC
-    rcases hC with hCd | hCl
-    · obtain ⟨s', T', hrun⟩ := mem_dropLast_isRun hchain C hCd
-      rw [hCerr] at hrun; exact Config.noConfusion hrun
-    · rw [List.getLast?_eq_some_getLast hτne, Option.some.injEq] at hlast
-      rw [hlast, hCerr] at hCl; exact Config.noConfusion hCl
-  -- `b` stays unconfigured along `τ` (no `b`-command ever configures it)
-  have hfrozen := bstate_unconfigured_chain hchain hhead
-    (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
-        simp [State.initial, BarrierState.unconfigured])
+  -- `b`'s barrier state is frozen at `s.B b` all along `τ`
+  have hfrozen := bstate_unref_chain (hfull b) hchain hhead
+    (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'; rfl)
     hnoref
-  -- conservation with `nb = 1`: `b` is never configured, so its count is vacuously consistent
-  have hcount_all : ∀ C ∈ τ, ∀ n' : ℕ+, C.bcount b = some n' → (n' : Nat) = 1 := by
-    intro C hC n' hcnt
-    exfalso
-    cases C with
-    | run s T =>
-      have hb' := hfrozen (Config.run s T) hC s rfl
-      rw [show (Config.run s T).bcount b = (s.B b).count from rfl, hb'] at hcnt
-      simp [BarrierState.unconfigured] at hcnt
-    | done s =>
-      have hb' := hfrozen (Config.done s) hC s rfl
-      rw [show (Config.done s).bcount b = (s.B b).count from rfl, hb'] at hcnt
-      simp [BarrierState.unconfigured] at hcnt
-    | err T => rw [show (Config.err T).bcount b = none from rfl] at hcnt; exact (by simp at hcnt)
-  have hBI_all := blockInv_chain hchain hhead
-    (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
-        exact State.BlockInv.initial)
-  have hcons := barrierPotential_with_recycles (b := b) (nb := 1) hchain hhead hlast hno_err
-    hcount_all hBI_all
-  -- head and done potentials are both `(·.B b).arrived = 0`, since `arrivers b = 0`
-  have hAarr0 : (A ^ m).arrivers b = 0 := by
-    rw [CTA.arrivers]
-    apply Finset.sum_eq_zero
-    intro i hi
-    rw [List.countP_eq_zero]
-    intro r hr
-    simp only [List.mem_filterMap] at hr
-    obtain ⟨c, hc, hcr⟩ := hr
-    simp only [beq_iff_eq]
-    intro hrb
-    have hc1 : c ∈ (A ^ m).prog i := hc
-    have hcA : c ∈ A.prog i := A.mem_pow_prog hc1
-    have hcI : c ∈ I.prog i := by rw [hA] at hcA; exact I.mem_pow_prog hcA
-    have hiI : i ∈ I.ids := by
-      by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
-    apply hbI
-    rw [CTA.barriers, Finset.mem_biUnion]
-    exact ⟨i, hiI, List.mem_toFinset.mpr
-      (List.mem_map.mpr ⟨r, List.mem_filterMap.mpr ⟨c, hcI, hcr⟩, hrb⟩)⟩
-  have hC₀pot : (Config.run State.initial (A ^ m)).barrierPotential b = 0 := by
-    simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount,
-      State.initial, BarrierState.unconfigured, Nat.zero_add]
-    exact hAarr0
-  have hdonepot : (Config.done s_d).barrierPotential b = (s_d.B b).arrived := by
-    simp [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount]
-  rw [hC₀pot, hdonepot] at hcons
-  omega
+  -- a frozen, non-full barrier is never recycled (its source can't be full and unconfigured)
+  have hnostep : ∀ C ∈ τ, ∀ C', stepRecyclesBarrier b C C' = false := by
+    intro C hC C'
+    rcases hCs : C.state? with _ | sC
+    · simp [stepRecyclesBarrier, hCs]
+    · have hbC : sC.B b = s.B b := hfrozen C hC sC hCs
+      rcases hC's : C'.state? with _ | sC'
+      · simp [stepRecyclesBarrier, hCs, hC's]
+      · simp [stepRecyclesBarrier, hCs, hC's, hbC, hfull b]
+  unfold recycleCount
+  rw [List.countP_eq_zero]
+  intro j _
+  rcases hCj : τ[j]? with _ | C
+  · simp
+  · rcases hCj1 : τ[j + 1]? with _ | C'
+    · simp
+    · simp [hnostep C (List.mem_of_getElem? hCj) C']
 
 /-- **A single batch's `sync` generation is at most `δ`.** In one restoring batch `t₁` of
 `A = I ^ k`, the recycle count of `b` strictly before a `sync`-on-`b`'s execution is `< δ_b`:
 the sync's own recycle (the step that unblocks it, `sync_time_recycles`) is one of the batch's
 `δ_b` recycles (`pow_barriers_advance_count`) and occurs *at* the sync's step, not before it. -/
-theorem sync_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List Config}
-    (ht₁ : IsSuccessfulTraceFrom (Config.run State.initial (I ^ I.loopK h)) t₁)
-    (ht₁L : t₁.getLast? = some (Config.done State.initial))
+theorem sync_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {s : State}
+    {t₁ : List Config}
+    (ht₁ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) t₁)
+    (ht₁L : t₁.getLast? = some (Config.done s))
     {t : ThreadId} {j : Nat} {b : Barrier} {par : ℕ+} {M₁ : Nat}
     (hcj : ((I ^ I.loopK h).prog t)[j]? = some (Cmd.sync b par))
-    (hM₁ : IsTimeOf (Config.run State.initial (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁) :
+    (hM₁ : IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁)
+    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false) :
     recycleCount b t₁ (M₁ - 1) + 1 ≤ I.loopK h * I.arrivers b / I.arrivalCount h b := by
   set A := I ^ I.loopK h with hA
   have hchain1 : List.IsChain CTAStep t₁ := ht₁.1.1.subtrace
@@ -3176,9 +3446,9 @@ theorem sync_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {t�
   -- one batch recycles `b` exactly `δ` times
   have hΔ : recycleCount b t₁ (t₁.length - 2) = I.loopK h * I.arrivers b / I.arrivalCount h b := by
     rw [← recycleCount_done_last hchain1 ht₁L h2]
-    exact Config.WellSynchronized.pow_barriers_advance_count h WF_initial rfl ht₁ hbA
+    exact Config.WellSynchronized.pow_barriers_advance_count h hwf_s (hfull b) ht₁ hbA
   -- the sync's step `M₁ - 1 → M₁` recycles `b`
-  have hcmdC : (ProgPoint.mk t j).cmd (Config.run State.initial A) = some (Cmd.sync b par) := by
+  have hcmdC : (ProgPoint.mk t j).cmd (Config.run s A) = some (Cmd.sync b par) := by
     change (A.prog t)[j]? = some (Cmd.sync b par); exact hcj
   obtain ⟨C, C', hCm1, hCm, hrec⟩ := sync_time_recycles hM₁ hcmdC
   have hM1pos : 1 ≤ M₁ := by
@@ -3188,15 +3458,15 @@ theorem sync_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {t�
   -- the step is a genuine recycle (run → run), so `M₁` is not the terminal `done` index
   have hM1ne : M₁ ≠ t₁.length - 1 := by
     intro he
-    -- then `C' = done State.initial`, but a recycle step cannot land in `done`
-    have hCmdone : t₁[M₁]? = some (Config.done State.initial) := by
+    -- then `C' = done s`, but a recycle step cannot land in `done`
+    have hCmdone : t₁[M₁]? = some (Config.done s) := by
       rw [he, ← List.getLast?_eq_getElem?]; exact ht₁L
-    have hC'done : C' = Config.done State.initial := by
+    have hC'done : C' = Config.done s := by
       rw [hCm, Option.some.injEq] at hCmdone; exact hCmdone
     rw [hC'done] at hrec
-    have hstep : CTAStep C (Config.done State.initial) :=
+    have hstep : CTAStep C (Config.done s) :=
       chain_step hchain1 hCm1 (by rw [show M₁ - 1 + 1 = M₁ from by omega, hCm, hC'done])
-    rw [stepRecyclesBarrier_to_done b C State.initial hstep] at hrec
+    rw [stepRecyclesBarrier_to_done b C s hstep] at hrec
     exact absurd hrec (by simp)
   have hM1le : M₁ ≤ t₁.length - 2 := by omega
   -- `recycleCount(M₁) = recycleCount(M₁ - 1) + 1`, and is `≤ δ` by monotonicity
@@ -3213,12 +3483,13 @@ theorem sync_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {t�
 bound: in one restoring batch `t₁`, the recycle count of `b` strictly before any barrier-op
 on `b` is `≤ δ_b` (it lies within the batch, whose total recycle count is exactly `δ_b`). -/
 theorem barrierOp_recycleCount_le_batch {I : CTA} (h : I.ConsistentArrivalCounts)
-    {t₁ : List Config}
-    (ht₁ : IsSuccessfulTraceFrom (Config.run State.initial (I ^ I.loopK h)) t₁)
-    (ht₁L : t₁.getLast? = some (Config.done State.initial))
+    {s : State} {t₁ : List Config}
+    (ht₁ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) t₁)
+    (ht₁L : t₁.getLast? = some (Config.done s))
     {t : ThreadId} {j : Nat} {c : Cmd} {b : Barrier} {par : ℕ+} {M₁ : Nat}
     (hcj : ((I ^ I.loopK h).prog t)[j]? = some c) (hbr : Cmd.barrierRef c = some (b, par))
-    (hM₁ : IsTimeOf (Config.run State.initial (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁) :
+    (hM₁ : IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁)
+    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false) :
     recycleCount b t₁ (M₁ - 1) ≤ I.loopK h * I.arrivers b / I.arrivalCount h b := by
   set A := I ^ I.loopK h with hA
   have hchain1 : List.IsChain CTAStep t₁ := ht₁.1.1.subtrace
@@ -3236,7 +3507,7 @@ theorem barrierOp_recycleCount_le_batch {I : CTA} (h : I.ConsistentArrivalCounts
   -- one batch recycles `b` exactly `δ` times
   have hΔ : recycleCount b t₁ (t₁.length - 2) = I.loopK h * I.arrivers b / I.arrivalCount h b := by
     rw [← recycleCount_done_last hchain1 ht₁L h2]
-    exact Config.WellSynchronized.pow_barriers_advance_count h WF_initial rfl ht₁ hbA
+    exact Config.WellSynchronized.pow_barriers_advance_count h hwf_s (hfull b) ht₁ hbA
   have hM1le : M₁ - 1 ≤ t₁.length - 2 := by omega
   have hmono : recycleCount b t₁ (M₁ - 1) ≤ recycleCount b t₁ (t₁.length - 2) :=
     recycleCount_mono b t₁ hM1le
@@ -3377,11 +3648,13 @@ theorem CTA.WellSynchronized.last_batches_replay_bundle {I : CTA}
   have hinit : sd₁ = State.initial := pow_done_state_initial h ht₁ ht₁L
   rw [hinit] at ht₁L
   -- the global replay trace and its recycle structure
-  obtain ⟨τ, hτ, hτL, hrec⟩ := pow_replay_recycle_structure h ht₁ ht₁L (n + 1)
+  obtain ⟨τ, hτ, hτL, hrec⟩ :=
+    pow_replay_recycle_structure h ht₁ ht₁L WF_initial (fun _ => rfl) (n + 1)
   obtain ⟨sd, hlast⟩ := hτ.2
   -- the prefix replay trace of `n` batches, built from the *same* `t₁`, with its recycle
   -- structure: this is what makes the prefix generations agree batch-for-batch with `τ`
-  obtain ⟨τn, hτn, hτnL, hrecn⟩ := pow_replay_recycle_structure h ht₁ ht₁L n
+  obtain ⟨τn, hτn, hτnL, hrecn⟩ :=
+    pow_replay_recycle_structure h ht₁ ht₁L WF_initial (fun _ => rfl) n
   obtain ⟨sdn, hlastn⟩ := hτn.2
   set A := I ^ I.loopK h with hA
   -- **Per-point generation.** A barrier copy at batch `p ≤ n` position `j` (`j < L`) has
@@ -3593,7 +3866,7 @@ theorem CTA.WellSynchronized.last_batches_replay_bundle {I : CTA}
     -- the batch-0 sync recycle bound: `recycleCount b t₁ (M₁ - 1) + 1 ≤ δ`
     have hsyncbound : recycleCount b t₁ (M₁ - 1) + 1
         ≤ I.loopK h * I.arrivers b / I.arrivalCount h b :=
-      sync_recycleCount_lt_batch h ht₁ ht₁L hcj hM₁
+      sync_recycleCount_lt_batch h ht₁ ht₁L hcj hM₁ WF_initial (fun _ => rfl)
     have hexp : (p + 1) * (I.loopK h * I.arrivers b / I.arrivalCount h b)
         = p * (I.loopK h * I.arrivers b / I.arrivalCount h b)
           + (I.loopK h * I.arrivers b / I.arrivalCount h b) := by rw [Nat.succ_mul]
@@ -3636,7 +3909,7 @@ theorem CTA.WellSynchronized.last_batches_replay_bundle {I : CTA}
     -- the within-batch recycle bound (non-strict): `recycleCount b t₁ (M₁ - 1) ≤ δ`
     have hbound : recycleCount b t₁ (M₁ - 1)
         ≤ I.loopK h * I.arrivers b / I.arrivalCount h b :=
-      barrierOp_recycleCount_le_batch h ht₁ ht₁L hcj hbr hM₁
+      barrierOp_recycleCount_le_batch h ht₁ ht₁L hcj hbr hM₁ WF_initial (fun _ => rfl)
     have hexp : (p + 1) * (I.loopK h * I.arrivers b / I.arrivalCount h b)
         = p * (I.loopK h * I.arrivers b / I.arrivalCount h b)
           + (I.loopK h * I.arrivers b / I.arrivalCount h b) := by rw [Nat.succ_mul]
@@ -3726,7 +3999,7 @@ theorem CTA.WellSynchronized.last_batches_replay_bundle {I : CTA}
     rw [hidxeq, hgp]
     have hsyncbound : recycleCount b t₁ (M₁ - 1) + 1
         ≤ I.loopK h * I.arrivers b / I.arrivalCount h b :=
-      sync_recycleCount_lt_batch h ht₁ ht₁L hcj hM₁
+      sync_recycleCount_lt_batch h ht₁ ht₁L hcj hM₁ WF_initial (fun _ => rfl)
     have hexp : (p + 1) * (I.loopK h * I.arrivers b / I.arrivalCount h b)
         = p * (I.loopK h * I.arrivers b / I.arrivalCount h b)
           + (I.loopK h * I.arrivers b / I.arrivalCount h b) := by rw [Nat.succ_mul]
@@ -5588,27 +5861,28 @@ theorem CTA.pow_seq_assoc_last (I : CTA) (k m : Nat) {E : CTA} (hids : (I ^ k).i
 The epilogue bump is `m·δ` because the `m`-batch prefix recycles `b` exactly `m·δ` times
 (`pow_full_recycleCount`), and the count splits across the glue boundary (`recycleCount_suffix`).
 The two cases are the seq-analogue of `last_batches_replay_bundle`'s `keygen`. -/
-theorem glue_replay_gen {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List Config}
-    (_ht₁ : IsSuccessfulTraceFrom (Config.run State.initial (I ^ I.loopK h)) t₁)
-    (_ht₁L : t₁.getLast? = some (Config.done State.initial)) {E : CTA}
+theorem glue_replay_gen {I : CTA} (h : I.ConsistentArrivalCounts) {s : State} {t₁ : List Config}
+    (ht₁ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) t₁)
+    (_ht₁L : t₁.getLast? = some (Config.done s)) {E : CTA}
+    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false)
     (hids : (I ^ I.loopK h).ids = E.ids) {m : Nat} {τm : List Config}
-    (hτm : IsSuccessfulTraceFrom (Config.run State.initial ((I ^ I.loopK h) ^ m)) τm)
-    (hτmL : τm.getLast? = some (Config.done State.initial))
+    (hτm : IsSuccessfulTraceFrom (Config.run s ((I ^ I.loopK h) ^ m)) τm)
+    (hτmL : τm.getLast? = some (Config.done s))
     (hrec : ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (p M M₁ : Nat),
         p < m → ((I ^ I.loopK h).prog t)[j]? = some c → Cmd.barrierRef c = some (b, par) →
-        IsTimeOf (Config.run State.initial ((I ^ I.loopK h) ^ m)) τm
+        IsTimeOf (Config.run s ((I ^ I.loopK h) ^ m)) τm
             ⟨t, p * ((I ^ I.loopK h).prog t).length + j⟩ M →
-        IsTimeOf (Config.run State.initial (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁ →
+        IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁ →
         recycleCount b τm (M - 1)
           = recycleCount b t₁ (M₁ - 1) + p * (I.loopK h * I.arrivers b / I.arrivalCount h b))
     {tE : List Config}
-    (htE : IsSuccessfulTraceFrom (Config.run State.initial ((I ^ I.loopK h).seq E hids)) tE)
+    (htE : IsSuccessfulTraceFrom (Config.run s ((I ^ I.loopK h).seq E hids)) tE)
     (hmB : ((I ^ I.loopK h) ^ m).ids = ((I ^ I.loopK h).seq E hids).ids) :
     -- prefix point generation
     (∀ (t : ThreadId) (j p : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (M₁ : Nat),
         j < ((I ^ I.loopK h).prog t).length → p < m →
         ((I ^ I.loopK h).prog t)[j]? = some c → Cmd.barrierRef c = some (b, par) →
-        IsTimeOf (Config.run State.initial (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁ →
+        IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁ →
         pointGen (((I ^ I.loopK h) ^ m).seq ((I ^ I.loopK h).seq E hids) hmB)
             (τm.dropLast.map (Config.seqLift ((I ^ I.loopK h) ^ m) ((I ^ I.loopK h).seq E hids))
               ++ tE.tail)
@@ -5633,7 +5907,7 @@ theorem glue_replay_gen {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List C
   obtain ⟨sd, hlast⟩ := hglue.2
   -- basic length facts about `τm` (starts `run`, ends `done`)
   have hchainm : List.IsChain CTAStep τm := hτm.1.1.subtrace
-  have hheadm : τm.head? = some (Config.run State.initial (A ^ m)) := hτm.1.2
+  have hheadm : τm.head? = some (Config.run s (A ^ m)) := hτm.1.2
   have hmne : τm ≠ [] := fun hd => by rw [hd] at hheadm; simp at hheadm
   have hm2 : 2 ≤ τm.length := by
     rcases τm with _ | ⟨x, _ | ⟨y, l⟩⟩
@@ -5671,8 +5945,8 @@ theorem glue_replay_gen {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List C
   -- **Front transport.** A prefix point's time in `τm` lifts (unshifted) into `τ`, and is `≤
   -- τm.length - 2`.
   have frontTransport : ∀ (q M' : Nat) (t : ThreadId), q < ((A ^ m).prog t).length →
-      IsTimeOf (Config.run State.initial (A ^ m)) τm ⟨t, q⟩ M' →
-      IsTimeOf (Config.run State.initial P) τ ⟨t, q⟩ M' ∧ M' ≤ τm.length - 2 := by
+      IsTimeOf (Config.run s (A ^ m)) τm ⟨t, q⟩ M' →
+      IsTimeOf (Config.run s P) τ ⟨t, q⟩ M' ∧ M' ≤ τm.length - 2 := by
     intro q M' t hq hT
     obtain ⟨-, -, j', D, D', hMeq, hDj, hDj1, hDprog, hD'prog⟩ := hT
     have hj'1 : j' + 1 < τm.length := (List.getElem?_eq_some_iff.mp hDj1).1
@@ -5699,8 +5973,8 @@ theorem glue_replay_gen {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List C
   -- **Suffix transport.** An epilogue point `⟨t, e⟩` (a `B`-point) at time `M'` in `tE` lifts
   -- into `τ` at `⟨t, m·L + e⟩` with time `(τm.length - 2) + M'`.
   have suffixTransport : ∀ (e M' : Nat) (t : ThreadId), e < (B.prog t).length →
-      IsTimeOf (Config.run State.initial B) tE ⟨t, e⟩ M' →
-      IsTimeOf (Config.run State.initial P) τ ⟨t, m * (A.prog t).length + e⟩
+      IsTimeOf (Config.run s B) tE ⟨t, e⟩ M' →
+      IsTimeOf (Config.run s P) τ ⟨t, m * (A.prog t).length + e⟩
         ((τm.length - 2) + M') := by
     intro e M' t he hT'
     obtain ⟨-, -, j', D, D', hM'eq, hDj, hDj1, hDprog, hD'prog⟩ := hT'
@@ -5732,7 +6006,8 @@ theorem glue_replay_gen {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List C
         = m * (I.loopK h * I.arrivers b / I.arrivalCount h b) := by
     intro b hbA
     rw [hfrontrec b (τm.length - 2) (le_refl _), ← recycleCount_done_last hchainm hτmL hm2]
-    exact pow_full_recycleCount h hτm hτmL hbA
+    exact pow_full_recycleCount h hτm hτmL hwf_s.2.2 hbA
+      (Config.WellSynchronized.headCount_consistent_of_successful h (hfull b) ht₁ hbA)
   refine ⟨?_, ?_⟩
   · -- prefix point generation
     intro t j p c b par M₁ hjL hp hcj hbr hM₁
@@ -5835,9 +6110,254 @@ theorem glue_replay_gen {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List C
               (List.mem_map.mpr ⟨r, List.mem_filterMap.mpr ⟨c, hc, hcr⟩, hrb⟩)⟩
           rw [hIarr0, Nat.mul_zero, Nat.zero_div]
         rw [hδ0, Nat.mul_zero]
-        exact pow_full_recycleCount_zero h hτm hτmL hbInot
+        exact pow_full_recycleCount_zero h hτm hτmL hfull hbInot
     rw [hgE, hsplit b (ME - 1), hpref, hgEtE]
     omega
+
+/-- **Generation across a general glue, epilogue side.** For the glue of an `A`-trace `tA`
+(ending `done s_mid`) onto a `B`-trace `tB` (from `run s_mid B`), a `B`-point `⟨t, |A.prog t| + e⟩`
+has generation `recycleCount b tA (|tA|-2) + pointGen B tB ⟨t, e⟩`: its generation in the spliced
+trace is its generation in `tB` plus the recycles `b` accrued over the whole `A`-phase. (The
+`A`-phase recycle count is a *constant* per `b`, so it **cancels** in any relative comparison of
+two such glues sharing the same `A`-phase — which is how the prefix `Pre` drops out of the
+shift/front facts.) The `(I^k)^m`-specific `glue_replay_gen` is the instance `A = (I^k)^m`,
+where the constant is `m · δ_b`. -/
+theorem seq_glue_epilogue_pointGen {A B : CTA} (hids : A.ids = B.ids) {s_A s_mid : State}
+    {tA : List Config} (htA : IsSuccessfulTraceFrom (Config.run s_A A) tA)
+    (hAlast : tA.getLast? = some (Config.done s_mid))
+    {tB : List Config} (htB : IsSuccessfulTraceFrom (Config.run s_mid B) tB)
+    {t : ThreadId} {e : Nat} {c : Cmd} {b : Barrier} {par : ℕ+}
+    (hcE : B.cmdAt ⟨t, e⟩ = some c) (hbr : Cmd.barrierRef c = some (b, par)) :
+    pointGen (A.seq B hids) (tA.dropLast.map (Config.seqLift A B) ++ tB.tail)
+        ⟨t, (A.prog t).length + e⟩
+      = recycleCount b tA (tA.length - 2) + pointGen B tB ⟨t, e⟩ := by
+  obtain ⟨htglue, -, hsnd⟩ := glue_trace hids htA hAlast htB
+  set P := A.seq B hids with hPdef
+  set τ := tA.dropLast.map (Config.seqLift A B) ++ tB.tail with hτdef
+  have hbar : Cmd.barrier? c = some b := Cmd.barrier?_of_barrierRef hbr
+  have heB : e < (B.prog t).length := (List.getElem?_eq_some_iff.mp hcE).1
+  have h2 : 2 ≤ tA.length := by
+    obtain ⟨⟨⟨_, _⟩, hhead⟩, -⟩ := htA
+    rcases tA with _ | ⟨x, _ | ⟨y, l⟩⟩
+    · simp at hhead
+    · simp only [List.head?_cons, Option.some.injEq] at hhead
+      simp only [List.getLast?_singleton, Option.some.injEq] at hAlast
+      rw [hhead] at hAlast; exact absurd hAlast (by simp)
+    · simp only [List.length_cons]; omega
+  obtain ⟨sdB, hBlast⟩ := htB.2
+  obtain ⟨ME, hME⟩ := exists_time_of_ends_done htB.1 hBlast (η := ⟨t, e⟩) heB
+  -- suffix transport: the `B`-point executes in `τ` at time `(|tA|-2) + ME`
+  have hsuffix : IsTimeOf (Config.run s_A P) τ ⟨t, (A.prog t).length + e⟩
+      ((tA.length - 2) + ME) := by
+    obtain ⟨-, -, j', D, D', hMeq, hDj, hDj1, hDprog, hD'prog⟩ := hME
+    refine ⟨htglue.1, ?_, (tA.length - 2) + j', D, D', by omega, ?_, ?_, ?_, ?_⟩
+    · change (A.prog t).length + e < (A.prog t ++ B.prog t).length
+      rw [List.length_append]; omega
+    · rw [hsnd j']; exact hDj
+    · rw [show (tA.length - 2) + j' + 1 = (tA.length - 2) + (j' + 1) from by omega, hsnd (j' + 1)]
+      exact hDj1
+    · change D.progOf t = (A.prog t ++ B.prog t).drop ((A.prog t).length + e)
+      rw [List.drop_append, List.drop_eq_nil_of_le (Nat.le_add_right _ _), List.nil_append,
+        Nat.add_sub_cancel_left]
+      exact hDprog
+    · change D'.progOf t = (A.prog t ++ B.prog t).drop ((A.prog t).length + e + 1)
+      rw [List.drop_append,
+        List.drop_eq_nil_of_le (show (A.prog t).length ≤ (A.prog t).length + e + 1 by omega),
+        List.nil_append, show (A.prog t).length + e + 1 - (A.prog t).length = e + 1 from by omega]
+      exact hD'prog
+  have hcmdP : P.cmdAt ⟨t, (A.prog t).length + e⟩ = some c := by
+    change (A.prog t ++ B.prog t)[(A.prog t).length + e]? = some c
+    rw [List.getElem?_append_right (by omega),
+      show (A.prog t).length + e - (A.prog t).length = e from by omega]
+    exact hcE
+  have hMEpos : 1 ≤ ME := by obtain ⟨-, -, j', D, D', hMeq, -, -, -, -⟩ := hME; omega
+  have hgP : pointGen P τ ⟨t, (A.prog t).length + e⟩
+      = recycleCount b τ ((tA.length - 2) + (ME - 1)) + 1 := by
+    simp only [pointGen, hcmdP, Option.bind_some, hbar, pointTime_eq_of_isTimeOf hsuffix,
+      show (tA.length - 2) + ME - 1 = (tA.length - 2) + (ME - 1) from by omega]
+  have hsplit : recycleCount b τ ((tA.length - 2) + (ME - 1))
+      = recycleCount b τ (tA.length - 2) + recycleCount b tB (ME - 1) :=
+    recycleCount_suffix b hsnd
+  have hfront : recycleCount b τ (tA.length - 2) = recycleCount b tA (tA.length - 2) := by
+    have hfst : ∀ q, q ≤ tA.length - 2 → τ[q]? = (tA.map (Config.seqLift A B))[q]? := by
+      intro q hq
+      rw [hτdef, List.getElem?_append_left
+          (by rw [List.length_map, List.length_dropLast]; omega),
+        List.getElem?_map, List.getElem?_map, List.getElem?_dropLast, if_pos (by omega)]
+    rw [recycleCount_eq_of_getElem?_eq b (fun q hq => hfst q hq),
+      recycleCount_map_seqLift A B b tA (tA.length - 2)]
+  have hgB : pointGen B tB ⟨t, e⟩ = recycleCount b tB (ME - 1) + 1 := by
+    simp only [pointGen, hcE, Option.bind_some, hbar, pointTime_eq_of_isTimeOf hME]
+  rw [hgP, hsplit, hfront, hgB]; omega
+
+/-- **Generation across a general glue, prefix side.** For the glue of an `A`-trace `tA`
+(ending `done s_mid`) onto a `B`-trace `tB`, an `A`-point `⟨t, idx⟩` (command `c` referencing
+`b`, `idx < |A.prog t|`) has the *same* generation as in the standalone `A`-run `tA`: the point
+executes during the `A`-phase, whose configurations are the lifted `tA`-prefix, so its time and
+recycle prefix are unchanged by appending `B`. This is the A-side companion to
+`seq_glue_epilogue_pointGen`; it lets front-agreement extend over the prefix `Pre` (both the full
+program and the reference glue the same `tP` in front, so `Pre`-point generations coincide). -/
+theorem seq_glue_prefix_pointGen {A B : CTA} (hids : A.ids = B.ids) {s_A s_mid : State}
+    {tA : List Config} (htA : IsSuccessfulTraceFrom (Config.run s_A A) tA)
+    (hAlast : tA.getLast? = some (Config.done s_mid))
+    {tB : List Config} (htB : IsSuccessfulTraceFrom (Config.run s_mid B) tB)
+    {t : ThreadId} {idx : Nat} {c : Cmd} {b : Barrier} {par : ℕ+}
+    (hcA : A.cmdAt ⟨t, idx⟩ = some c) (hbr : Cmd.barrierRef c = some (b, par)) :
+    pointGen (A.seq B hids) (tA.dropLast.map (Config.seqLift A B) ++ tB.tail) ⟨t, idx⟩
+      = pointGen A tA ⟨t, idx⟩ := by
+  obtain ⟨htglue, -, -⟩ := glue_trace hids htA hAlast htB
+  set P := A.seq B hids with hPdef
+  set τ := tA.dropLast.map (Config.seqLift A B) ++ tB.tail with hτdef
+  have hbar : Cmd.barrier? c = some b := Cmd.barrier?_of_barrierRef hbr
+  have hidxA : idx < (A.prog t).length := by
+    have hc : (A.prog t)[idx]? = some c := hcA
+    exact (List.getElem?_eq_some_iff.mp hc).1
+  -- chain/last facts about `tA`
+  have hchainA : List.IsChain CTAStep tA := htA.1.1.subtrace
+  have hheadA : tA.head? = some (Config.run s_A A) := htA.1.2
+  have hA2 : 2 ≤ tA.length := by
+    rcases tA with _ | ⟨x, _ | ⟨y, l⟩⟩
+    · simp at hheadA
+    · simp only [List.head?_cons, Option.some.injEq] at hheadA
+      simp only [List.getLast?_singleton, Option.some.injEq] at hAlast
+      rw [hheadA] at hAlast; exact absurd hAlast (by simp)
+    · simp only [List.length_cons]; omega
+  -- the penultimate config of `tA` has empty programs
+  have hpenA : ∀ (i : ThreadId) (C : Config), tA[tA.length - 2]? = some C → C.progOf i = [] := by
+    intro i C hC
+    have hdrop : tA.dropLast ≠ [] := by
+      intro hd; have : tA.length - 1 = 0 := by rw [← List.length_dropLast, hd]; rfl
+      omega
+    have hgl : tA.dropLast.getLast? = some C := by
+      rw [List.getLast?_eq_getElem?, List.length_dropLast, List.getElem?_dropLast,
+        if_pos (by omega), show tA.length - 1 - 1 = tA.length - 2 from by omega]
+      exact hC
+    exact progOf_penultimate_done hchainA hAlast hgl i
+  -- the `A`-point's time `M` in `tA`
+  obtain ⟨M, hM⟩ := exists_time_of_ends_done htA.1 hAlast (η := ⟨t, idx⟩) hidxA
+  obtain ⟨-, -, j', D, D', hMeq, hDj, hDj1, hDprog, hD'prog⟩ := id hM
+  change D.progOf t = (A.prog t).drop idx at hDprog
+  change D'.progOf t = (A.prog t).drop (idx + 1) at hD'prog
+  have hj'1 : j' + 1 < tA.length := (List.getElem?_eq_some_iff.mp hDj1).1
+  -- `D` is not the penultimate config (`drop idx ≠ []`), so `j' < |tA| - 2`
+  have hDne : D.progOf t ≠ [] := by rw [hDprog, Ne, List.drop_eq_nil_iff]; omega
+  have hj'lt : j' < tA.length - 2 := by
+    by_contra hcon
+    have hje : j' = tA.length - 2 := by omega
+    exact hDne (hpenA t D (by rw [← hje]; exact hDj))
+  -- the glue front agrees with the lifted `tA` on indices `≤ |tA| - 2`
+  have hτget : ∀ q, q ≤ tA.length - 2 → τ[q]? = (tA[q]?).map (Config.seqLift A B) := by
+    intro q hq
+    rw [hτdef, List.getElem?_append_left
+        (by rw [List.length_map, List.length_dropLast]; omega),
+      List.getElem?_map, List.getElem?_dropLast, if_pos (by omega)]
+  -- the `A`-point executes at the SAME time `M` in `τ` (lifted configs `D`, `D'`)
+  have hcmdP : P.cmdAt ⟨t, idx⟩ = some c := by
+    change (A.prog t ++ B.prog t)[idx]? = some c
+    rw [List.getElem?_append_left hidxA]; exact hcA
+  have hMτ : IsTimeOf (Config.run s_A P) τ ⟨t, idx⟩ M := by
+    refine ⟨htglue.1, ?_, j', Config.seqLift A B D, Config.seqLift A B D', hMeq, ?_, ?_, ?_, ?_⟩
+    · change idx < (A.prog t ++ B.prog t).length
+      rw [List.length_append]; omega
+    · rw [hτget j' (by omega), hDj]; rfl
+    · rw [hτget (j' + 1) (by omega), hDj1]; rfl
+    · change (Config.seqLift A B D).progOf t = (A.prog t ++ B.prog t).drop idx
+      rw [Config.seqLift_progOf, hDprog, List.drop_append_of_le_length (by omega)]
+    · change (Config.seqLift A B D').progOf t = (A.prog t ++ B.prog t).drop (idx + 1)
+      rw [Config.seqLift_progOf, hD'prog, List.drop_append_of_le_length (by omega)]
+  -- compute both generations and match the (front) recycle counts
+  have hgP : pointGen P τ ⟨t, idx⟩ = recycleCount b τ (M - 1) + 1 := by
+    simp only [pointGen, hcmdP, Option.bind_some, hbar, pointTime_eq_of_isTimeOf hMτ]
+  have hgA : pointGen A tA ⟨t, idx⟩ = recycleCount b tA (M - 1) + 1 := by
+    simp only [pointGen, hcA, Option.bind_some, hbar, pointTime_eq_of_isTimeOf hM]
+  rw [hgP, hgA]
+  congr 1
+  have h1 : recycleCount b τ (M - 1) = recycleCount b (tA.map (Config.seqLift A B)) (M - 1) :=
+    recycleCount_eq_of_getElem?_eq b (fun q hq => by
+      rw [hτget q (by omega), List.getElem?_map])
+  rw [h1, recycleCount_map_seqLift A B b tA (M - 1)]
+
+/-- **A `sync`'s generation is at most the trace's total recycle count.** In any successful trace
+`tP` of `T` from `run s T` ending in `done s'`, a `sync b` at `⟨t, idx⟩` executing at time `M` has
+generation `recycleCount b tP (M-1) + 1`, bounded by the total recycles of `b` over the whole run,
+`recycleCount b tP (|tP|-2)`: the sync's own recycle (`sync_time_recycles`) is at step `M ≤ |tP|-2`
+(a recycle is a `run → run` step, never the terminal `done`), counted in the total but not in the
+strict-prefix count. This generation separation keeps a prefix's `sync` generations strictly below
+those of the appended loop body in a glued trace. -/
+theorem sync_gen_le_total {T : CTA} {s s' : State} {tP : List Config}
+    (htP : IsSuccessfulTraceFrom (Config.run s T) tP)
+    (htPL : tP.getLast? = some (Config.done s'))
+    {t : ThreadId} {idx : Nat} {b : Barrier} {par : ℕ+}
+    (hcj : T.cmdAt ⟨t, idx⟩ = some (Cmd.sync b par)) :
+    pointGen T tP ⟨t, idx⟩ ≤ recycleCount b tP (tP.length - 2) := by
+  have hchain : List.IsChain CTAStep tP := htP.1.1.subtrace
+  have hidxL : idx < (T.prog t).length := (List.getElem?_eq_some_iff.mp hcj).1
+  obtain ⟨M, hM⟩ := exists_time_of_ends_done htP.1 htPL (η := ⟨t, idx⟩) hidxL
+  have hcmdC : (ProgPoint.mk t idx).cmd (Config.run s T) = some (Cmd.sync b par) := by
+    change (T.prog t)[idx]? = some (Cmd.sync b par); exact hcj
+  obtain ⟨C, C', hCm1, hCm, hrec⟩ := sync_time_recycles hM hcmdC
+  have hM1pos : 1 ≤ M := by obtain ⟨-, -, j', C0, C0', hMeq, -, -, -, -⟩ := hM; omega
+  have hM1lt : M < tP.length := (List.getElem?_eq_some_iff.mp hCm).1
+  have hM1ne : M ≠ tP.length - 1 := by
+    intro he
+    have hCmdone : tP[M]? = some (Config.done s') := by
+      rw [he, ← List.getLast?_eq_getElem?]; exact htPL
+    have hC'done : C' = Config.done s' := by
+      rw [hCm, Option.some.injEq] at hCmdone; exact hCmdone
+    rw [hC'done] at hrec
+    have hstep : CTAStep C (Config.done s') :=
+      chain_step hchain hCm1 (by rw [show M - 1 + 1 = M from by omega, hCm, hC'done])
+    rw [stepRecyclesBarrier_to_done b C s' hstep] at hrec
+    exact absurd hrec (by simp)
+  have hM1le : M ≤ tP.length - 2 := by omega
+  have hbar : Cmd.barrier? (Cmd.sync b par) = some b := rfl
+  have hg : pointGen T tP ⟨t, idx⟩ = recycleCount b tP (M - 1) + 1 := by
+    simp only [pointGen, hcj, Option.bind_some, hbar, pointTime_eq_of_isTimeOf hM]
+  have hsucc : recycleCount b tP M = recycleCount b tP (M - 1) + 1 := by
+    have hsr := recycleCount_succ_of_recycle b tP (p := M - 1) hCm1
+      (by rw [show M - 1 + 1 = M from by omega]; exact hCm) hrec
+    rwa [show M - 1 + 1 = M from by omega] at hsr
+  have hmono : recycleCount b tP M ≤ recycleCount b tP (tP.length - 2) :=
+    recycleCount_mono b tP hM1le
+  rw [hg]; omega
+
+/-- **A barrier op's generation is at most the trace's total recycle count plus one.** Any
+barrier op on `b` at `⟨t, idx⟩` of `T` in a done-ending trace `tP` has generation
+`≤ recycleCount b tP (|tP|-2) + 1`: it executes at some time `M ≤ |tP|-1`, so the recycles
+strictly before it are `≤` the total. (For `sync`s `sync_gen_le_total` sharpens this by one.) -/
+theorem barrierOp_gen_le_total {T : CTA} {s s' : State} {tP : List Config}
+    (htP : IsSuccessfulTraceFrom (Config.run s T) tP)
+    (htPL : tP.getLast? = some (Config.done s'))
+    {t : ThreadId} {idx : Nat} {c : Cmd} {b : Barrier} {par : ℕ+}
+    (hcj : T.cmdAt ⟨t, idx⟩ = some c) (hbr : Cmd.barrierRef c = some (b, par)) :
+    pointGen T tP ⟨t, idx⟩ ≤ recycleCount b tP (tP.length - 2) + 1 := by
+  have hbar : Cmd.barrier? c = some b := Cmd.barrier?_of_barrierRef hbr
+  have hidxL : idx < (T.prog t).length := (List.getElem?_eq_some_iff.mp hcj).1
+  obtain ⟨M, hM⟩ := exists_time_of_ends_done htP.1 htPL (η := ⟨t, idx⟩) hidxL
+  have hMlt : M < tP.length := by
+    obtain ⟨-, -, j', C0, C0', hMeq, -, hC0', -, -⟩ := hM
+    have := (List.getElem?_eq_some_iff.mp hC0').1; omega
+  have hg : pointGen T tP ⟨t, idx⟩ = recycleCount b tP (M - 1) + 1 := by
+    simp only [pointGen, hcj, Option.bind_some, hbar, pointTime_eq_of_isTimeOf hM]
+  rw [hg]
+  have : recycleCount b tP (M - 1) ≤ recycleCount b tP (tP.length - 2) :=
+    recycleCount_mono b tP (by omega)
+  omega
+
+/-- **A barrier op of a successful trace has positive generation.** In a done-ending trace every
+program point is executed, so a barrier op on `b` has `pointGen ≥ 1`. -/
+theorem one_le_pointGen_barrierOp {T : CTA} {s s' : State} {tP : List Config}
+    (htP : IsSuccessfulTraceFrom (Config.run s T) tP)
+    (htPL : tP.getLast? = some (Config.done s'))
+    {t : ThreadId} {idx : Nat} {c : Cmd} {b : Barrier} {par : ℕ+}
+    (hcj : T.cmdAt ⟨t, idx⟩ = some c) (hbr : Cmd.barrierRef c = some (b, par)) :
+    1 ≤ pointGen T tP ⟨t, idx⟩ := by
+  have hbar : Cmd.barrier? c = some b := Cmd.barrier?_of_barrierRef hbr
+  have hidxL : idx < (T.prog t).length := (List.getElem?_eq_some_iff.mp hcj).1
+  obtain ⟨M, hM⟩ := exists_time_of_ends_done htP.1 htPL (η := ⟨t, idx⟩) hidxL
+  have hg : pointGen T tP ⟨t, idx⟩ = recycleCount b tP (M - 1) + 1 := by
+    simp only [pointGen, hcj, Option.bind_some, hbar, pointTime_eq_of_isTimeOf hM]
+  omega
 
 /-- **Front-batch generation of an angelic epilogue trace.** When `tE` is the *structured*
 successful trace of `B := (I^k) ⨾ E` obtained from `seq_angelic_prefix` applied to the
@@ -5848,23 +6368,24 @@ The `(I^k)`-phase of `tE` *is* the lifted `t₁`, so `⟨t,j⟩` executes at the
 recycle count over its prefix is unchanged across the lift (`recycleCount_map_seqLift`). This is
 the "inverse-glue" fact the front-agreement residual (`n=1`, `p=1`) and the co-location epilogue
 case need: that `B`'s first-batch sync generations match a standalone batch run. -/
-theorem seq_front_pointGen {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List Config}
-    (ht₁ : IsSuccessfulTraceFrom (Config.run State.initial (I ^ I.loopK h)) t₁)
-    (ht₁L : t₁.getLast? = some (Config.done State.initial)) {E : CTA}
+theorem seq_front_pointGen {I : CTA} (h : I.ConsistentArrivalCounts) {s : State}
+    {t₁ : List Config}
+    (ht₁ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) t₁)
+    (ht₁L : t₁.getLast? = some (Config.done s)) {E : CTA}
     (hids : (I ^ I.loopK h).ids = E.ids) {tE : List Config}
-    (htE : IsSuccessfulTraceFrom (Config.run State.initial ((I ^ I.loopK h).seq E hids)) tE)
+    (htE : IsSuccessfulTraceFrom (Config.run s ((I ^ I.loopK h).seq E hids)) tE)
     (htEpre : t₁.dropLast.map (Config.seqLift (I ^ I.loopK h) E) <+: tE)
     {t : ThreadId} {j : Nat} {c : Cmd} {b : Barrier} {par : ℕ+} {M₁ : Nat}
     (hjL : j < ((I ^ I.loopK h).prog t).length)
     (hcj : ((I ^ I.loopK h).prog t)[j]? = some c) (hbr : Cmd.barrierRef c = some (b, par))
-    (hM₁ : IsTimeOf (Config.run State.initial (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁) :
+    (hM₁ : IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁) :
     pointGen ((I ^ I.loopK h).seq E hids) tE ⟨t, j⟩ = recycleCount b t₁ (M₁ - 1) + 1 := by
   set A := I ^ I.loopK h with hA
   set B := A.seq E hids with hB
   have hbar : Cmd.barrier? c = some b := Cmd.barrier?_of_barrierRef hbr
   -- chain/last facts about `t₁`
   have hchain1 : List.IsChain CTAStep t₁ := ht₁.1.1.subtrace
-  have hhead1 : t₁.head? = some (Config.run State.initial A) := ht₁.1.2
+  have hhead1 : t₁.head? = some (Config.run s A) := ht₁.1.2
   have h1ne : t₁ ≠ [] := fun hd => by rw [hd] at hhead1; simp at hhead1
   have h12 : 2 ≤ t₁.length := by
     rcases t₁ with _ | ⟨x, _ | ⟨y, l⟩⟩
@@ -5911,7 +6432,7 @@ theorem seq_front_pointGen {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : Lis
   have hcmdB : B.cmdAt ⟨t, j⟩ = some c := by
     change (A.prog t ++ E.prog t)[j]? = some c
     rw [List.getElem?_append_left hjL]; exact hcj
-  have hME : IsTimeOf (Config.run State.initial B) tE ⟨t, j⟩ M₁ := by
+  have hME : IsTimeOf (Config.run s B) tE ⟨t, j⟩ M₁ := by
     refine ⟨htE.1, ?_, j', Config.seqLift A E D, Config.seqLift A E D', hMeq, ?_, ?_, ?_, ?_⟩
     · change j < (B.prog t).length
       change j < (A.prog t ++ E.prog t).length
@@ -5951,16 +6472,18 @@ is the complete lifted `t₁`, via `htEpre`), a point `⟨t, e⟩` *strictly pas
 `b` has generation at least `δ + 1`.  The point executes only after the whole `(I^k)`-phase has
 run (its predecessor index `ME-1 ≥ t₁.length-2`), by which time `b` has already recycled exactly
 `δ = recycleCount b t₁ (t₁.length-2)` times; the generation is that count `+ 1`. -/
-theorem seq_epilogue_pointGen_lower {I : CTA} (h : I.ConsistentArrivalCounts) {t₁ : List Config}
-    (ht₁ : IsSuccessfulTraceFrom (Config.run State.initial (I ^ I.loopK h)) t₁)
-    (ht₁L : t₁.getLast? = some (Config.done State.initial)) {E : CTA}
+theorem seq_epilogue_pointGen_lower {I : CTA} (h : I.ConsistentArrivalCounts) {s : State}
+    {t₁ : List Config}
+    (ht₁ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) t₁)
+    (ht₁L : t₁.getLast? = some (Config.done s)) {E : CTA}
     (hids : (I ^ I.loopK h).ids = E.ids) {tE : List Config}
-    (htE : IsSuccessfulTraceFrom (Config.run State.initial ((I ^ I.loopK h).seq E hids)) tE)
+    (htE : IsSuccessfulTraceFrom (Config.run s ((I ^ I.loopK h).seq E hids)) tE)
     (htEpre : t₁.dropLast.map (Config.seqLift (I ^ I.loopK h) E) <+: tE)
     {t : ThreadId} {e : Nat} {c : Cmd} {b : Barrier} {par : ℕ+}
     (heL : ((I ^ I.loopK h).prog t).length ≤ e)
     (hcE : ((I ^ I.loopK h).seq E hids).cmdAt ⟨t, e⟩ = some c)
-    (hbr : Cmd.barrierRef c = some (b, par)) (hbA : b ∈ (I ^ I.loopK h).barrierSet) :
+    (hbr : Cmd.barrierRef c = some (b, par)) (hbA : b ∈ (I ^ I.loopK h).barrierSet)
+    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false) :
     I.loopK h * I.arrivers b / I.arrivalCount h b + 1
       ≤ pointGen ((I ^ I.loopK h).seq E hids) tE ⟨t, e⟩ := by
   set A := I ^ I.loopK h with hA
@@ -5968,7 +6491,7 @@ theorem seq_epilogue_pointGen_lower {I : CTA} (h : I.ConsistentArrivalCounts) {t
   set δ := I.loopK h * I.arrivers b / I.arrivalCount h b with hδdef
   have hbar : Cmd.barrier? c = some b := Cmd.barrier?_of_barrierRef hbr
   have hchain1 : List.IsChain CTAStep t₁ := ht₁.1.1.subtrace
-  have hhead1 : t₁.head? = some (Config.run State.initial A) := ht₁.1.2
+  have hhead1 : t₁.head? = some (Config.run s A) := ht₁.1.2
   -- `t₁` has length ≥ 2 (starts `run`, ends `done`)
   have h12 : 2 ≤ t₁.length := by
     rcases t₁ with _ | ⟨x, _ | ⟨y, l⟩⟩
@@ -5980,7 +6503,7 @@ theorem seq_epilogue_pointGen_lower {I : CTA} (h : I.ConsistentArrivalCounts) {t
   -- the front `(I^k)`-phase recycles `b` exactly `δ` times
   have hΔ : recycleCount b t₁ (t₁.length - 2) = δ := by
     rw [← recycleCount_done_last hchain1 ht₁L h12]
-    exact Config.WellSynchronized.pow_barriers_advance_count h WF_initial rfl ht₁ hbA
+    exact Config.WellSynchronized.pow_barriers_advance_count h hwf_s (hfull b) ht₁ hbA
   -- length facts about `B`
   have heB : e < (B.prog t).length := (List.getElem?_eq_some_iff.mp hcE).1
   have hBlen : (B.prog t).length = (A.prog t).length + (E.prog t).length := by
@@ -6033,6 +6556,223 @@ theorem seq_epilogue_pointGen_lower {I : CTA} (h : I.ConsistentArrivalCounts) {t
   rw [hg]
   omega
 
+/-- **Program order is happens-before.** Consecutive same-thread program points are joined by the
+program-order edges of `initRelation`, so `⟨t, i⟩` happens-before `⟨t, j⟩` whenever
+`i ≤ j < |T.prog t|`. (Used to lift the `Pre`↔loop seam edge to a multi-step path in the prefix
+monotonicity.) -/
+theorem happensBefore_progOrder {T : CTA} {τ : List Config} {t : ThreadId} {i j : Nat}
+    (hij : i ≤ j) (hj : j < (T.prog t).length) :
+    happensBefore T τ ⟨t, i⟩ ⟨t, j⟩ := by
+  induction j, hij using Nat.le_induction with
+  | base => exact Relation.ReflTransGen.refl
+  | succ j hij ih =>
+    have hjlt : j < (T.prog t).length := by omega
+    refine (ih hjlt).tail ?_
+    rw [mem_initRelation_iff]
+    exact Or.inl ⟨(mem_progPoints_iff T ⟨t, j⟩).mpr ⟨mem_ids_of_idx_lt T hjlt, hjlt⟩, hj, rfl⟩
+
+/-- **No happens-before edge runs from `B` back into `A`, given an explicit `A`-completion.** The
+trace-parameterized analogue of `seq_no_happensBefore_B_to_A_impl`: instead of `WS(A)` (which we
+lack for a non-well-synchronized prefix `A = Pre ⨾ (I^k)^2`), we supply a successful `A`-trace `tA`
+(from `initial`, ending `done s_mid`) directly. The angelic schedule that runs `A` fully then `B`
+is `glue(tA, B-completion)`, where the `B`-completion comes from `WS(A ⨾ B)` via `seq_angelic_tail`.
+In it every `A`-instruction runs strictly before every `B`-instruction, so soundness
+(`happensBefore_sound`) forbids any happens-before pair from a `B`-point to an `A`-point. -/
+theorem glue_no_happensBefore_B_to_A {A B : CTA} (hids : A.ids = B.ids)
+    (hAB : (A.seq B hids).WellSynchronized)
+    {tA : List Config} (htA : IsSuccessfulTraceFrom (Config.run State.initial A) tA)
+    {s_mid : State} (hAlast : tA.getLast? = some (Config.done s_mid))
+    {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial (A.seq B hids)) τ) :
+    ¬ ∃ s d : ProgPoint,
+        happensBefore (A.seq B hids) τ s d ∧
+        ((A.prog s.thread).length ≤ s.idx ∧
+          s.idx < (A.prog s.thread).length + (B.prog s.thread).length) ∧
+        d.idx < (A.prog d.thread).length := by
+  rintro ⟨s, d, hR, ⟨hsB1, hsB2⟩, hdA⟩
+  have hC0prog : ∀ i, (Config.run State.initial (A.seq B hids)).progOf i
+      = A.prog i ++ B.prog i := fun _ => rfl
+  have hsound := happensBefore_sound hτ hAB hR
+  -- angelic schedule: run `A` fully (`tA`), then complete `B` from `s_mid`, glued
+  obtain ⟨tB', htB'⟩ := CTA.WellSynchronized.seq_angelic_tail hids hAB htA hAlast
+  obtain ⟨ht'succ, -, -⟩ := glue_trace hids htA hAlast htB'
+  set P := tA.dropLast.map (Config.seqLift A B) with hPdef
+  set t' := tA.dropLast.map (Config.seqLift A B) ++ tB'.tail with ht'def
+  have hrest : P ++ tB'.tail = t' := rfl
+  obtain ⟨sdone, htlast⟩ := ht'succ.2
+  have ht'complete : IsCompleteTraceFrom (Config.run State.initial (A.seq B hids)) t' := ht'succ.1
+  have ht'chain : List.IsChain CTAStep t' := ht'complete.1.subtrace
+  obtain ⟨n₂, htd⟩ : ∃ n, IsTimeOf (Config.run State.initial (A.seq B hids)) t' d n :=
+    exists_time_of_ends_done (η := d) ht'complete htlast
+      (by rw [hC0prog, List.length_append]; omega)
+  obtain ⟨n₁, hts⟩ : ∃ n, IsTimeOf (Config.run State.initial (A.seq B hids)) t' s n :=
+    exists_time_of_ends_done (η := s) ht'complete htlast
+      (by rw [hC0prog, List.length_append]; omega)
+  -- `P` (the `A`-phase) is nonempty: `tA` has length ≥ 2
+  have hthead : tA.head? = some (Config.run State.initial A) := htA.1.2
+  have htlen2 : 2 ≤ tA.length := by
+    rcases tA with _ | ⟨c0, _ | ⟨c1, tr⟩⟩
+    · simp at hthead
+    · simp only [List.head?_cons, Option.some.injEq] at hthead
+      simp only [List.getLast?_singleton, Option.some.injEq] at hAlast
+      rw [hthead] at hAlast; simp at hAlast
+    · simp only [List.length_cons]; omega
+  have hPlen : P.length = tA.length - 1 := by rw [hPdef, List.length_map, List.length_dropLast]
+  have hPpos : 0 < P.length := by rw [hPlen]; omega
+  have hPne : P ≠ [] := List.ne_nil_of_length_pos hPpos
+  have hdropne : tA.dropLast ≠ [] := fun hd => hPne (by rw [hPdef, hd, List.map_nil])
+  obtain ⟨Cstar, hCstar⟩ : ∃ C, P.getLast? = some C := by
+    cases hPl : P.getLast? with
+    | none => rw [List.getLast?_eq_none_iff] at hPl; exact absurd hPl hPne
+    | some C => exact ⟨C, rfl⟩
+  have hXempty : ∀ i, (tA.dropLast.getLast hdropne).progOf i = [] := fun i =>
+    progOf_penultimate_done htA.1.1.subtrace hAlast (List.getLast?_eq_some_getLast hdropne) i
+  have hCstarprog : ∀ i, Cstar.progOf i = B.prog i := by
+    intro i
+    have hmap : P.getLast? = (tA.dropLast.getLast?).map (Config.seqLift A B) := by
+      rw [hPdef, List.getLast?_map]
+    rw [List.getLast?_eq_some_getLast hdropne, Option.map_some, hCstar, Option.some.injEq] at hmap
+    rw [hmap, Config.seqLift_progOf, hXempty i, List.nil_append]
+  have hp : P.length - 1 < P.length := by omega
+  have hCstaridx : t'[P.length - 1]? = some Cstar := by
+    rw [← hrest, List.getElem?_append_left hp, ← List.getLast?_eq_getElem?]; exact hCstar
+  have hPinv : ∀ q (C : Config), q < P.length → t'[q]? = some C →
+      ∀ i, (B.prog i).length ≤ (C.progOf i).length := by
+    intro q C hq hCq i
+    rw [← hrest, List.getElem?_append_left hq, hPdef, List.getElem?_map] at hCq
+    obtain ⟨X', _, hCeq⟩ := Option.map_eq_some_iff.mp hCq
+    rw [← hCeq, Config.seqLift_progOf, List.length_append]; omega
+  have hTinv : ∀ q (C : Config), P.length - 1 ≤ q → t'[q]? = some C →
+      ∀ i, (C.progOf i).length ≤ (B.prog i).length := by
+    intro q C hq hCq i
+    have hsuf := progOf_suffix_index_le ht'chain i hCstaridx hq hCq
+    have hle := suffix_length_le hsuf
+    rwa [hCstarprog i] at hle
+  obtain ⟨-, -, jd, Cd, _Cd', hn₂eq, hCdj, _, hCdeq, _⟩ := id htd
+  have hCdlen : (Cd.progOf d.thread).length
+      = (A.prog d.thread).length + (B.prog d.thread).length - d.idx := by
+    rw [hCdeq, hC0prog, List.length_drop, List.length_append]
+  have hjd : jd < P.length - 1 := by
+    by_contra hcon
+    rw [not_lt] at hcon
+    have h := hTinv jd Cd hcon hCdj d.thread
+    rw [hCdlen] at h; omega
+  obtain ⟨-, -, js, _Cs, Cs', hn₁eq, _, hCsj1, _, hCs'eq⟩ := id hts
+  have hCs'len : (Cs'.progOf s.thread).length
+      = (A.prog s.thread).length + (B.prog s.thread).length - (s.idx + 1) := by
+    rw [hCs'eq, hC0prog, List.length_drop, List.length_append]
+  have hjs : P.length ≤ js + 1 := by
+    by_contra hcon
+    rw [not_le] at hcon
+    have h := hPinv (js + 1) Cs' hcon hCsj1 s.thread
+    rw [hCs'len] at h; omega
+  have hlt : n₂ < n₁ := by omega
+  have hle : n₁ ≤ n₂ := hsound t' ht'complete n₁ n₂ hts htd
+  omega
+
+/-- **Prefix-loop batch data.** From the prefix-loop hypotheses `WS(Pre)`, `WS(Pre ⨾ I^k)`,
+`WS(Pre ⨾ I^k ⨾ E)`, construct the data the from-`s_P` replay bundle needs: the post-prefix
+done-state `s_P`, its done-state properties (`isFull = false`, `WF` for any body), a restoring
+single-batch trace `t₁` of `I^k` from `s_P` (`WS(Pre ⨾ I^k)` makes the body terminate on its own,
+and `pow_done_state_restored` returns it to `s_P`), and the structured epilogue trace `tE` of
+`I^k ⨾ E` from `s_P` whose `I^k`-phase is exactly the lift of `t₁` (glued from `t₁` and the
+`E`-completion of `WS((Pre ⨾ I^k) ⨾ E)`). This is the non-initial-start analogue of the
+`exists_successfulTrace`/`seq_angelic_prefix` opening of `loop_epilogue_replay_bundle`. -/
+theorem loop_prefix_batch_data {I : CTA} (h : I.ConsistentArrivalCounts) {k : Nat}
+    (hk : k = I.loopK h) {Pre E : CTA} (hpre : Pre.ids = (I ^ k).ids) (hids : (I ^ k).ids = E.ids)
+    (hPre : Pre.WellSynchronized) (hPreBody : (Pre.seq (I ^ k) hpre).WellSynchronized)
+    (hPreBatchE : (CTA.loopProgram Pre (I ^ k) E hpre hids 1).WellSynchronized) :
+    ∃ s_P, (∀ b, (s_P.B b).isFull = false) ∧ (∀ (T : CTA), (Config.run s_P T).WF) ∧
+      ∃ tP, IsSuccessfulTraceFrom (Config.run State.initial Pre) tP ∧
+        tP.getLast? = some (Config.done s_P) ∧
+      ∃ t₁, IsSuccessfulTraceFrom (Config.run s_P (I ^ k)) t₁ ∧
+        t₁.getLast? = some (Config.done s_P) ∧
+        ∃ tE, IsSuccessfulTraceFrom (Config.run s_P ((I ^ k).seq E hids)) tE ∧
+          t₁.dropLast.map (Config.seqLift (I ^ k) E) <+: tE := by
+  subst hk
+  -- (1) a `Pre`-trace from `initial`, ending in `done s_P`, and `s_P`'s done-state properties
+  obtain ⟨tP, htP⟩ := hPre.exists_successfulTrace
+  obtain ⟨s_P, htPL⟩ := htP.2
+  obtain ⟨hsE, hsync, hfull, hwf_any⟩ := done_state_of_successfulTrace htP htPL
+  -- (2) the restoring single-batch trace `t₁` of `I^k` from `s_P`
+  obtain ⟨t₁, ht₁⟩ := CTA.WellSynchronized.seq_angelic_tail hpre hPreBody htP htPL
+  obtain ⟨s₁, ht₁L⟩ := ht₁.2
+  have hs₁ : s₁ = s_P :=
+    pow_done_state_restored h (hwf_any (I ^ I.loopK h)) hfull hsE hsync ht₁ ht₁L
+  rw [hs₁] at ht₁L
+  refine ⟨s_P, hfull, hwf_any, tP, htP, htPL, t₁, ht₁, ht₁L, ?_⟩
+  -- (3) glue `tP` onto `t₁` to get a `Pre ⨾ I^k` trace ending `done s_P`
+  obtain ⟨htPk, htPklast0, -⟩ := glue_trace hpre htP htPL ht₁
+  have htPklast : (tP.dropLast.map (Config.seqLift Pre (I ^ I.loopK h)) ++ t₁.tail).getLast?
+      = some (Config.done s_P) := htPklast0.trans ht₁L
+  -- (4) view `WS(Pre ⨾ I^k ⨾ E)` as `WS((Pre ⨾ I^k) ⨾ E)` and complete `E` from `s_P`
+  have hids2 : (Pre.seq (I ^ I.loopK h) hpre).ids = E.ids := hpre.trans hids
+  have hreassoc : CTA.loopProgram Pre (I ^ I.loopK h) E hpre hids 1
+      = (Pre.seq (I ^ I.loopK h) hpre).seq E hids2 := by
+    apply CTA.ext
+    · simp only [CTA.loopProgram_ids, CTA.seq]
+    · funext t
+      rw [CTA.loopProgram_prog]
+      change Pre.prog t ++ ((I ^ I.loopK h) ^ 1).prog t ++ E.prog t
+        = Pre.prog t ++ (I ^ I.loopK h).prog t ++ E.prog t
+      rw [CTA.pow_one_prog]
+  rw [hreassoc] at hPreBatchE
+  obtain ⟨tE_E, htE_E⟩ :=
+    CTA.WellSynchronized.seq_angelic_tail hids2 hPreBatchE htPk htPklast
+  -- (5) glue `t₁` (the `I^k`-phase) onto `tE_E` (the `E`-phase) to get `tE`
+  obtain ⟨htE, -, -⟩ := glue_trace hids ht₁ ht₁L htE_E
+  exact ⟨_, htE, List.prefix_append _ _⟩
+
+/-- **Prefix-loop reference data.** From `WS(Pre ⨾ (I^k)^2 ⨾ E_ref)` and the prefix data
+(`s_P`, `tP`, the restoring batch `t₁`), produce (a) a structured `(I^k) ⨾ E_ref`-from-`s_P` trace
+`tER` whose `(I^k)`-phase is the lift of `t₁` — exactly what the from-`s_P` bundle needs to build a
+`(I^k)^2 ⨾ E_ref` replay with controlled front generations — and (b) a `Pre ⨾ (I^k)^2`-trace `tAR`
+from `initial` ending `done s_P`, the explicit `A`-completion the front-case confinement
+(`glue_no_happensBefore_B_to_A`, `A := Pre ⨾ (I^k)^2`) consumes. Both are built by the same
+glue/`seq_angelic_tail` recipe as `loop_prefix_batch_data`'s `tE`, but with two body batches. -/
+theorem loop_prefix_ref_data {I : CTA} (h : I.ConsistentArrivalCounts) {k : Nat}
+    (hk : k = I.loopK h) {Pre E_ref : CTA} (hpre : Pre.ids = (I ^ k).ids)
+    (hidsRef : (I ^ k).ids = E_ref.ids)
+    {s_P : State} (hfull : ∀ b, (s_P.B b).isFull = false)
+    (hwf_any : ∀ (T : CTA), (Config.run s_P T).WF)
+    {tP : List Config} (htP : IsSuccessfulTraceFrom (Config.run State.initial Pre) tP)
+    (htPL : tP.getLast? = some (Config.done s_P))
+    {t₁ : List Config} (ht₁ : IsSuccessfulTraceFrom (Config.run s_P (I ^ k)) t₁)
+    (ht₁L : t₁.getLast? = some (Config.done s_P))
+    (hPre2BatchRef : (CTA.loopProgram Pre (I ^ k) E_ref hpre hidsRef 2).WellSynchronized) :
+    (∃ tER, IsSuccessfulTraceFrom (Config.run s_P ((I ^ k).seq E_ref hidsRef)) tER ∧
+        t₁.dropLast.map (Config.seqLift (I ^ k) E_ref) <+: tER) ∧
+    (∃ tAR, IsSuccessfulTraceFrom (Config.run State.initial
+        (Pre.seq ((I ^ k) ^ 2) (hpre.trans (CTA.pow_ids (I ^ k) 2).symm))) tAR ∧
+        tAR.getLast? = some (Config.done s_P)) := by
+  subst hk
+  set A := I ^ I.loopK h with hA
+  have hpre2 : Pre.ids = (A ^ 2).ids := hpre.trans (CTA.pow_ids A 2).symm
+  -- (1) a `(I^k)^2`-replay from `s_P` (ends `done s_P`)
+  obtain ⟨τ2P, hτ2P, hτ2PL, -⟩ :=
+    pow_replay_recycle_structure h ht₁ ht₁L (hwf_any A) hfull 2
+  -- (2) glue `tP` onto it → a `Pre ⨾ (I^k)^2`-trace `tAR` ending `done s_P`
+  obtain ⟨htAR, htARlast0, -⟩ := glue_trace hpre2 htP htPL hτ2P
+  have htARlast : (tP.dropLast.map (Config.seqLift Pre (A ^ 2)) ++ τ2P.tail).getLast?
+      = some (Config.done s_P) := htARlast0.trans hτ2PL
+  -- (3) view `WS(Pre ⨾ (I^k)^2 ⨾ E_ref)` as `WS((Pre ⨾ (I^k)^2) ⨾ E_ref)`, complete `E_ref`
+  have hids2 : (Pre.seq (A ^ 2) hpre2).ids = E_ref.ids := hpre.trans hidsRef
+  have hreassoc : CTA.loopProgram Pre A E_ref hpre hidsRef 2
+      = (Pre.seq (A ^ 2) hpre2).seq E_ref hids2 := by
+    apply CTA.ext
+    · simp only [CTA.loopProgram_ids, CTA.seq]
+    · funext t
+      rw [CTA.loopProgram_prog]
+      change Pre.prog t ++ (A ^ 2).prog t ++ E_ref.prog t
+        = Pre.prog t ++ (A ^ 2).prog t ++ E_ref.prog t
+      rfl
+  rw [hreassoc] at hPre2BatchRef
+  obtain ⟨tER_E, htER_E⟩ :=
+    CTA.WellSynchronized.seq_angelic_tail hids2 hPre2BatchRef htAR htARlast
+  -- (4) glue `t₁` (the `I^k`-phase) onto `tER_E` (the `E_ref`-phase) → `tER`
+  obtain ⟨htER, -, -⟩ := glue_trace hidsRef ht₁ ht₁L htER_E
+  exact ⟨⟨_, htER, List.prefix_append _ _⟩, ⟨_, htAR, htARlast⟩⟩
+
 /-- **Epilogue replay/generation bundle** (the analogue of `last_batches_replay_bundle` for a
 program-with-epilogue; proof deferred). By `pow_succ_seq_assoc` the full program
 `P := (I^k)^(n+1) ⨾ E` is the one-batch-shorter `Pn := (I^k)^n ⨾ E` with a single batch `I^k`
@@ -6053,10 +6793,13 @@ and of the first two batches `(I^k)^2`, plus the facts the inductive step's case
 theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
     (h : I.ConsistentArrivalCounts) {k : Nat} (hk : k = I.loopK h) {E : CTA}
     (hids : (I ^ k).ids = E.ids) {n : Nat} (hn : 1 ≤ n)
-    (hbatch : (I ^ k).WellSynchronized) (h2batch : ((I ^ k) ^ 2).WellSynchronized)
-    (hbatchE : ((I ^ k).seq E hids).WellSynchronized)
-    (hprev : (((I ^ k) ^ n).seq E ((CTA.pow_ids (I ^ k) n).trans hids)).WellSynchronized) :
-    ∃ τ, IsSuccessfulTraceFrom (Config.run State.initial
+    {s : State} {t₁ : List Config}
+    (ht₁ : IsSuccessfulTraceFrom (Config.run s (I ^ k)) t₁)
+    (ht₁L : t₁.getLast? = some (Config.done s)) {tE : List Config}
+    (htE : IsSuccessfulTraceFrom (Config.run s ((I ^ k).seq E hids)) tE)
+    (htEpre : t₁.dropLast.map (Config.seqLift (I ^ k) E) <+: tE)
+    (hfull : ∀ b, (s.B b).isFull = false) (hwf_any : ∀ (T : CTA), (Config.run s T).WF) :
+    ∃ τ, IsSuccessfulTraceFrom (Config.run s
         (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids))) τ ∧
       -- (co-location) a flagged pair is front-local or fully shiftable
       (∀ (c1 c2 : ProgPoint) (bb : Barrier) (nn2 : ℕ+),
@@ -6072,7 +6815,7 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
               c2.idx < 2 * ((I ^ k).prog c2.thread).length) ∨
             (((I ^ k).prog c1.thread).length ≤ c1.idx ∧
               ((I ^ k).prog c2.thread).length < c2.idx)) ∧
-      ∃ τn, IsSuccessfulTraceFrom (Config.run State.initial
+      ∃ τn, IsSuccessfulTraceFrom (Config.run s
           (((I ^ k) ^ n).seq E ((CTA.pow_ids (I ^ k) n).trans hids))) τn ∧
         -- (uniform shift)
         (∀ (η : ProgPoint) (c : Cmd) (b : Barrier) (par : ℕ+),
@@ -6088,7 +6831,7 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
             happensBefore (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ
               ⟨a.thread, a.idx + ((I ^ k).prog a.thread).length⟩
               ⟨b.thread, b.idx + ((I ^ k).prog b.thread).length⟩) ∧
-        ∃ τ2, IsSuccessfulTraceFrom (Config.run State.initial ((I ^ k) ^ 2)) τ2 ∧
+        ∃ τ2, IsSuccessfulTraceFrom (Config.run s ((I ^ k) ^ 2)) τ2 ∧
           -- (front agreement) generations on the first two batches agree with `(I^k)^2`
           (∀ η : ProgPoint, η.idx < 2 * ((I ^ k).prog η.thread).length →
               pointGen (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ η
@@ -6098,20 +6841,57 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
               b.idx < 2 * ((I ^ k).prog b.thread).length →
               happensBefore ((I ^ k) ^ 2) τ2 a b →
               happensBefore (((I ^ k) ^ (n + 1)).seq E
-                ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ a b) := by
+                ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ a b) ∧
+          -- (generation bounds) front/sync upper + ≥2-batch lower, `∀` barrier; the prefix layer
+          -- transports these across the `Pre` glue (each gains `recycleCount b tP (|tP|-2)`).
+          (∀ (b : Barrier),
+              (∀ (η : ProgPoint) (c : Cmd) (par : ℕ+),
+                  (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)).cmdAt η
+                      = some c → Cmd.barrierRef c = some (b, par) →
+                  η.idx < 2 * ((I ^ k).prog η.thread).length →
+                  pointGen (((I ^ k) ^ (n + 1)).seq E
+                      ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ η
+                    ≤ 2 * (k * I.arrivers b / I.arrivalCount h b) + 1) ∧
+              (∀ (η : ProgPoint) (par : ℕ+),
+                  (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)).cmdAt η
+                      = some (Cmd.sync b par) →
+                  η.idx < ((I ^ k).prog η.thread).length →
+                  pointGen (((I ^ k) ^ (n + 1)).seq E
+                      ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ η
+                    ≤ k * I.arrivers b / I.arrivalCount h b) ∧
+              (b ∈ I.barriers → ∀ (η : ProgPoint) (c : Cmd) (par : ℕ+),
+                  (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)).cmdAt η
+                      = some c → Cmd.barrierRef c = some (b, par) →
+                  2 * ((I ^ k).prog η.thread).length ≤ η.idx →
+                  2 * (k * I.arrivers b / I.arrivalCount h b) + 1
+                    ≤ pointGen (((I ^ k) ^ (n + 1)).seq E
+                        ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ η)) ∧
+          -- (front closed form) front-2-batch barrier generations, independent of the epilogue `E`
+          (∀ (t : ThreadId) (j p : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (M₁ : Nat),
+              j < ((I ^ k).prog t).length → p < 2 → ((I ^ k).prog t)[j]? = some c →
+              Cmd.barrierRef c = some (b, par) →
+              IsTimeOf (Config.run s (I ^ k)) t₁ ⟨t, j⟩ M₁ →
+              pointGen (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ
+                  ⟨t, p * ((I ^ k).prog t).length + j⟩
+                = recycleCount b t₁ (M₁ - 1) + 1 + p * (k * I.arrivers b / I.arrivalCount h b)) ∧
+          -- (first-`n`-batch agreement) generations on the first `n` batches agree between the
+          -- `(n+1)`- and `n`-batch replays (both equal the `E`-independent closed form)
+          (∀ (t : ThreadId) (e : Nat) (c : Cmd) (b : Barrier) (par : ℕ+),
+              e < n * ((I ^ k).prog t).length →
+              (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)).cmdAt ⟨t, e⟩
+                = some c → Cmd.barrierRef c = some (b, par) →
+              pointGen (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ
+                  ⟨t, e⟩
+                = pointGen (((I ^ k) ^ n).seq E ((CTA.pow_ids (I ^ k) n).trans hids)) τn
+                    ⟨t, e⟩) := by
   subst hk
-  -- single restoring batch trace
-  obtain ⟨t₁, ht₁⟩ := hbatch.exists_successfulTrace
-  obtain ⟨sd₁, ht₁L⟩ := ht₁.2
-  have hinit : sd₁ = State.initial := pow_done_state_initial h ht₁ ht₁L
-  rw [hinit] at ht₁L
-  -- E-side trace of one batch + epilogue, structured so its `(I^k)`-phase IS the lifted `t₁`
-  obtain ⟨tE, htE, htEpre⟩ :=
-    CTA.WellSynchronized.seq_angelic_prefix hids hbatchE t₁ ht₁
-  -- replays of `n`, `n-1`, `2` batches built from the *same* `t₁`
-  obtain ⟨τn0, hτn0, hτn0L, hrecn0⟩ := pow_replay_recycle_structure h ht₁ ht₁L n
-  obtain ⟨τnm0, hτnm0, hτnm0L, hrecnm0⟩ := pow_replay_recycle_structure h ht₁ ht₁L (n - 1)
-  obtain ⟨τ2, hτ2, hτ2L, hrec2⟩ := pow_replay_recycle_structure h ht₁ ht₁L 2
+  -- replays of `n`, `n-1`, `2` batches built from the input batch trace `t₁`, anchored at `s`
+  obtain ⟨τn0, hτn0, hτn0L, hrecn0⟩ :=
+    pow_replay_recycle_structure h ht₁ ht₁L (hwf_any (I ^ I.loopK h)) hfull n
+  obtain ⟨τnm0, hτnm0, hτnm0L, hrecnm0⟩ :=
+    pow_replay_recycle_structure h ht₁ ht₁L (hwf_any (I ^ I.loopK h)) hfull (n - 1)
+  obtain ⟨τ2, hτ2, hτ2L, hrec2⟩ :=
+    pow_replay_recycle_structure h ht₁ ht₁L (hwf_any (I ^ I.loopK h)) hfull 2
   -- the ids equalities for the two gluings
   have hidsE : ((I ^ I.loopK h) ^ n).ids = ((I ^ I.loopK h).seq E hids).ids := by
     simp only [CTA.seq, CTA.pow_ids]
@@ -6124,7 +6904,7 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
   have hPeq : ((I ^ I.loopK h) ^ n).seq ((I ^ I.loopK h).seq E hids) hidsE
       = ((I ^ I.loopK h) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids) :=
     (CTA.pow_seq_assoc_last I (I.loopK h) n hids).symm
-  have hτ : IsSuccessfulTraceFrom (Config.run State.initial
+  have hτ : IsSuccessfulTraceFrom (Config.run s
       (((I ^ I.loopK h) ^ (n + 1)).seq E
         ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids))) τ := by
     rw [← hPeq]; exact hglueτ
@@ -6143,17 +6923,19 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
         = ((I ^ I.loopK h) ^ n).prog t ++ E.prog t
       rw [← List.append_assoc, ← CTA.pow_one_prog (I ^ I.loopK h) t,
         ← CTA.pow_add_prog (I ^ I.loopK h) (n - 1) 1, show (n - 1) + 1 = n from by omega]
-  have hτn : IsSuccessfulTraceFrom (Config.run State.initial
+  have hτn : IsSuccessfulTraceFrom (Config.run s
       (((I ^ I.loopK h) ^ n).seq E ((CTA.pow_ids (I ^ I.loopK h) n).trans hids))) τn := by
     rw [← hPneq]; exact hglueτn
   -- generation structure of both glued traces (prefix + epilogue cases)
-  obtain ⟨gτpre, gτepi⟩ := glue_replay_gen h ht₁ ht₁L hids hτn0 hτn0L hrecn0 htE hidsE
-  obtain ⟨gτnpre, gτnepi⟩ := glue_replay_gen h ht₁ ht₁L hids hτnm0 hτnm0L hrecnm0 htE hidsEm
+  obtain ⟨gτpre, gτepi⟩ :=
+    glue_replay_gen h ht₁ ht₁L (hwf_any (I ^ I.loopK h)) hfull hids hτn0 hτn0L hrecn0 htE hidsE
+  obtain ⟨gτnpre, gτnepi⟩ :=
+    glue_replay_gen h ht₁ ht₁L (hwf_any (I ^ I.loopK h)) hfull hids hτnm0 hτnm0L hrecnm0 htE hidsEm
   -- generation of a barrier copy in the pure two-batch replay `τ2` (a `keygen` for `(I^k)^2`)
   have gτ2 : ∀ (t : ThreadId) (j p : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (M₁ : Nat),
       j < ((I ^ I.loopK h).prog t).length → p < 2 →
       ((I ^ I.loopK h).prog t)[j]? = some c → Cmd.barrierRef c = some (b, par) →
-      IsTimeOf (Config.run State.initial (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁ →
+      IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁ →
       pointGen ((I ^ I.loopK h) ^ 2) τ2 ⟨t, p * ((I ^ I.loopK h).prog t).length + j⟩
         = recycleCount b t₁ (M₁ - 1) + 1
           + p * (I.loopK h * I.arrivers b / I.arrivalCount h b) := by
@@ -6384,7 +7166,323 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
             = pointGen (((I ^ I.loopK h) ^ 1).seq ((I ^ I.loopK h).seq E hids) hidsE) τ
                 ⟨t, 1 * List.length ((I ^ I.loopK h).prog t) + j⟩ from by rw [hPeq]]
           rw [hgp, seq_front_pointGen h ht₁ ht₁L hids htE htEpre hjL hcj hcbar hM₁]
-  refine ⟨τ, hτ, ?_, τn, hτn, hshift, ?_, τ2, hτ2, hfrontgen, ?_⟩
+  -- **(generation bounds), factored out** `∀ b` so the prefix layer can transport them across the
+  -- `Pre` glue.  Self-contained copy of the co-location's front/sync/lower bounds.
+  have hgenbounds : ∀ (b : Barrier),
+      (∀ (η : ProgPoint) (c : Cmd) (par : ℕ+),
+          (((I ^ I.loopK h) ^ (n + 1)).seq E
+              ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)).cmdAt η = some c →
+          Cmd.barrierRef c = some (b, par) →
+          η.idx < 2 * ((I ^ I.loopK h).prog η.thread).length →
+          pointGen (((I ^ I.loopK h) ^ (n + 1)).seq E
+              ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)) τ η
+            ≤ 2 * (I.loopK h * I.arrivers b / I.arrivalCount h b) + 1) ∧
+      (∀ (η : ProgPoint) (par : ℕ+),
+          (((I ^ I.loopK h) ^ (n + 1)).seq E
+              ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)).cmdAt η = some (Cmd.sync b par) →
+          η.idx < ((I ^ I.loopK h).prog η.thread).length →
+          pointGen (((I ^ I.loopK h) ^ (n + 1)).seq E
+              ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)) τ η
+            ≤ I.loopK h * I.arrivers b / I.arrivalCount h b) ∧
+      (b ∈ I.barriers → ∀ (η : ProgPoint) (c : Cmd) (par : ℕ+),
+          (((I ^ I.loopK h) ^ (n + 1)).seq E
+              ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)).cmdAt η = some c →
+          Cmd.barrierRef c = some (b, par) →
+          2 * ((I ^ I.loopK h).prog η.thread).length ≤ η.idx →
+          2 * (I.loopK h * I.arrivers b / I.arrivalCount h b) + 1
+            ≤ pointGen (((I ^ I.loopK h) ^ (n + 1)).seq E
+                ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)) τ η) := by
+    intro b
+    set P := ((I ^ I.loopK h) ^ (n + 1)).seq E
+      ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids) with hPdef
+    set δ := I.loopK h * I.arrivers b / I.arrivalCount h b with hδdef
+    have hbAofI : b ∈ I.barriers → b ∈ (I ^ I.loopK h).barrierSet := by
+      intro hbI
+      rw [CTA.barriers, Finset.mem_biUnion] at hbI
+      obtain ⟨i, hi, hbi⟩ := hbI
+      rw [List.mem_toFinset, List.mem_map] at hbi
+      obtain ⟨⟨b', n'⟩, hr, hb'⟩ := hbi
+      simp only at hb'; subst hb'
+      rw [List.mem_filterMap] at hr
+      obtain ⟨c, hc, hcr⟩ := hr
+      have hkpos : 1 ≤ I.loopK h := I.loopK_pos h
+      have hcA : c ∈ (I ^ I.loopK h).prog i := by
+        rw [show I.loopK h = (I.loopK h - 1) + 1 from by omega, CTA.pow_succ_prog,
+          List.mem_append]
+        exact Or.inl hc
+      rw [CTA.barrierSet, Finset.mem_biUnion]
+      refine ⟨i, ?_, List.mem_toFinset.mpr (List.mem_filterMap.mpr
+        ⟨c, hcA, Cmd.barrier?_of_barrierRef hcr⟩)⟩
+      rw [CTA.pow_ids]; exact hi
+    have hPprog : ∀ t, P.prog t = ((I ^ I.loopK h) ^ (n + 1)).prog t ++ E.prog t := fun t => rfl
+    have hPplen : ∀ t, (((I ^ I.loopK h) ^ (n + 1)).prog t).length
+        = (n + 1) * ((I ^ I.loopK h).prog t).length := fun t => CTA.pow_prog_length _ (n + 1) t
+    have hcmdfront : ∀ (x : ProgPoint), x.idx < (n + 1) * ((I ^ I.loopK h).prog x.thread).length →
+        ((I ^ I.loopK h) ^ (n + 1)).cmdAt x = P.cmdAt x := by
+      intro x hx
+      simp only [CTA.cmdAt]
+      rw [hPprog x.thread, List.getElem?_append_left (by rw [hPplen]; exact hx)]
+    have hcmdE : ∀ (x : ProgPoint), (n + 1) * ((I ^ I.loopK h).prog x.thread).length ≤ x.idx →
+        ((I ^ I.loopK h).seq E hids).cmdAt
+            ⟨x.thread, x.idx - n * ((I ^ I.loopK h).prog x.thread).length⟩ = P.cmdAt x := by
+      intro x hx
+      simp only [CTA.cmdAt]
+      have hBprog : ((I ^ I.loopK h).seq E hids).prog x.thread
+          = (I ^ I.loopK h).prog x.thread ++ E.prog x.thread := rfl
+      rw [hBprog, hPprog x.thread]
+      set L := ((I ^ I.loopK h).prog x.thread).length with hLx
+      have hexp : (n + 1) * L = n * L + L := by rw [Nat.succ_mul]
+      rw [List.getElem?_append_right (by omega),
+        List.getElem?_append_right (by rw [hPplen]; omega), hPplen]
+      congr 1
+      rw [← hLx]; omega
+    have bodyCmd : ∀ (η : ProgPoint) (c : Cmd) (par : ℕ+),
+        P.cmdAt η = some c → Cmd.barrierRef c = some (b, par) →
+        η.idx < (n + 1) * ((I ^ I.loopK h).prog η.thread).length →
+        ((I ^ I.loopK h).prog η.thread)[η.idx % ((I ^ I.loopK h).prog η.thread).length]? = some c
+          ∧ η.idx % ((I ^ I.loopK h).prog η.thread).length
+              < ((I ^ I.loopK h).prog η.thread).length := by
+      intro η c par hcmd hbr hlt
+      obtain ⟨t, idx⟩ := η
+      dsimp only at hlt ⊢
+      set L := ((I ^ I.loopK h).prog t).length with hLdef
+      have hLpos : 0 < L := by
+        rcases Nat.eq_zero_or_pos L with h0 | hp
+        · rw [h0, Nat.mul_zero] at hlt; omega
+        · exact hp
+      have hjL : idx % L < L := Nat.mod_lt _ hLpos
+      have hp : idx / L < n + 1 := by
+        rw [Nat.div_lt_iff_lt_mul hLpos]; exact hlt
+      have hidxeq : idx = (idx / L) * L + idx % L := by
+        rw [Nat.mul_comm]; exact (Nat.div_add_mod idx L).symm
+      have hcopy : ((I ^ I.loopK h) ^ (n + 1)).cmdAt ⟨t, (idx / L) * L + idx % L⟩
+          = ((I ^ I.loopK h).prog t)[idx % L]? := CTA.cmdAt_pow_batch_copy _ hjL hp
+      rw [← hidxeq, hcmdfront ⟨t, idx⟩ hlt, hcmd] at hcopy
+      exact ⟨hcopy.symm, hjL⟩
+    have hUpperLE : ∀ (η : ProgPoint) (c : Cmd) (par : ℕ+),
+        P.cmdAt η = some c → Cmd.barrierRef c = some (b, par) →
+        η.idx < 2 * ((I ^ I.loopK h).prog η.thread).length →
+        pointGen P τ η ≤ 2 * δ + 1 := by
+      intro η c par hcmd hbr hlt2
+      have hltn1 : η.idx < (n + 1) * ((I ^ I.loopK h).prog η.thread).length := by
+        have : 2 * ((I ^ I.loopK h).prog η.thread).length
+            ≤ (n + 1) * ((I ^ I.loopK h).prog η.thread).length :=
+          Nat.mul_le_mul_right _ (by omega)
+        omega
+      obtain ⟨hbody, hjL⟩ := bodyCmd η c par hcmd hbr hltn1
+      obtain ⟨t, idx⟩ := η
+      dsimp only at hlt2 hjL hbody ⊢
+      set L := ((I ^ I.loopK h).prog t).length with hLdef
+      have hLpos : 0 < L := by omega
+      have hp2 : idx / L < 2 := by rw [Nat.div_lt_iff_lt_mul hLpos]; omega
+      have hidxeq : idx = (idx / L) * L + idx % L := by
+        rw [Nat.mul_comm]; exact (Nat.div_add_mod idx L).symm
+      obtain ⟨M₁, hM₁⟩ := exists_time_of_ends_done ht₁.1 ht₁L (η := ⟨t, idx % L⟩) hjL
+      rw [hfrontgen ⟨t, idx⟩ hlt2,
+        show (⟨t, idx⟩ : ProgPoint) = ⟨t, (idx / L) * L + idx % L⟩ from by rw [← hidxeq]]
+      rw [gτ2 t (idx % L) (idx / L) c b par M₁ hjL hp2 hbody hbr hM₁, ← hδdef]
+      have hrec := barrierOp_recycleCount_le_batch h ht₁ ht₁L hbody hbr hM₁
+        (hwf_any (I ^ I.loopK h)) hfull
+      rw [← hδdef] at hrec
+      have hple : idx / L ≤ 1 := by omega
+      have hmul : (idx / L) * δ ≤ 1 * δ := Nat.mul_le_mul_right δ hple
+      omega
+    have hSync0 : ∀ (η : ProgPoint) (par : ℕ+),
+        P.cmdAt η = some (Cmd.sync b par) →
+        η.idx < ((I ^ I.loopK h).prog η.thread).length →
+        pointGen P τ η ≤ δ := by
+      intro η par hcmd hlt0
+      have hlt2 : η.idx < 2 * ((I ^ I.loopK h).prog η.thread).length := by omega
+      have hltn1 : η.idx < (n + 1) * ((I ^ I.loopK h).prog η.thread).length := by
+        have : 1 * ((I ^ I.loopK h).prog η.thread).length
+            ≤ (n + 1) * ((I ^ I.loopK h).prog η.thread).length :=
+          Nat.mul_le_mul_right _ (by omega)
+        omega
+      obtain ⟨hbody, hjL⟩ := bodyCmd η (Cmd.sync b par) par hcmd rfl hltn1
+      obtain ⟨t, idx⟩ := η
+      dsimp only at hlt0 hlt2 hjL hbody ⊢
+      set L := ((I ^ I.loopK h).prog t).length with hLdef
+      have hmod : idx % L = idx := Nat.mod_eq_of_lt hlt0
+      have hdiv : idx / L = 0 := Nat.div_eq_of_lt hlt0
+      obtain ⟨M₁, hM₁⟩ := exists_time_of_ends_done ht₁.1 ht₁L (η := ⟨t, idx % L⟩) hjL
+      rw [hfrontgen ⟨t, idx⟩ hlt2,
+        show (⟨t, idx⟩ : ProgPoint) = ⟨t, (idx / L) * L + idx % L⟩ from by
+          rw [hdiv, hmod, Nat.zero_mul, Nat.zero_add]]
+      rw [gτ2 t (idx % L) (idx / L) (Cmd.sync b par) b par M₁ hjL (by rw [hdiv]; omega)
+        hbody rfl hM₁, ← hδdef, hdiv, Nat.zero_mul, Nat.add_zero]
+      have hsync := sync_recycleCount_lt_batch h ht₁ ht₁L hbody hM₁
+        (hwf_any (I ^ I.loopK h)) hfull
+      rw [← hδdef] at hsync
+      omega
+    have hLowerGE2 : b ∈ I.barriers → ∀ (η : ProgPoint) (c : Cmd) (par : ℕ+),
+        P.cmdAt η = some c → Cmd.barrierRef c = some (b, par) →
+        2 * ((I ^ I.loopK h).prog η.thread).length ≤ η.idx →
+        2 * δ + 1 ≤ pointGen P τ η := by
+      intro hbI η c par hcmd hbr hge2
+      have hbA : b ∈ (I ^ I.loopK h).barrierSet := hbAofI hbI
+      have hδ1 : 1 ≤ δ := one_le_delta h rfl hbI
+      obtain ⟨t, idx⟩ := η
+      dsimp only at hge2 ⊢
+      set L := ((I ^ I.loopK h).prog t).length with hLdef
+      by_cases hpre : idx < n * L
+      · have hLpos : 0 < L := by
+          rcases Nat.eq_zero_or_pos L with h0 | hp
+          · rw [h0, Nat.mul_zero] at hpre; omega
+          · exact hp
+        have hpltn1 : idx < (n + 1) * L := by
+          have h1 : n * L ≤ (n + 1) * L := Nat.mul_le_mul_right L (by omega)
+          omega
+        obtain ⟨hbody, hjL⟩ := bodyCmd ⟨t, idx⟩ c par hcmd hbr (by
+          dsimp only; rw [← hLdef]; exact hpltn1)
+        dsimp only at hbody hjL
+        have hp : idx / L < n := by
+          rw [Nat.div_lt_iff_lt_mul hLpos]; exact hpre
+        have hpge : 2 ≤ idx / L := by
+          rw [Nat.le_div_iff_mul_le hLpos]; omega
+        have hidxeq : idx = (idx / L) * L + idx % L := by
+          rw [Nat.mul_comm]; exact (Nat.div_add_mod idx L).symm
+        obtain ⟨M₁, hM₁⟩ := exists_time_of_ends_done ht₁.1 ht₁L (η := ⟨t, idx % L⟩) hjL
+        rw [show (⟨t, idx⟩ : ProgPoint) = ⟨t, (idx / L) * L + idx % L⟩ from by rw [← hidxeq]]
+        rw [show pointGen P τ ⟨t, (idx / L) * L + idx % L⟩
+            = pointGen (((I ^ I.loopK h) ^ n).seq ((I ^ I.loopK h).seq E hids) hidsE) τ
+                ⟨t, (idx / L) * L + idx % L⟩ from by rw [hPeq]]
+        rw [gτpre t (idx % L) (idx / L) c b par M₁ hjL hp hbody hbr hM₁, ← hδdef]
+        have hmul : 2 * δ ≤ (idx / L) * δ := Nat.mul_le_mul_right δ hpge
+        omega
+      · rw [Nat.not_lt] at hpre
+        set e := idx - n * L with hedef
+        have hidxeq : idx = n * L + e := by omega
+        by_cases heL : L ≤ e
+        · have hge : (n + 1) * L ≤ idx := by
+            have h1 : (n + 1) * L = n * L + L := by rw [Nat.succ_mul]
+            omega
+          have hcE : ((I ^ I.loopK h).seq E hids).cmdAt ⟨t, e⟩ = some c := by
+            have hmap := hcmdE ⟨t, idx⟩ (by dsimp only; rw [← hLdef]; exact hge)
+            dsimp only at hmap
+            rw [show idx - n * ((I ^ I.loopK h).prog t).length = e from by rw [← hLdef]] at hmap
+            rw [hmap]; exact hcmd
+          rw [show (⟨t, idx⟩ : ProgPoint) = ⟨t, n * L + e⟩ from by rw [← hidxeq]]
+          rw [show pointGen P τ ⟨t, n * L + e⟩
+              = pointGen (((I ^ I.loopK h) ^ n).seq ((I ^ I.loopK h).seq E hids) hidsE) τ
+                  ⟨t, n * L + e⟩ from by rw [hPeq]]
+          rw [gτepi t e c b par hcE hbr, ← hδdef]
+          have hlow := seq_epilogue_pointGen_lower h ht₁ ht₁L hids htE htEpre heL hcE hbr hbA
+            (hwf_any (I ^ I.loopK h)) hfull
+          rw [← hδdef] at hlow
+          have hnmul : 1 * δ ≤ n * δ := Nat.mul_le_mul_right δ hn
+          omega
+        · rw [Nat.not_le] at heL
+          have hltn1 : idx < (n + 1) * ((I ^ I.loopK h).prog t).length := by
+            rw [← hLdef]; have h1 : (n + 1) * L = n * L + L := by rw [Nat.succ_mul]
+            omega
+          have hbody : ((I ^ I.loopK h).prog t)[e]? = some c := by
+            have hcopy : ((I ^ I.loopK h) ^ (n + 1)).cmdAt ⟨t, n * L + e⟩
+                = ((I ^ I.loopK h).prog t)[e]? := CTA.cmdAt_pow_batch_copy _ heL (by omega)
+            rw [hcmdfront ⟨t, n * L + e⟩ (by dsimp only; rw [← hLdef, ← hidxeq]; exact hltn1),
+              show (⟨t, n * L + e⟩ : ProgPoint) = ⟨t, idx⟩ from by rw [← hidxeq], hcmd] at hcopy
+            exact hcopy.symm
+          have hcE : ((I ^ I.loopK h).seq E hids).cmdAt ⟨t, e⟩ = some c := by
+            change ((I ^ I.loopK h).prog t ++ E.prog t)[e]? = some c
+            rw [List.getElem?_append_left heL]; exact hbody
+          rw [show (⟨t, idx⟩ : ProgPoint) = ⟨t, n * L + e⟩ from by rw [← hidxeq]]
+          rw [show pointGen P τ ⟨t, n * L + e⟩
+              = pointGen (((I ^ I.loopK h) ^ n).seq ((I ^ I.loopK h).seq E hids) hidsE) τ
+                  ⟨t, n * L + e⟩ from by rw [hPeq]]
+          rw [gτepi t e c b par hcE hbr, ← hδdef]
+          obtain ⟨M₁, hM₁⟩ := exists_time_of_ends_done ht₁.1 ht₁L (η := ⟨t, e⟩) heL
+          rw [seq_front_pointGen h ht₁ ht₁L hids htE htEpre heL hbody hbr hM₁]
+          have hnge2 : 2 ≤ n := by
+            by_contra hcon
+            have hn1 : n = 1 := by omega
+            rw [hn1, Nat.one_mul] at hpre
+            have heidx : e = idx - L := by rw [hedef, hn1, Nat.one_mul]
+            omega
+          have hnmul : 2 * δ ≤ n * δ := Nat.mul_le_mul_right δ hnge2
+          omega
+    exact ⟨hUpperLE, hSync0, hLowerGE2⟩
+  -- **(front closed form)** the front-2-batch generation, `recycleCount b t₁ (M₁-1)+1 + p·δ`,
+  -- independent of `E` — `hfrontgen` reduces to `(I^k)^2`, then `gτ2`.
+  have hfrontclosed : ∀ (t : ThreadId) (j p : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (M₁ : Nat),
+      j < ((I ^ I.loopK h).prog t).length → p < 2 → ((I ^ I.loopK h).prog t)[j]? = some c →
+      Cmd.barrierRef c = some (b, par) →
+      IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁ →
+      pointGen
+        (((I ^ I.loopK h) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids))
+          τ ⟨t, p * ((I ^ I.loopK h).prog t).length + j⟩
+        = recycleCount b t₁ (M₁ - 1) + 1 + p * (I.loopK h * I.arrivers b / I.arrivalCount h b) := by
+    intro t j p c b par M₁ hjL hp2 hcj hbr hM₁
+    have hlt2 : p * ((I ^ I.loopK h).prog t).length + j
+        < 2 * ((I ^ I.loopK h).prog t).length := by
+      calc p * ((I ^ I.loopK h).prog t).length + j
+          < p * ((I ^ I.loopK h).prog t).length + ((I ^ I.loopK h).prog t).length := by omega
+        _ = (p + 1) * ((I ^ I.loopK h).prog t).length := by rw [Nat.succ_mul]
+        _ ≤ 2 * ((I ^ I.loopK h).prog t).length := Nat.mul_le_mul_right _ (by omega)
+    rw [hfrontgen ⟨t, p * ((I ^ I.loopK h).prog t).length + j⟩ hlt2]
+    exact gτ2 t j p c b par M₁ hjL hp2 hcj hbr hM₁
+  -- **(first-`n`-batch agreement)** the first `n` batches of the `(n+1)`-batch replay `τ` and the
+  -- `n`-batch replay `τn` carry the same barrier generations (both equal `gτpre`/`gτnpre`'s closed
+  -- form; the last batch `p = n-1` of `τn` uses `gτnepi` + `seq_front_pointGen`).
+  have hfirstNagree : ∀ (t : ThreadId) (e : Nat) (c : Cmd) (b : Barrier) (par : ℕ+),
+      e < n * ((I ^ I.loopK h).prog t).length →
+      (((I ^ I.loopK h) ^ (n + 1)).seq E
+          ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)).cmdAt ⟨t, e⟩ = some c →
+      Cmd.barrierRef c = some (b, par) →
+      pointGen (((I ^ I.loopK h) ^ (n + 1)).seq E
+          ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)) τ ⟨t, e⟩
+        = pointGen (((I ^ I.loopK h) ^ n).seq E
+            ((CTA.pow_ids (I ^ I.loopK h) n).trans hids)) τn ⟨t, e⟩ := by
+    intro t e c b par he hcmd hbr
+    set L := ((I ^ I.loopK h).prog t).length with hLeq
+    rcases Nat.eq_zero_or_pos L with hL0 | hLpos
+    · rw [hL0, Nat.mul_zero] at he; omega
+    set p := e / L with hpdef
+    set j := e % L with hjdef
+    have hjL : j < L := Nat.mod_lt _ hLpos
+    have hpn : p < n := by rw [hpdef, Nat.div_lt_iff_lt_mul hLpos]; omega
+    have hidxeq : e = p * L + j := by
+      rw [hpdef, hjdef, Nat.mul_comm]; exact (Nat.div_add_mod e L).symm
+    have hcj : ((I ^ I.loopK h).prog t)[j]? = some c := by
+      have hcopy : ((I ^ I.loopK h) ^ (n + 1)).cmdAt ⟨t, p * L + j⟩
+          = ((I ^ I.loopK h).prog t)[j]? :=
+        CTA.cmdAt_pow_batch_copy (I ^ I.loopK h) hjL (Nat.lt_succ_of_lt hpn)
+      have hc : (((I ^ I.loopK h) ^ (n + 1)).seq E
+          ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)).cmdAt ⟨t, e⟩ = some c := hcmd
+      rw [show (⟨t, e⟩ : ProgPoint) = ⟨t, p * L + j⟩ from by rw [hidxeq]] at hc
+      have hc2 : ((I ^ I.loopK h) ^ (n + 1)).cmdAt ⟨t, p * L + j⟩ = some c := by
+        have hx : (((I ^ I.loopK h) ^ (n + 1)).prog t ++ E.prog t)[p * L + j]? = some c := hc
+        rwa [List.getElem?_append_left (by
+          rw [CTA.pow_prog_length]
+          calc p * L + j < (p + 1) * L := by rw [Nat.succ_mul]; omega
+            _ ≤ (n + 1) * L := Nat.mul_le_mul_right _ (by omega))] at hx
+      rw [hcopy] at hc2; exact hc2
+    obtain ⟨M₁, hM₁⟩ := exists_time_of_ends_done ht₁.1 ht₁L (η := ⟨t, j⟩) hjL
+    rw [show (⟨t, e⟩ : ProgPoint) = ⟨t, p * L + j⟩ from by rw [hidxeq]]
+    have hgp := gτpre t j p c b par M₁ hjL hpn hcj hbr hM₁
+    rw [show pointGen (((I ^ I.loopK h) ^ (n + 1)).seq E
+        ((CTA.pow_ids (I ^ I.loopK h) (n + 1)).trans hids)) τ ⟨t, p * L + j⟩
+      = pointGen (((I ^ I.loopK h) ^ n).seq ((I ^ I.loopK h).seq E hids) hidsE) τ
+          ⟨t, p * L + j⟩ from by rw [hPeq]]
+    rw [hgp]
+    rcases Nat.lt_or_ge p (n - 1) with hp | hp
+    · have hgnp := gτnpre t j p c b par M₁ hjL hp hcj hbr hM₁
+      rw [show pointGen (((I ^ I.loopK h) ^ n).seq E
+          ((CTA.pow_ids (I ^ I.loopK h) n).trans hids)) τn ⟨t, p * L + j⟩
+        = pointGen (((I ^ I.loopK h) ^ (n - 1)).seq ((I ^ I.loopK h).seq E hids) hidsEm) τn
+            ⟨t, p * L + j⟩ from by rw [hPneq]]
+      rw [hgnp]
+    · have hpe : p = n - 1 := by omega
+      have hcE : ((I ^ I.loopK h).seq E hids).cmdAt ⟨t, j⟩ = some c := by
+        change ((I ^ I.loopK h).prog t ++ E.prog t)[j]? = some c
+        rw [List.getElem?_append_left hjL]; exact hcj
+      have hgne := gτnepi t j c b par hcE hbr
+      rw [seq_front_pointGen h ht₁ ht₁L hids htE htEpre hjL hcj hbr hM₁] at hgne
+      rw [show pointGen (((I ^ I.loopK h) ^ n).seq E
+          ((CTA.pow_ids (I ^ I.loopK h) n).trans hids)) τn ⟨t, p * L + j⟩
+        = pointGen (((I ^ I.loopK h) ^ (n - 1)).seq ((I ^ I.loopK h).seq E hids) hidsEm) τn
+            ⟨t, (n - 1) * L + j⟩ from by rw [hPneq, hpe]]
+      rw [hgne, hpe]
+  refine ⟨τ, hτ, ?_, τn, hτn, hshift, ?_, τ2, hτ2, hfrontgen, ?_, hgenbounds, hfrontclosed,
+    hfirstNagree⟩
   · -- (co-location): place the flagged pair `(c1, c2)` by batch, via generation bounds.  Write
     -- `δ = k·arrivers(b)/count(b) ≥ 1`.  Three bounds (front upper, batch-0 sync upper, ≥2-batch
     -- lower) split the pair: `c2` in the first two batches forces `c1` there too (front disjunct);
@@ -6511,6 +7609,7 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
         show (⟨t, idx⟩ : ProgPoint) = ⟨t, (idx / L) * L + idx % L⟩ from by rw [← hidxeq]]
       rw [gτ2 t (idx % L) (idx / L) c b par M₁ hjL hp2 hbody hbr hM₁, ← hδdef]
       have hrec := barrierOp_recycleCount_le_batch h ht₁ ht₁L hbody hbr hM₁
+        (hwf_any (I ^ I.loopK h)) hfull
       rw [← hδdef] at hrec
       have hple : idx / L ≤ 1 := by omega
       have hmul : (idx / L) * δ ≤ 1 * δ := Nat.mul_le_mul_right δ hple
@@ -6540,6 +7639,7 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
       rw [gτ2 t (idx % L) (idx / L) (Cmd.sync b par) b par M₁ hjL (by rw [hdiv]; omega)
         hbody rfl hM₁, ← hδdef, hdiv, Nat.zero_mul, Nat.add_zero]
       have hsync := sync_recycleCount_lt_batch h ht₁ ht₁L hbody hM₁
+        (hwf_any (I ^ I.loopK h)) hfull
       rw [← hδdef] at hsync
       omega
     -- **(L, ≥2 batches)** a barrier-`b` op past the first two batches has generation `≥ 2δ + 1`
@@ -6600,6 +7700,7 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
                   ⟨t, n * L + e⟩ from by rw [hPeq]]
           rw [gτepi t e c b par hcE hbr, ← hδdef]
           have hlow := seq_epilogue_pointGen_lower h ht₁ ht₁L hids htE htEpre heL hcE hbr hbA
+            (hwf_any (I ^ I.loopK h)) hfull
           rw [← hδdef] at hlow
           have hnmul : 1 * δ ≤ n * δ := Nat.mul_le_mul_right δ hn
           omega
@@ -6820,9 +7921,16 @@ theorem CTA.WellSynchronized.loop_epilogue_inductive_step {I : CTA}
     (hprev : (((I ^ k) ^ n).seq E ((CTA.pow_ids (I ^ k) n).trans hids)).WellSynchronized) :
     (((I ^ k) ^ (n + 1)).seq E
         ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)).WellSynchronized := by
+  -- Build the initial-anchored batch data and feed the (now from-`s`) bundle.
+  obtain ⟨t₁, ht₁⟩ := hbatch.exists_successfulTrace
+  obtain ⟨sd₁, ht₁L⟩ := ht₁.2
+  have hinit : sd₁ = State.initial := pow_done_state_initial h (hk ▸ ht₁) ht₁L
+  rw [hinit] at ht₁L
+  obtain ⟨tE, htE, htEpre⟩ := CTA.WellSynchronized.seq_angelic_prefix hids hbatchE t₁ ht₁
   -- The shared replay traces and the uniform `+L` shift/monotonicity facts (`P = (I^k) ⨾ Pn`).
-  obtain ⟨τ, hτ, hcoloc, τn, hτn, hshift, hmono, τ2, hτ2, hfrontgen, hfrontmono⟩ :=
-    CTA.WellSynchronized.loop_epilogue_replay_bundle h hk hids hn hbatch h2batch hbatchE hprev
+  obtain ⟨τ, hτ, hcoloc, τn, hτn, hshift, hmono, τ2, hτ2, hfrontgen, hfrontmono, -, -, -⟩ :=
+    CTA.WellSynchronized.loop_epilogue_replay_bundle h hk hids hn ht₁ ht₁L htE htEpre
+      (fun _ => rfl) (fun _ => WF_initial)
   set Pn := ((I ^ k) ^ n).seq E ((CTA.pow_ids (I ^ k) n).trans hids) with hPn
   set P := ((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids) with hP
   -- Close via checker soundness; it remains to show the checker accepts `τ`.
@@ -6984,58 +8092,1301 @@ theorem CTA.WellSynchronized.loop_with_epilogue {I : CTA} (h : I.ConsistentArriv
       exact CTA.WellSynchronized.loop_epilogue_inductive_step h hk hids hbatch h2batch hbatchE
         hn ih
 
-/-- **Correctness of the loop check.** The executable check `checkLoopWellSynchronized I h τ`
-returns `true` iff the loop body `I` is well-synchronized under *every* unrolling `I ^ n`,
-`n ≥ 0` — i.e. the loop runs safely for any iteration count. Here each `τ i` is a successful
-trace of the `i`-fold unrolling `I ^ i` ending in `done` (`hτ`), the standing assumption
-`CheckWellSynchronized` makes of its trace.
+/-- **Regroup a loop-with-epilogue unrolling into prefix-loop form.** `k * c + r` body
+iterations factor as `c` full `k`-batches with the `r`-iteration remainder folded into the
+epilogue: `P ⨾ I^(k*c+r) ⨾ E = P ⨾ (I^k)^c ⨾ (I^r ⨾ E)`. This is the bridge from the loop
+check (which certifies unrollings `P ⨾ I^i ⨾ E`) to `loop_with_prefix_epilogue` (which reasons
+about `Pre ⨾ (I^k)^n ⨾ E`); take `Pre := P`, body `I^k`, epilogue `I^r ⨾ E`. -/
+theorem CTA.loopProgram_regroup (P I E : CTA) (h1 : P.ids = I.ids) (h2 : I.ids = E.ids)
+    (k c r : Nat) :
+    CTA.loopProgram P I E h1 h2 (k * c + r)
+      = CTA.loopProgram P (I ^ k) ((I ^ r).seq E ((CTA.pow_ids I r).trans h2))
+          (h1.trans (CTA.pow_ids I k).symm) ((CTA.pow_ids I k).trans (CTA.pow_ids I r).symm) c := by
+  apply CTA.ext
+  · simp only [CTA.loopProgram_ids]
+  · funext t
+    simp only [CTA.loopProgram_prog]
+    change P.prog t ++ (I ^ (k * c + r)).prog t ++ E.prog t
+        = P.prog t ++ ((I ^ k) ^ c).prog t ++ ((I ^ r).prog t ++ E.prog t)
+    rw [CTA.pow_add_prog, CTA.pow_mul]
+    simp only [List.append_assoc]
 
-* **(`←`)** Given `(I ^ n).WellSynchronized` for every `n`, each per-unrolling check accepts
-  by `checkWellSynchronized_correct_impl`, so the `List.all` over `[0, 2k]` is `true`.
-* **(`→`)** From `true`, every checked unrolling `I ^ j`, `j ≤ 2k`, is well-synchronized.
-  For `n ≤ 2k` that is the goal directly; for `n > 2k`, write `n = k * c + r` with `0 ≤ r < k`
-  and `c ≥ 1`, and apply `loop_with_epilogue` with epilogue `E := I ^ r`: its hypotheses
-  `WS(I ^ k)` and `WS(I ^ (k + r))` are among the checked unrollings, and its conclusion is
-  `WS((I ^ k) ^ c ⨾ I ^ r) = WS(I ^ (k * c + r)) = WS(I ^ n)` (`CTA.pow_split`). -/
-theorem checkLoopWellSynchronized_correct_impl {I : CTA} (h : I.ConsistentArrivalCounts)
+/-- **One-batch inductive step for `loop_with_prefix_epilogue`.** The prefix analogue of
+`loop_epilogue_inductive_step`: from `WS(Pre ⨾ (I^k)^n ⨾ E)` derive `WS(Pre ⨾ (I^k)^(n+1) ⨾ E)`.
+A flagged pair of the `(n+1)`-program is classified by co-location into a *front* pair (both in
+`Pre` + the first two batches, `idx < Lp + 2L`), ordered via the two-batch reference
+`hPre2BatchRef` and lifted by front-monotonicity (with the front chain confined by soundness,
+`glue_no_happensBefore_B_to_A`), or a *core* pair (both off the inserted first batch
+`[Lp, Lp+L)`), shifted down one batch, ordered via `hprev`, and lifted by the total ψ-embedding. -/
+theorem CTA.WellSynchronized.loop_prefix_epilogue_inductive_step {I : CTA}
+    (h : I.ConsistentArrivalCounts) {k : Nat} (hk : k = I.loopK h) {Pre E E_ref : CTA}
+    (hpre : Pre.ids = (I ^ k).ids) (hids : (I ^ k).ids = E.ids)
+    (hidsRef : (I ^ k).ids = E_ref.ids)
+    (hPre : Pre.WellSynchronized) (hPreBody : (Pre.seq (I ^ k) hpre).WellSynchronized)
+    (hPreBatchE : (CTA.loopProgram Pre (I ^ k) E hpre hids 1).WellSynchronized)
+    (hPre2BatchRef : (CTA.loopProgram Pre (I ^ k) E_ref hpre hidsRef 2).WellSynchronized)
+    {n : Nat} (hn : 1 ≤ n)
+    (hprev : (CTA.loopProgram Pre (I ^ k) E hpre hids n).WellSynchronized) :
+    (CTA.loopProgram Pre (I ^ k) E hpre hids (n + 1)).WellSynchronized := by
+  subst hk
+  set A := I ^ I.loopK h with hA
+  -- prefix data (`s_P`, `tP`, restoring batch `t₁`, structured `tE`) and reference data
+  obtain ⟨s_P, hfull, hwf_any, tP, htP, htPL, t₁, ht₁, ht₁L, tE, htE, htEpre⟩ :=
+    loop_prefix_batch_data h rfl hpre hids hPre hPreBody hPreBatchE
+  obtain ⟨⟨tER, htER, htERpre⟩, ⟨tAR, htAR, htARlast⟩⟩ :=
+    loop_prefix_ref_data h rfl hpre hidsRef hfull hwf_any htP htPL ht₁ ht₁L hPre2BatchRef
+  -- from-`s_P` bundles for `E` (`n` batches) and `E_ref` (`1` batch → `(A^2) ⨾ E_ref`)
+  obtain ⟨τX, hτX, hcolocX, τnX, hτnX, hshiftX, hmonoX, τ2X, hτ2X, hfrontgenX, hfrontmonoX,
+      hgbX, hfcX, hfcNX⟩ :=
+    loop_epilogue_replay_bundle h rfl hids hn ht₁ ht₁L htE htEpre hfull hwf_any
+  obtain ⟨τZ, hτZ, hcolocZ, τnZ, hτnZ, hshiftZ, hmonoZ, τ2Z, hτ2Z, hfrontgenZ, hfrontmonoZ,
+      hgbZ, hfcZ, -⟩ :=
+    loop_epilogue_replay_bundle h rfl hidsRef (le_refl 1) ht₁ ht₁L htER htERpre hfull hwf_any
+  -- view the goal as `Pre ⨾ Xfull` with `Xfull = (A^(n+1)) ⨾ E`
+  set Xfull := (A ^ (n + 1)).seq E ((CTA.pow_ids A (n + 1)).trans hids) with hXfull
+  have hpreXf : Pre.ids = Xfull.ids := by
+    rw [hXfull]; change Pre.ids = (A ^ (n + 1)).ids; rw [CTA.pow_ids]; exact hpre
+  have hfullEq : CTA.loopProgram Pre A E hpre hids (n + 1) = Pre.seq Xfull hpreXf := by
+    apply CTA.ext
+    · simp only [CTA.loopProgram_ids, CTA.seq]
+    · funext t
+      rw [CTA.loopProgram_prog]
+      change Pre.prog t ++ (A ^ (n + 1)).prog t ++ E.prog t
+        = Pre.prog t ++ ((A ^ (n + 1)).prog t ++ E.prog t)
+      rw [List.append_assoc]
+  rw [hfullEq]
+  obtain ⟨hτfull, -, -⟩ := glue_trace hpreXf htP htPL hτX
+  set Pfull := Pre.seq Xfull hpreXf with hPfulldef
+  set τfull := List.map (Config.seqLift Pre Xfull) tP.dropLast ++ τX.tail with hτfulldef
+  refine wellSynchronized_of_check hτfull ?_
+  by_contra hcheckfalse
+  rw [Bool.not_eq_true] at hcheckfalse
+  obtain ⟨c1, hc1, b, nn, hsync1, c2, hc2, hbar2, hgen, hidx, hnotmem⟩ :=
+    exists_failing_pair hcheckfalse
+  apply hnotmem
+  rw [snd_checkWellSynchronized]
+  set δ := I.loopK h * I.arrivers b / I.arrivalCount h b with hδ
+  set R := recycleCount b tP (tP.length - 2) with hR
+  -- `Pfull.prog t = Pre.prog t ++ Xfull.prog t`, with `Xfull.prog t = (A^(n+1)).prog t ++ E.prog t`
+  have hPfullprog : ∀ t, Pfull.prog t = Pre.prog t ++ Xfull.prog t := fun _ => rfl
+  -- (Step 0) generation of an `Xfull`-region point across the `Pre` glue
+  have hgX : ∀ (t : ThreadId) (e : Nat) (cc : Cmd) (par : ℕ+),
+      Xfull.cmdAt ⟨t, e⟩ = some cc → Cmd.barrierRef cc = some (b, par) →
+      pointGen Pfull τfull ⟨t, (Pre.prog t).length + e⟩ = R + pointGen Xfull τX ⟨t, e⟩ :=
+    fun t e cc par hcE hbr => seq_glue_epilogue_pointGen hpreXf htP htPL hτX hcE hbr
+  -- a `Pfull`-command in the `Pre` region restricts to `Pre`
+  have hcmdPre : ∀ (η : ProgPoint) (cc : Cmd), η.idx < (Pre.prog η.thread).length →
+      Pfull.cmdAt η = some cc → Pre.cmdAt η = some cc := by
+    intro η cc hlt hcmd
+    have : (Pre.prog η.thread ++ Xfull.prog η.thread)[η.idx]? = some cc := hcmd
+    rwa [List.getElem?_append_left hlt] at this
+  -- a `Pfull`-command in the `Xfull` region restricts to `Xfull` (shifted index)
+  have hcmdX : ∀ (η : ProgPoint) (cc : Cmd), (Pre.prog η.thread).length ≤ η.idx →
+      Pfull.cmdAt η = some cc →
+      Xfull.cmdAt ⟨η.thread, η.idx - (Pre.prog η.thread).length⟩ = some cc := by
+    intro η cc hle hcmd
+    have : (Pre.prog η.thread ++ Xfull.prog η.thread)[η.idx]? = some cc := hcmd
+    rwa [List.getElem?_append_right hle] at this
+  -- **(PU)** a front (`idx < Lp + 2L`) barrier-`b` op has generation `≤ R + 2δ + 1`
+  have hPU : ∀ (η : ProgPoint) (cc : Cmd) (par : ℕ+), Pfull.cmdAt η = some cc →
+      Cmd.barrierRef cc = some (b, par) →
+      η.idx < (Pre.prog η.thread).length + 2 * (A.prog η.thread).length →
+      pointGen Pfull τfull η ≤ R + 2 * δ + 1 := by
+    intro η cc par hcmd hbr hlt
+    obtain ⟨t, idx⟩ := η; dsimp only at hcmd hlt ⊢
+    by_cases hpre : idx < (Pre.prog t).length
+    · rw [seq_glue_prefix_pointGen hpreXf htP htPL hτX (hcmdPre ⟨t, idx⟩ cc hpre hcmd) hbr]
+      have := barrierOp_gen_le_total htP htPL (hcmdPre ⟨t, idx⟩ cc hpre hcmd) hbr
+      omega
+    · rw [Nat.not_lt] at hpre
+      have hcX := hcmdX ⟨t, idx⟩ cc hpre hcmd
+      have hidxeq : idx = (Pre.prog t).length + (idx - (Pre.prog t).length) := by omega
+      rw [hidxeq, hgX t (idx - (Pre.prog t).length) cc par hcX hbr]
+      have hbd := (hgbX b).1 ⟨t, idx - (Pre.prog t).length⟩ cc par hcX hbr (by
+        dsimp only; rw [← hA]; omega)
+      omega
+  -- **(PS0)** a `sync b` with `idx < Lp + L` has generation `≤ R + δ`
+  have hPS0 : ∀ (η : ProgPoint) (par : ℕ+), Pfull.cmdAt η = some (Cmd.sync b par) →
+      η.idx < (Pre.prog η.thread).length + (A.prog η.thread).length →
+      pointGen Pfull τfull η ≤ R + δ := by
+    intro η par hcmd hlt
+    obtain ⟨t, idx⟩ := η; dsimp only at hcmd hlt ⊢
+    by_cases hpre : idx < (Pre.prog t).length
+    · rw [seq_glue_prefix_pointGen hpreXf htP htPL hτX (hcmdPre ⟨t, idx⟩ _ hpre hcmd) rfl]
+      exact le_trans (sync_gen_le_total htP htPL (hcmdPre ⟨t, idx⟩ _ hpre hcmd))
+        (Nat.le_add_right _ δ)
+    · rw [Nat.not_lt] at hpre
+      have hcX := hcmdX ⟨t, idx⟩ _ hpre hcmd
+      have hidxeq : idx = (Pre.prog t).length + (idx - (Pre.prog t).length) := by omega
+      rw [hidxeq, hgX t (idx - (Pre.prog t).length) _ par hcX rfl]
+      have hbd := (hgbX b).2.1 ⟨t, idx - (Pre.prog t).length⟩ par hcX (by
+        dsimp only; rw [← hA]; omega)
+      omega
+  -- **(PL)** a `≥2`-batch (`idx ≥ Lp + 2L`) barrier-`b` op has generation `≥ R + 2δ + 1`
+  have hPL : b ∈ I.barriers → ∀ (η : ProgPoint) (cc : Cmd) (par : ℕ+), Pfull.cmdAt η = some cc →
+      Cmd.barrierRef cc = some (b, par) →
+      (Pre.prog η.thread).length + 2 * (A.prog η.thread).length ≤ η.idx →
+      R + 2 * δ + 1 ≤ pointGen Pfull τfull η := by
+    intro hbI η cc par hcmd hbr hge
+    obtain ⟨t, idx⟩ := η; dsimp only at hcmd hge ⊢
+    have hpre : (Pre.prog t).length ≤ idx := by
+      have : 0 ≤ 2 * (A.prog t).length := Nat.zero_le _; omega
+    have hcX := hcmdX ⟨t, idx⟩ cc hpre hcmd
+    have hidxeq : idx = (Pre.prog t).length + (idx - (Pre.prog t).length) := by omega
+    rw [hidxeq, hgX t (idx - (Pre.prog t).length) cc par hcX hbr]
+    have hbd := (hgbX b).2.2 hbI ⟨t, idx - (Pre.prog t).length⟩ cc par hcX hbr (by
+      dsimp only; rw [← hA]; omega)
+    omega
+  -- `c2`'s command is a barrier op on `b`
+  obtain ⟨cc2, par2, hc2cmd, hc2ref⟩ : ∃ (cc2 : Cmd) (par2 : ℕ+),
+      Pfull.cmdAt c2 = some cc2 ∧ Cmd.barrierRef cc2 = some (b, par2) := by
+    cases hcmd2 : Pfull.cmdAt c2 with
+    | none => rw [hcmd2] at hbar2; simp at hbar2
+    | some cc2 =>
+      cases cc2 with
+      | read g => rw [hcmd2] at hbar2; simp [Cmd.barrier?] at hbar2
+      | write g => rw [hcmd2] at hbar2; simp [Cmd.barrier?] at hbar2
+      | arrive bb mm =>
+        rw [hcmd2] at hbar2; simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hbar2
+        subst hbar2; exact ⟨_, mm, rfl, rfl⟩
+      | sync bb mm =>
+        rw [hcmd2] at hbar2; simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hbar2
+        subst hbar2; exact ⟨_, mm, rfl, rfl⟩
+  -- index bounds for `c1`, `c2`
+  have hc1lt : c1.idx < (Pfull.prog c1.thread).length :=
+    ((mem_progPoints_iff _ c1).mp (mem_progPoints_of_cmdAt _ hsync1)).2
+  have hc2lt : c2.idx < (Pfull.prog c2.thread).length :=
+    ((mem_progPoints_iff _ c2).mp (mem_progPoints_of_cmdAt _ hc2cmd)).2
+  -- **Co-location**: classify the flagged pair into front / core.
+  have hcoloc : (c1.idx < (Pre.prog c1.thread).length + 2 * (A.prog c1.thread).length ∧
+        c2.idx < (Pre.prog c2.thread).length + 2 * (A.prog c2.thread).length) ∨
+      ((c1.idx < (Pre.prog c1.thread).length ∨
+          (Pre.prog c1.thread).length + (A.prog c1.thread).length ≤ c1.idx) ∧
+        (Pre.prog c2.thread).length + 2 * (A.prog c2.thread).length ≤ c2.idx) := by
+    obtain ⟨sdX, hτXlast⟩ := hτX.2
+    -- an `Xfull`-region barrier-`b` op has generation `≥ R + 1`
+    have hgXge1 : ∀ (η : ProgPoint) (cc : Cmd) (parr : ℕ+), Pfull.cmdAt η = some cc →
+        Cmd.barrierRef cc = some (b, parr) → (Pre.prog η.thread).length ≤ η.idx →
+        R + 1 ≤ pointGen Pfull τfull η := by
+      intro η cc parr hcmd hbr hle
+      obtain ⟨t, idx⟩ := η; dsimp only at hcmd hle ⊢
+      have hcX : Xfull.cmdAt ⟨t, idx - (Pre.prog t).length⟩ = some cc :=
+        hcmdX ⟨t, idx⟩ cc hle hcmd
+      have hidxeq : idx = (Pre.prog t).length + (idx - (Pre.prog t).length) := by omega
+      rw [hidxeq, hgX t (idx - (Pre.prog t).length) cc parr hcX hbr]
+      have := one_le_pointGen_barrierOp hτX hτXlast hcX hbr
+      omega
+    -- a `Pre`-region barrier-`b` op has generation `≤ R + 1`
+    have hgPreLe : ∀ (η : ProgPoint) (cc : Cmd) (parr : ℕ+), Pfull.cmdAt η = some cc →
+        Cmd.barrierRef cc = some (b, parr) → η.idx < (Pre.prog η.thread).length →
+        pointGen Pfull τfull η ≤ R + 1 := by
+      intro η cc parr hcmd hbr hltp
+      obtain ⟨t, idx⟩ := η; dsimp only at hcmd hltp ⊢
+      rw [seq_glue_prefix_pointGen hpreXf htP htPL hτX (hcmdPre ⟨t, idx⟩ cc hltp hcmd) hbr]
+      have := barrierOp_gen_le_total htP htPL (hcmdPre ⟨t, idx⟩ cc hltp hcmd) hbr
+      omega
+    by_cases hbI : b ∈ I.barriers
+    · have hδ1 : 1 ≤ δ := by rw [hδ]; exact one_le_delta h rfl hbI
+      by_cases hc2front : c2.idx < (Pre.prog c2.thread).length + 2 * (A.prog c2.thread).length
+      · refine Or.inl ⟨?_, hc2front⟩
+        by_contra hc1con
+        rw [Nat.not_lt] at hc1con
+        have hlow := hPL hbI c1 (Cmd.sync b nn) nn hsync1 rfl hc1con
+        have hupp := hPU c2 cc2 par2 hc2cmd hc2ref hc2front
+        omega
+      · rw [Nat.not_lt] at hc2front
+        refine Or.inr ⟨?_, hc2front⟩
+        by_contra hc1con
+        rw [not_or, Nat.not_lt, Nat.not_le] at hc1con
+        obtain ⟨_hc1a, hc1b⟩ := hc1con
+        have hupp := hPS0 c1 nn hsync1 (by omega)
+        have hlow := hPL hbI c2 cc2 par2 hc2cmd hc2ref hc2front
+        omega
+    · -- `b ∉ I.barriers`: a barrier-`b` op of `Pfull` is in `Pre` or `E`, never in a batch
+      have hloc : ∀ (η : ProgPoint) (cc : Cmd) (parr : ℕ+), Pfull.cmdAt η = some cc →
+          Cmd.barrierRef cc = some (b, parr) →
+          η.idx < (Pre.prog η.thread).length ∨
+            (Pre.prog η.thread).length + (n + 1) * (A.prog η.thread).length ≤ η.idx := by
+        intro η cc parr hcmd hbr
+        by_contra hcon
+        rw [not_or, Nat.not_lt, Nat.not_le] at hcon
+        obtain ⟨hge, hlt⟩ := hcon
+        have hcX := hcmdX η cc hge hcmd
+        have hlen : ((A ^ (n + 1)).prog η.thread).length = (n + 1) * (A.prog η.thread).length :=
+          CTA.pow_prog_length A (n + 1) η.thread
+        have hcpow : (A ^ (n + 1)).cmdAt ⟨η.thread, η.idx - (Pre.prog η.thread).length⟩
+            = some cc := by
+          have hx : ((A ^ (n + 1)).prog η.thread ++ E.prog η.thread)[η.idx
+              - (Pre.prog η.thread).length]? = some cc := hcX
+          rwa [List.getElem?_append_left (by rw [hlen]; omega)] at hx
+        exact absurd (mem_barriers_of_cmdAt_pow (k := I.loopK h) (m := n + 1) hcpow hbr) hbI
+      by_cases hc2front : c2.idx < (Pre.prog c2.thread).length + 2 * (A.prog c2.thread).length
+      · refine Or.inl ⟨?_, hc2front⟩
+        have hc2pre : c2.idx < (Pre.prog c2.thread).length := by
+          rcases hloc c2 cc2 par2 hc2cmd hc2ref with hh | hh
+          · exact hh
+          · exfalso
+            have h2le : 2 * (A.prog c2.thread).length ≤ (n + 1) * (A.prog c2.thread).length :=
+              Nat.mul_le_mul_right _ (by omega)
+            omega
+        rcases hloc c1 (Cmd.sync b nn) nn hsync1 rfl with hh | hh
+        · omega
+        · exfalso
+          have hg1 := hgXge1 c1 (Cmd.sync b nn) nn hsync1 rfl (by omega)
+          have hg2 := hgPreLe c2 cc2 par2 hc2cmd hc2ref hc2pre
+          omega
+      · rw [Nat.not_lt] at hc2front
+        refine Or.inr ⟨?_, hc2front⟩
+        rcases hloc c1 (Cmd.sync b nn) nn hsync1 rfl with hh | hh
+        · exact Or.inl hh
+        · refine Or.inr ?_
+          have : (A.prog c1.thread).length ≤ (n + 1) * (A.prog c1.thread).length :=
+            Nat.le_mul_of_pos_left _ (by omega)
+          omega
+  rcases hcoloc with hfront | hcore
+  · -- **Front case**: order the pair in the two-batch reference `ref = Pre ⨾ (A^2) ⨾ E_ref`,
+    -- confine its chain to the front by soundness, and lift edge-by-edge via front agreement.
+    obtain ⟨hc1f, hc2f⟩ := hfront
+    obtain ⟨sdZ, hτZlast⟩ := hτZ.2
+    have hpreZ :
+        Pre.ids = ((A ^ (1 + 1)).seq E_ref ((CTA.pow_ids A (1 + 1)).trans hidsRef)).ids := by
+      change Pre.ids = (A ^ (1 + 1)).ids; rw [CTA.pow_ids]; exact hpre
+    set Z := (A ^ (1 + 1)).seq E_ref ((CTA.pow_ids A (1 + 1)).trans hidsRef) with hZdef
+    set Pref := Pre.seq Z hpreZ with hPrefdef
+    obtain ⟨hτref, -, -⟩ := glue_trace hpreZ htP htPL hτZ
+    set τref := List.map (Config.seqLift Pre Z) tP.dropLast ++ τZ.tail with hτrefdef
+    -- `Pref = loopProgram Pre A E_ref hpre hidsRef 2`, so `WS Pref` and `check Pref τref = true`
+    have hPrefEq : CTA.loopProgram Pre A E_ref hpre hidsRef 2 = Pref := by
+      apply CTA.ext
+      · rfl
+      · funext t
+        change Pre.prog t ++ (A ^ 2).prog t ++ E_ref.prog t
+          = Pre.prog t ++ ((A ^ (1 + 1)).prog t ++ E_ref.prog t)
+        rw [List.append_assoc]
+    rw [hPrefEq] at hPre2BatchRef
+    have hcheckRef : (CheckWellSynchronized Pref τref).1 = true :=
+      (checkWellSynchronized_correct_impl hτref).mpr hPre2BatchRef
+    -- command agreement between `Pfull` and `Pref` on the front (`idx < Lp + 2L`)
+    have hcmdfa : ∀ (η : ProgPoint), η.idx < (Pre.prog η.thread).length
+        + 2 * (A.prog η.thread).length → Pfull.cmdAt η = Pref.cmdAt η := by
+      intro η hη
+      obtain ⟨t, idx⟩ := η; dsimp only at hη ⊢
+      by_cases hpre : idx < (Pre.prog t).length
+      · change (Pre.prog t ++ Xfull.prog t)[idx]? = (Pre.prog t ++ Z.prog t)[idx]?
+        rw [List.getElem?_append_left hpre, List.getElem?_append_left hpre]
+      · rw [Nat.not_lt] at hpre
+        have hL0 : 0 < (A.prog t).length := by omega
+        have he : idx - (Pre.prog t).length < 2 * (A.prog t).length := by omega
+        have hmul21 : 2 * (A.prog t).length ≤ (n + 1) * (A.prog t).length :=
+          Nat.mul_le_mul_right _ (by omega)
+        have hjL : (idx - (Pre.prog t).length) % (A.prog t).length < (A.prog t).length :=
+          Nat.mod_lt _ hL0
+        have hp2 : (idx - (Pre.prog t).length) / (A.prog t).length < 2 := by
+          rw [Nat.div_lt_iff_lt_mul hL0]; omega
+        have hdec : idx - (Pre.prog t).length
+            = (idx - (Pre.prog t).length) / (A.prog t).length * (A.prog t).length
+              + (idx - (Pre.prog t).length) % (A.prog t).length := by
+          rw [Nat.mul_comm]; exact (Nat.div_add_mod _ _).symm
+        have hXc : Xfull.cmdAt ⟨t, idx - (Pre.prog t).length⟩
+            = (A ^ (n + 1)).cmdAt ⟨t, idx - (Pre.prog t).length⟩ := by
+          change ((A ^ (n + 1)).prog t ++ E.prog t)[idx - (Pre.prog t).length]?
+            = ((A ^ (n + 1)).prog t)[idx - (Pre.prog t).length]?
+          rw [List.getElem?_append_left (by rw [CTA.pow_prog_length]; omega)]
+        have hZc : Z.cmdAt ⟨t, idx - (Pre.prog t).length⟩
+            = (A ^ (1 + 1)).cmdAt ⟨t, idx - (Pre.prog t).length⟩ := by
+          change ((A ^ (1 + 1)).prog t ++ E_ref.prog t)[idx - (Pre.prog t).length]?
+            = ((A ^ (1 + 1)).prog t)[idx - (Pre.prog t).length]?
+          rw [List.getElem?_append_left (by rw [CTA.pow_prog_length]; omega)]
+        change (Pre.prog t ++ Xfull.prog t)[idx]? = (Pre.prog t ++ Z.prog t)[idx]?
+        rw [List.getElem?_append_right hpre, List.getElem?_append_right hpre]
+        change Xfull.cmdAt ⟨t, idx - (Pre.prog t).length⟩ = Z.cmdAt ⟨t, idx - (Pre.prog t).length⟩
+        rw [hXc, hZc, hdec,
+          CTA.cmdAt_pow_batch_copy A hjL
+            (show (idx - (Pre.prog t).length) / (A.prog t).length < n + 1 by omega),
+          CTA.cmdAt_pow_batch_copy A hjL
+            (show (idx - (Pre.prog t).length) / (A.prog t).length < 1 + 1 by omega)]
+    -- front generation agreement (on barrier ops), via the `E`-independent closed form
+    have hfa : ∀ (η : ProgPoint) (cc : Cmd) (bb : Barrier) (parr : ℕ+), Pfull.cmdAt η = some cc →
+        Cmd.barrierRef cc = some (bb, parr) →
+        η.idx < (Pre.prog η.thread).length + 2 * (A.prog η.thread).length →
+        pointGen Pfull τfull η = pointGen Pref τref η := by
+      intro η cc bb parr hcmd hbr hη
+      obtain ⟨t, idx⟩ := η; dsimp only at hcmd hη ⊢
+      by_cases hpre : idx < (Pre.prog t).length
+      · rw [seq_glue_prefix_pointGen hpreXf htP htPL hτX (hcmdPre ⟨t, idx⟩ cc hpre hcmd) hbr,
+          seq_glue_prefix_pointGen hpreZ htP htPL hτZ (hcmdPre ⟨t, idx⟩ cc hpre hcmd) hbr]
+      · rw [Nat.not_lt] at hpre
+        have hL0 : 0 < (A.prog t).length := by omega
+        have he : idx - (Pre.prog t).length < 2 * (A.prog t).length := by omega
+        have hmul21 : 2 * (A.prog t).length ≤ (n + 1) * (A.prog t).length :=
+          Nat.mul_le_mul_right _ (by omega)
+        have hjL : (idx - (Pre.prog t).length) % (A.prog t).length < (A.prog t).length :=
+          Nat.mod_lt _ hL0
+        have hp2 : (idx - (Pre.prog t).length) / (A.prog t).length < 2 := by
+          rw [Nat.div_lt_iff_lt_mul hL0]; omega
+        have hdec : idx - (Pre.prog t).length
+            = (idx - (Pre.prog t).length) / (A.prog t).length * (A.prog t).length
+              + (idx - (Pre.prog t).length) % (A.prog t).length := by
+          rw [Nat.mul_comm]; exact (Nat.div_add_mod _ _).symm
+        have hXc : Xfull.cmdAt ⟨t, idx - (Pre.prog t).length⟩ = some cc :=
+          hcmdX ⟨t, idx⟩ cc hpre hcmd
+        have hPrefcmd : Pref.cmdAt ⟨t, idx⟩ = some cc := by
+          rw [← hcmdfa ⟨t, idx⟩ (by dsimp only; omega)]; exact hcmd
+        have hZc : Z.cmdAt ⟨t, idx - (Pre.prog t).length⟩ = some cc := by
+          have hx : (Pre.prog t ++ Z.prog t)[idx]? = some cc := hPrefcmd
+          rwa [List.getElem?_append_right hpre] at hx
+        have hbatch : (A.prog t)[(idx - (Pre.prog t).length) % (A.prog t).length]? = some cc := by
+          have hcopy : (A ^ (n + 1)).cmdAt ⟨t, idx - (Pre.prog t).length⟩
+              = (A.prog t)[(idx - (Pre.prog t).length) % (A.prog t).length]? := by
+            conv_lhs => rw [hdec]
+            exact CTA.cmdAt_pow_batch_copy A hjL (by omega)
+          have hx : Xfull.cmdAt ⟨t, idx - (Pre.prog t).length⟩
+              = (A ^ (n + 1)).cmdAt ⟨t, idx - (Pre.prog t).length⟩ := by
+            change ((A ^ (n + 1)).prog t ++ E.prog t)[idx - (Pre.prog t).length]?
+              = ((A ^ (n + 1)).prog t)[idx - (Pre.prog t).length]?
+            rw [List.getElem?_append_left (by rw [CTA.pow_prog_length]; omega)]
+          rw [hx, hcopy] at hXc; exact hXc
+        obtain ⟨M₁, hM₁⟩ := exists_time_of_ends_done ht₁.1 ht₁L
+          (η := ⟨t, (idx - (Pre.prog t).length) % (A.prog t).length⟩) hjL
+        rw [show (⟨t, idx⟩ : ProgPoint)
+            = ⟨t, (Pre.prog t).length + (idx - (Pre.prog t).length)⟩ from by congr 1; omega]
+        rw [seq_glue_epilogue_pointGen hpreXf htP htPL hτX hXc hbr,
+          seq_glue_epilogue_pointGen hpreZ htP htPL hτZ hZc hbr]
+        congr 1
+        rw [hdec, hfcX t _ _ cc bb parr M₁ hjL hp2 hbatch hbr hM₁,
+          hfcZ t _ _ cc bb parr M₁ hjL hp2 hbatch hbr hM₁]
+    -- length facts for `Pfull`, `Pref`, and the `A := Pre ⨾ (A^2)` view of `ref`
+    have hPfulllen : ∀ t, (Pfull.prog t).length
+        = (Pre.prog t).length + (n + 1) * (A.prog t).length + (E.prog t).length := by
+      intro t
+      change (Pre.prog t ++ ((A ^ (n + 1)).prog t ++ E.prog t)).length = _
+      rw [List.length_append, List.length_append, CTA.pow_prog_length]; omega
+    have hfront_lt_full : ∀ (y : ProgPoint),
+        y.idx < (Pre.prog y.thread).length + 2 * (A.prog y.thread).length →
+        y.idx < (Pfull.prog y.thread).length := by
+      intro y hy
+      have h2 : 2 * (A.prog y.thread).length ≤ (n + 1) * (A.prog y.thread).length :=
+        Nat.mul_le_mul_right _ (by omega)
+      rw [hPfulllen]; omega
+    have hpre2 : Pre.ids = (A ^ 2).ids := by rw [CTA.pow_ids]; exact hpre
+    have hids2' : (Pre.seq (A ^ 2) hpre2).ids = E_ref.ids := hpre.trans hidsRef
+    have hAssoc : Pref = (Pre.seq (A ^ 2) hpre2).seq E_ref hids2' := by
+      apply CTA.ext
+      · rfl
+      · funext t
+        change Pre.prog t ++ ((A ^ (1 + 1)).prog t ++ E_ref.prog t)
+          = Pre.prog t ++ (A ^ 2).prog t ++ E_ref.prog t
+        rw [List.append_assoc]
+    have hA'len : ∀ t, ((Pre.seq (A ^ 2) hpre2).prog t).length
+        = (Pre.prog t).length + 2 * (A.prog t).length := by
+      intro t
+      change (Pre.prog t ++ (A ^ 2).prog t).length = _
+      rw [List.length_append, CTA.pow_prog_length]
+    have hPreflen : ∀ t, (Pref.prog t).length
+        = (Pre.prog t).length + 2 * (A.prog t).length + (E_ref.prog t).length := by
+      intro t
+      change (Pre.prog t ++ ((A ^ (1 + 1)).prog t ++ E_ref.prog t)).length = _
+      rw [List.length_append, List.length_append, CTA.pow_prog_length]; omega
+    -- a predecessor of the front point `c3` is a valid program point of `Pref`
+    have hppts : ∀ a, happensBefore Pref τref a ⟨c2.thread, c2.idx - 1⟩ → a ∈ Pref.progPoints := by
+      intro a haR
+      rcases haR.cases_head with heq | ⟨x, hedge, _⟩
+      · rw [heq]
+        refine (mem_progPoints_iff Pref ⟨c2.thread, c2.idx - 1⟩).mpr ⟨?_, ?_⟩
+        · exact ((mem_progPoints_iff Pfull c2).mp hc2).1
+        · dsimp only; rw [hPreflen]; have := hc2f; omega
+      · exact (initRelation_cases hedge).1
+    -- confinement: a predecessor of the front `c3` is front (soundness forbids `E_ref → front`)
+    have hconf : ∀ a, happensBefore Pref τref a ⟨c2.thread, c2.idx - 1⟩ →
+        a.idx < (Pre.prog a.thread).length + 2 * (A.prog a.thread).length := by
+      intro a haR
+      by_contra hcon
+      rw [Nat.not_lt] at hcon
+      have hapts := (mem_progPoints_iff Pref a).mp (hppts a haR)
+      have haidx : a.idx < (Pre.prog a.thread).length + 2 * (A.prog a.thread).length
+          + (E_ref.prog a.thread).length := by rw [← hPreflen]; exact hapts.2
+      refine glue_no_happensBefore_B_to_A hids2' (hAssoc ▸ hPre2BatchRef) htAR htARlast
+        (hAssoc ▸ hτref) ⟨a, ⟨c2.thread, c2.idx - 1⟩, hAssoc ▸ haR, ⟨?_, ?_⟩, ?_⟩
+      · rw [hA'len]; exact hcon
+      · rw [hA'len]; exact haidx
+      · rw [hA'len]; have := hc2f; dsimp only; omega
+    -- a front `initRelation Pref`-edge lifts to an `initRelation Pfull`-edge
+    have hedgelift : ∀ x m, (x, m) ∈ initRelation Pref τref →
+        x.idx < (Pre.prog x.thread).length + 2 * (A.prog x.thread).length →
+        m.idx < (Pre.prog m.thread).length + 2 * (A.prog m.thread).length →
+        (x, m) ∈ initRelation Pfull τfull := by
+      intro x m hxm hxf hmf
+      have hxpf : x ∈ Pfull.progPoints :=
+        (mem_progPoints_iff Pfull x).mpr ⟨by
+          have hxp : x ∈ Pref.progPoints := by
+            rw [mem_initRelation_iff] at hxm
+            rcases hxm with ⟨hh, _, _⟩ | ⟨_, _, hh, _⟩ | ⟨_, _, hh, _⟩ <;> exact hh
+          rw [hPrefdef] at hxp; exact ((mem_progPoints_iff _ x).mp hxp).1, hfront_lt_full x hxf⟩
+      have hmpf : m ∈ Pfull.progPoints :=
+        (mem_progPoints_iff Pfull m).mpr ⟨by
+          have hmp : m ∈ Pref.progPoints := by
+            rw [mem_initRelation_iff] at hxm
+            rcases hxm with ⟨hh, hlt, hbeq⟩ | ⟨_, _, _, hh, _⟩ | ⟨_, _, _, hh, _⟩
+            · rw [hbeq]
+              exact (mem_progPoints_iff Pref _).mpr
+                ⟨((mem_progPoints_iff Pref x).mp hh).1, by omega⟩
+            · exact hh
+            · exact hh
+          rw [hPrefdef] at hmp; exact ((mem_progPoints_iff _ m).mp hmp).1, hfront_lt_full m hmf⟩
+      rw [mem_initRelation_iff] at hxm ⊢
+      rcases hxm with ⟨hxpts, hlt, hbeq⟩ | ⟨bb, mm, hxpts, hmpts, hca, hcb, hg⟩
+          | ⟨bb, mm, hxpts, hmpts, hca, hcb, hg⟩
+      · refine Or.inl ⟨hxpf, ?_, hbeq⟩
+        have hm := hfront_lt_full m hmf
+        rw [hbeq] at hm; exact hm
+      · refine Or.inr (Or.inl ⟨bb, mm, hxpf, hmpf, ?_, ?_, ?_⟩)
+        · rw [hcmdfa x hxf]; exact hca
+        · rw [hcmdfa m hmf]; exact hcb
+        · rw [hfa x (Cmd.arrive bb mm) bb mm (by rw [hcmdfa x hxf]; exact hca) rfl hxf,
+            hfa m (Cmd.sync bb mm) bb mm (by rw [hcmdfa m hmf]; exact hcb) rfl hmf]; exact hg
+      · refine Or.inr (Or.inr ⟨bb, mm, hxpf, hmpf, ?_, ?_, ?_⟩)
+        · rw [hcmdfa x hxf]; exact hca
+        · rw [hcmdfa m hmf]; exact hcb
+        · rw [hfa x (Cmd.sync bb mm) bb mm (by rw [hcmdfa x hxf]; exact hca) rfl hxf,
+            hfa m (Cmd.sync bb mm) bb mm (by rw [hcmdfa m hmf]; exact hcb) rfl hmf]; exact hg
+    -- lift the whole `Pref`-chain to `Pfull` (each chain point is front by `hconf`)
+    have hlift : ∀ a, happensBefore Pref τref a ⟨c2.thread, c2.idx - 1⟩ →
+        happensBefore Pfull τfull a ⟨c2.thread, c2.idx - 1⟩ := by
+      intro a haR
+      induction haR using Relation.ReflTransGen.head_induction_on with
+      | refl => exact Relation.ReflTransGen.refl
+      | @head x m hedge hrest ih =>
+        have hxf := hconf x (Relation.ReflTransGen.head hedge hrest)
+        have hmf := hconf m hrest
+        exact Relation.ReflTransGen.head (hedgelift x m hedge hxf hmf) ih
+    -- order `(c1, c2)` in `Pref` (a flagged pair there by command/gen agreement), then lift
+    have hsync1R : Pref.cmdAt c1 = some (Cmd.sync b nn) := by rw [← hcmdfa c1 hc1f]; exact hsync1
+    have hbar2R : (Pref.cmdAt c2).bind Cmd.barrier? = some b := by
+      rw [← hcmdfa c2 hc2f]; exact hbar2
+    have hc2cmdR : Pref.cmdAt c2 = some cc2 := by rw [← hcmdfa c2 hc2f]; exact hc2cmd
+    have hgenR : pointGen Pref τref c2 = pointGen Pref τref c1 + 1 := by
+      rw [← hfa c1 (Cmd.sync b nn) b nn hsync1 rfl hc1f, ← hfa c2 cc2 b par2 hc2cmd hc2ref hc2f]
+      exact hgen
+    by_cases hc1c3 : c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)
+    · rw [← hc1c3]
+      exact subset_iterate_transClosureStep _ _ (by
+        rw [mem_initRelation_iff]
+        exact Or.inr (Or.inr ⟨b, nn, hc1, hc1, hsync1, hsync1, rfl⟩))
+    · have hmem := mem_transClosure_of_check hcheckRef
+        (mem_progPoints_of_cmdAt _ hsync1R) hsync1R
+        (mem_progPoints_of_cmdAt _ hc2cmdR) hbar2R hgenR hidx
+      have hHBp := hlift c1 ((mem_transClosure_imp_transGen _ hmem).to_reflTransGen)
+      rw [happensBefore, Relation.reflTransGen_iff_eq_or_transGen] at hHBp
+      rcases hHBp with heq | htg
+      · exact absurd heq.symm hc1c3
+      · exact mem_transClosure_of_transGen _ hc1c3 htg
+  · -- **Core case**: shift down one batch, order via `hprev`, and lift through the loop+epilogue
+    -- region (`back` strips `Pre`, the bundle's `hmonoX` shifts by `L`, `forward` re-adds `Pre`).
+    obtain ⟨hc1core, hc2core⟩ := hcore
+    have hpreXn : Pre.ids = (((A ^ n).seq E ((CTA.pow_ids A n).trans hids))).ids := by
+      change Pre.ids = (A ^ n).ids; rw [CTA.pow_ids]; exact hpre
+    set Xpref := (A ^ n).seq E ((CTA.pow_ids A n).trans hids) with hXprefdef
+    set Ppref := Pre.seq Xpref hpreXn with hPprefdef
+    obtain ⟨hτpref, -, -⟩ := glue_trace hpreXn htP htPL hτnX
+    set τpref := List.map (Config.seqLift Pre Xpref) tP.dropLast ++ τnX.tail with hτprefdef
+    have hPprefEq : CTA.loopProgram Pre A E hpre hids n = Ppref := by
+      apply CTA.ext
+      · rfl
+      · funext t
+        change Pre.prog t ++ (A ^ n).prog t ++ E.prog t
+          = Pre.prog t ++ ((A ^ n).prog t ++ E.prog t)
+        rw [List.append_assoc]
+    rw [hPprefEq] at hprev
+    have hcheckPref : (CheckWellSynchronized Ppref τpref).1 = true :=
+      (checkWellSynchronized_correct_impl hτpref).mpr hprev
+    obtain ⟨sdX, hτXlast⟩ := hτX.2
+    obtain ⟨sdnX, hτnXlast⟩ := hτnX.2
+    -- generation of an `Xfull`/`Xpref`-region point across the `Pre` glue (Step 0)
+    have hgXf : ∀ (t : ThreadId) (e : Nat) (cc : Cmd) (bb : Barrier) (parr : ℕ+),
+        Xfull.cmdAt ⟨t, e⟩ = some cc → Cmd.barrierRef cc = some (bb, parr) →
+        pointGen Pfull τfull ⟨t, (Pre.prog t).length + e⟩
+          = recycleCount bb tP (tP.length - 2) + pointGen Xfull τX ⟨t, e⟩ :=
+      fun t e cc bb parr hcE hbr => seq_glue_epilogue_pointGen hpreXf htP htPL hτX hcE hbr
+    have hgXp : ∀ (t : ThreadId) (e : Nat) (cc : Cmd) (bb : Barrier) (parr : ℕ+),
+        Xpref.cmdAt ⟨t, e⟩ = some cc → Cmd.barrierRef cc = some (bb, parr) →
+        pointGen Ppref τpref ⟨t, (Pre.prog t).length + e⟩
+          = recycleCount bb tP (tP.length - 2) + pointGen Xpref τnX ⟨t, e⟩ :=
+      fun t e cc bb parr hcE hbr => seq_glue_epilogue_pointGen hpreXn htP htPL hτnX hcE hbr
+    -- command transfer (X-region) for `Pfull` and `Ppref`
+    have hcmdXf : ∀ (η : ProgPoint) (cc : Cmd), (Pre.prog η.thread).length ≤ η.idx →
+        Pfull.cmdAt η = some cc →
+        Xfull.cmdAt ⟨η.thread, η.idx - (Pre.prog η.thread).length⟩ = some cc := by
+      intro η cc hle hcmd
+      have : (Pre.prog η.thread ++ Xfull.prog η.thread)[η.idx]? = some cc := hcmd
+      rwa [List.getElem?_append_right hle] at this
+    have hcmdXp : ∀ (η : ProgPoint) (cc : Cmd), (Pre.prog η.thread).length ≤ η.idx →
+        Ppref.cmdAt η = some cc →
+        Xpref.cmdAt ⟨η.thread, η.idx - (Pre.prog η.thread).length⟩ = some cc := by
+      intro η cc hle hcmd
+      have : (Pre.prog η.thread ++ Xpref.prog η.thread)[η.idx]? = some cc := hcmd
+      rwa [List.getElem?_append_right hle] at this
+    -- **forward**: a `happensBefore Xfull`-pair lifts to `Pfull` by `+Lp` (the `Pre` glue)
+    have hforward : ∀ a d, happensBefore Xfull τX a d →
+        happensBefore Pfull τfull ⟨a.thread, a.idx + (Pre.prog a.thread).length⟩
+          ⟨d.thread, d.idx + (Pre.prog d.thread).length⟩ := by
+      intro a d hR
+      refine Relation.ReflTransGen.lift
+        (fun p => (⟨p.thread, p.idx + (Pre.prog p.thread).length⟩ : ProgPoint))
+        (fun x y hxy => ?_) hR
+      rw [mem_initRelation_iff] at hxy ⊢
+      have hcmdup : ∀ (p : ProgPoint), Pfull.cmdAt ⟨p.thread, p.idx + (Pre.prog p.thread).length⟩
+          = Xfull.cmdAt p := by
+        intro p
+        change (Pre.prog p.thread ++ Xfull.prog p.thread)[p.idx + (Pre.prog p.thread).length]?
+          = (Xfull.prog p.thread)[p.idx]?
+        rw [List.getElem?_append_right (Nat.le_add_left _ _), Nat.add_sub_cancel]
+      have hmemup : ∀ (p : ProgPoint), p ∈ Xfull.progPoints →
+          (⟨p.thread, p.idx + (Pre.prog p.thread).length⟩ : ProgPoint) ∈ Pfull.progPoints := by
+        intro p hp
+        refine (mem_progPoints_iff Pfull _).mpr
+          ⟨hpreXf.symm ▸ ((mem_progPoints_iff Xfull p).mp hp).1, ?_⟩
+        change p.idx + (Pre.prog p.thread).length
+          < (Pre.prog p.thread ++ Xfull.prog p.thread).length
+        rw [List.length_append]; have := ((mem_progPoints_iff Xfull p).mp hp).2; omega
+      have hgenup : ∀ (p : ProgPoint) (cc : Cmd) (bb : Barrier) (parr : ℕ+),
+          Xfull.cmdAt p = some cc → Cmd.barrierRef cc = some (bb, parr) →
+          pointGen Pfull τfull ⟨p.thread, p.idx + (Pre.prog p.thread).length⟩
+            = recycleCount bb tP (tP.length - 2) + pointGen Xfull τX p := by
+        intro p cc bb parr hcp hbr
+        obtain ⟨pt, pidx⟩ := p
+        rw [show pidx + (Pre.prog pt).length = (Pre.prog pt).length + pidx from Nat.add_comm _ _]
+        exact hgXf pt pidx cc bb parr hcp hbr
+      rcases hxy with ⟨hxpts, hlt, hbeq⟩ | ⟨bb, mm, hxpts, hypts, hca, hcb, hg⟩
+          | ⟨bb, mm, hxpts, hypts, hca, hcb, hg⟩
+      · subst hbeq
+        refine Or.inl ⟨hmemup x hxpts, ?_, by simp only [ProgPoint.mk.injEq, true_and]; omega⟩
+        change x.idx + (Pre.prog x.thread).length + 1
+          < (Pre.prog x.thread ++ Xfull.prog x.thread).length
+        rw [List.length_append]; omega
+      · refine Or.inr (Or.inl ⟨bb, mm, hmemup x hxpts, hmemup y hypts,
+          by rw [hcmdup]; exact hca, by rw [hcmdup]; exact hcb, ?_⟩)
+        rw [hgenup x (Cmd.arrive bb mm) bb mm hca rfl, hgenup y (Cmd.sync bb mm) bb mm hcb rfl, hg]
+      · refine Or.inr (Or.inr ⟨bb, mm, hmemup x hxpts, hmemup y hypts,
+          by rw [hcmdup]; exact hca, by rw [hcmdup]; exact hcb, ?_⟩)
+        rw [hgenup x (Cmd.sync bb mm) bb mm hca rfl, hgenup y (Cmd.sync bb mm) bb mm hcb rfl, hg]
+    -- `Xfull = A ⨾ Xpref` (one batch prepended), used for the X-region command/gen shift
+    have hXfullsplit : ∀ t, Xfull.prog t = A.prog t ++ Xpref.prog t := by
+      intro t
+      change (A ^ (n + 1)).prog t ++ E.prog t = A.prog t ++ ((A ^ n).prog t ++ E.prog t)
+      rw [CTA.pow_succ_prog, List.append_assoc]
+    -- generation of a `Ppref` X-region barrier point across the `Pre` glue
+    have hgenXp : ∀ (p : ProgPoint) (cc : Cmd) (bb : Barrier) (parr : ℕ+),
+        (Pre.prog p.thread).length ≤ p.idx → Ppref.cmdAt p = some cc →
+        Cmd.barrierRef cc = some (bb, parr) →
+        pointGen Ppref τpref p = recycleCount bb tP (tP.length - 2)
+          + pointGen Xpref τnX ⟨p.thread, p.idx - (Pre.prog p.thread).length⟩ := by
+      intro p cc bb parr hle hcmd hbr
+      have hg := hgXp p.thread (p.idx - (Pre.prog p.thread).length) cc bb parr
+        (hcmdXp p cc hle hcmd) hbr
+      rwa [show (Pre.prog p.thread).length + (p.idx - (Pre.prog p.thread).length) = p.idx from by
+        omega] at hg
+    -- **back** (per-edge): an `initRelation Ppref`-edge with an X-region source stays X-region
+    -- and strips `Pre` (the target is a `sync`, whose generation `≤ R` can't match the source's
+    -- `≥ R + 1`, so no edge leaves the loop+epilogue region)
+    have hLx : ∀ (p : ProgPoint), (Pre.prog p.thread).length ≤ p.idx → p ∈ Ppref.progPoints →
+        p.idx - (Pre.prog p.thread).length < (Xpref.prog p.thread).length := by
+      intro p hle hp
+      have hlt := ((mem_progPoints_iff Ppref p).mp hp).2
+      have hPL : (Ppref.prog p.thread).length
+          = (Pre.prog p.thread).length + (Xpref.prog p.thread).length := by
+        change (Pre.prog p.thread ++ Xpref.prog p.thread).length = _; rw [List.length_append]
+      omega
+    have mkXpts : ∀ (p : ProgPoint), (Pre.prog p.thread).length ≤ p.idx → p ∈ Ppref.progPoints →
+        (⟨p.thread, p.idx - (Pre.prog p.thread).length⟩ : ProgPoint) ∈ Xpref.progPoints := by
+      intro p hle hp
+      exact (mem_progPoints_iff Xpref _).mpr
+        ⟨hpreXn ▸ ((mem_progPoints_iff Ppref p).mp hp).1, hLx p hle hp⟩
+    have hbackedge : ∀ x y, (x, y) ∈ initRelation Ppref τpref → (Pre.prog x.thread).length ≤ x.idx →
+        (Pre.prog y.thread).length ≤ y.idx ∧
+          (⟨x.thread, x.idx - (Pre.prog x.thread).length⟩,
+            ⟨y.thread, y.idx - (Pre.prog y.thread).length⟩) ∈ initRelation Xpref τnX := by
+      intro x y hxy hxX
+      rw [mem_initRelation_iff] at hxy
+      rcases hxy with ⟨hxpts, hlt, hbeq⟩ | ⟨bb, mm, hxpts, hypts, hca, hcb, hg⟩
+          | ⟨bb, mm, hxpts, hypts, hca, hcb, hg⟩
+      · subst hbeq
+        refine ⟨by dsimp only; omega, ?_⟩
+        rw [mem_initRelation_iff]
+        refine Or.inl ⟨mkXpts x hxX hxpts, ?_, by simp only [ProgPoint.mk.injEq, true_and]; omega⟩
+        dsimp only
+        have hPL : (Ppref.prog x.thread).length
+            = (Pre.prog x.thread).length + (Xpref.prog x.thread).length := by
+          change (Pre.prog x.thread ++ Xpref.prog x.thread).length = _; rw [List.length_append]
+        omega
+      · have hyX : (Pre.prog y.thread).length ≤ y.idx := by
+          by_contra hyPre; rw [Nat.not_le] at hyPre
+          have hcby : Pre.cmdAt y = some (Cmd.sync bb mm) := by
+            have hh : (Pre.prog y.thread ++ Xpref.prog y.thread)[y.idx]?
+                = some (Cmd.sync bb mm) := hcb
+            rwa [List.getElem?_append_left hyPre] at hh
+          have hgy : pointGen Ppref τpref y ≤ recycleCount bb tP (tP.length - 2) := by
+            rw [seq_glue_prefix_pointGen hpreXn htP htPL hτnX hcby rfl]
+            exact sync_gen_le_total htP htPL hcby
+          have hgx := hgenXp x (Cmd.arrive bb mm) bb mm hxX hca rfl
+          have h1le := one_le_pointGen_barrierOp hτnX hτnXlast (hcmdXp x _ hxX hca) rfl
+          omega
+        refine ⟨hyX, ?_⟩
+        rw [mem_initRelation_iff]
+        refine Or.inr (Or.inl ⟨bb, mm, mkXpts x hxX hxpts,
+          mkXpts y hyX hypts, hcmdXp x _ hxX hca, hcmdXp y _ hyX hcb, ?_⟩)
+        have hgx := hgenXp x (Cmd.arrive bb mm) bb mm hxX hca rfl
+        have hgy := hgenXp y (Cmd.sync bb mm) bb mm hyX hcb rfl
+        omega
+      · have hyX : (Pre.prog y.thread).length ≤ y.idx := by
+          by_contra hyPre; rw [Nat.not_le] at hyPre
+          have hcby : Pre.cmdAt y = some (Cmd.sync bb mm) := by
+            have hh : (Pre.prog y.thread ++ Xpref.prog y.thread)[y.idx]?
+                = some (Cmd.sync bb mm) := hcb
+            rwa [List.getElem?_append_left hyPre] at hh
+          have hgy : pointGen Ppref τpref y ≤ recycleCount bb tP (tP.length - 2) := by
+            rw [seq_glue_prefix_pointGen hpreXn htP htPL hτnX hcby rfl]
+            exact sync_gen_le_total htP htPL hcby
+          have hgx := hgenXp x (Cmd.sync bb mm) bb mm hxX hca rfl
+          have h1le := one_le_pointGen_barrierOp hτnX hτnXlast (hcmdXp x _ hxX hca) rfl
+          omega
+        refine ⟨hyX, ?_⟩
+        rw [mem_initRelation_iff]
+        refine Or.inr (Or.inr ⟨bb, mm, mkXpts x hxX hxpts,
+          mkXpts y hyX hypts, hcmdXp x _ hxX hca, hcmdXp y _ hyX hcb, ?_⟩)
+        have hgx := hgenXp x (Cmd.sync bb mm) bb mm hxX hca rfl
+        have hgy := hgenXp y (Cmd.sync bb mm) bb mm hyX hcb rfl
+        omega
+    -- **back** (chain)
+    have hback : ∀ a d, happensBefore Ppref τpref a d → (Pre.prog a.thread).length ≤ a.idx →
+        (Pre.prog d.thread).length ≤ d.idx ∧
+          happensBefore Xpref τnX ⟨a.thread, a.idx - (Pre.prog a.thread).length⟩
+            ⟨d.thread, d.idx - (Pre.prog d.thread).length⟩ := by
+      intro a d hR ha
+      induction hR with
+      | refl => exact ⟨ha, Relation.ReflTransGen.refl⟩
+      | tail _hrest hedge ih =>
+        obtain ⟨hmX, hrestX⟩ := ih
+        obtain ⟨hdX, hedgeX⟩ := hbackedge _ _ hedge hmX
+        exact ⟨hdX, hrestX.tail hedgeX⟩
+    -- remove-batch command/generation transfer (`Pfull` ↔ `Ppref`, off the inserted first batch)
+    have hcmdrm : ∀ (p : ProgPoint) (cc : Cmd),
+        (Pre.prog p.thread).length + (A.prog p.thread).length ≤ p.idx → Pfull.cmdAt p = some cc →
+        Ppref.cmdAt ⟨p.thread, p.idx - (A.prog p.thread).length⟩ = some cc := by
+      intro p cc hge hcmd
+      change (Pre.prog p.thread ++ Xpref.prog p.thread)[p.idx - (A.prog p.thread).length]? = some cc
+      rw [List.getElem?_append_right (by omega)]
+      have hpf : (Pre.prog p.thread ++ Xfull.prog p.thread)[p.idx]? = some cc := hcmd
+      rw [List.getElem?_append_right (by omega), hXfullsplit,
+        List.getElem?_append_right (by omega)] at hpf
+      rw [show p.idx - (A.prog p.thread).length - (Pre.prog p.thread).length
+        = p.idx - (Pre.prog p.thread).length - (A.prog p.thread).length from by omega]
+      exact hpf
+    have hgenrm : ∀ (p : ProgPoint) (cc : Cmd) (parr : ℕ+),
+        (Pre.prog p.thread).length + (A.prog p.thread).length ≤ p.idx → Pfull.cmdAt p = some cc →
+        Cmd.barrierRef cc = some (b, parr) →
+        pointGen Pfull τfull p
+          = pointGen Ppref τpref ⟨p.thread, p.idx - (A.prog p.thread).length⟩ + δ := by
+      intro p cc parr hge hcmd hbr
+      have hxf := hgXf p.thread (p.idx - (Pre.prog p.thread).length) cc b parr
+        (hcmdXf p cc (by omega) hcmd) hbr
+      rw [show (Pre.prog p.thread).length + (p.idx - (Pre.prog p.thread).length) = p.idx from by
+        omega] at hxf
+      have hcmdrmp := hcmdrm p cc hge hcmd
+      have hxp := hgenXp ⟨p.thread, p.idx - (A.prog p.thread).length⟩ cc b parr
+        (by dsimp only; omega)
+        hcmdrmp hbr
+      dsimp only at hxp
+      have hcXpref : Xpref.cmdAt ⟨p.thread,
+          p.idx - (A.prog p.thread).length - (Pre.prog p.thread).length⟩ = some cc :=
+        hcmdXp ⟨p.thread, p.idx - (A.prog p.thread).length⟩ cc (by dsimp only; omega) hcmdrmp
+      have hshift := hshiftX ⟨p.thread,
+          p.idx - (A.prog p.thread).length - (Pre.prog p.thread).length⟩ cc b parr hcXpref hbr
+      dsimp only at hshift
+      rw [show p.idx - (A.prog p.thread).length - (Pre.prog p.thread).length
+            + (A.prog p.thread).length = p.idx - (Pre.prog p.thread).length from by omega] at hshift
+      rw [hxf, hxp, hshift]; omega
+    by_cases hc1pre : c1.idx < (Pre.prog c1.thread).length
+    · -- **Mixed sub-case** (`c1` in `Pre`).  First `b ∉ I.barriers` (so `δ = 0`); then order the
+      -- down-shifted pair in `Ppref` and lift the chain by `ψ` (identity on `Pre`, `+L` on the
+      -- loop+epilogue), handling the single `Pre`→loop crossing edge specially.
+      -- `c1` is a `sync b` in `Pre`; its generation is its standalone `Pre` generation.
+      have hc1Pre : Pre.cmdAt c1 = some (Cmd.sync b nn) := hcmdPre c1 _ hc1pre hsync1
+      have hc1gen : pointGen Pfull τfull c1 = pointGen Pre tP c1 :=
+        seq_glue_prefix_pointGen hpreXf htP htPL hτX hc1Pre rfl
+      have hc1le : pointGen Pfull τfull c1 ≤ R := by
+        rw [hc1gen, hR]; exact sync_gen_le_total htP htPL hc1Pre
+      -- **`b ∉ I.barriers`** (else `c2`'s `≥ R+2δ+1` generation clashes with `c1`'s `≤ R`).
+      have hbni : b ∉ I.barriers := by
+        intro hbI
+        have hlow := hPL hbI c2 cc2 par2 hc2cmd hc2ref hc2core
+        have hδ1 : 1 ≤ δ := by rw [hδ]; exact one_le_delta h rfl hbI
+        omega
+      -- **`δ = 0`** for `b` (no arrives on `b` in `I`).
+      have hδ0 : δ = 0 := by
+        have harr0 : I.arrivers b = 0 := by
+          rw [CTA.arrivers]
+          apply Finset.sum_eq_zero
+          intro i hi
+          rw [List.countP_eq_zero]
+          intro r hr hrb
+          exact hbni (by
+            rw [CTA.barriers, Finset.mem_biUnion]
+            exact ⟨i, hi, List.mem_toFinset.mpr (List.mem_map.mpr ⟨r, hr, eq_of_beq hrb⟩)⟩)
+        rw [hδ, harr0, Nat.mul_zero, Nat.zero_div]
+      -- length facts
+      have hPfulllen : ∀ t, (Pfull.prog t).length
+          = (Pre.prog t).length + (n + 1) * (A.prog t).length + (E.prog t).length := by
+        intro t
+        change (Pre.prog t ++ ((A ^ (n + 1)).prog t ++ E.prog t)).length = _
+        rw [List.length_append, List.length_append, CTA.pow_prog_length]; omega
+      have hPpreflen : ∀ t, (Ppref.prog t).length
+          = (Pre.prog t).length + n * (A.prog t).length + (E.prog t).length := by
+        intro t
+        change (Pre.prog t ++ ((A ^ n).prog t ++ E.prog t)).length = _
+        rw [List.length_append, List.length_append, CTA.pow_prog_length]; omega
+      -- `Ppref`↔`Pre` command restriction
+      have hPreOfPpref : ∀ (η : ProgPoint) (cc : Cmd), η.idx < (Pre.prog η.thread).length →
+          Ppref.cmdAt η = some cc → Pre.cmdAt η = some cc := by
+        intro η cc hlt hcmd
+        have : (Pre.prog η.thread ++ Xpref.prog η.thread)[η.idx]? = some cc := hcmd
+        rwa [List.getElem?_append_left hlt] at this
+      -- `Pfull`/`Ppref` agree on commands in the `Pre` region
+      have hcmdPrePref : ∀ (η : ProgPoint), η.idx < (Pre.prog η.thread).length →
+          Ppref.cmdAt η = Pfull.cmdAt η := by
+        intro η hlt
+        obtain ⟨t, idx⟩ := η; dsimp only at hlt ⊢
+        change (Pre.prog t ++ Xpref.prog t)[idx]? = (Pre.prog t ++ Xfull.prog t)[idx]?
+        rw [List.getElem?_append_left hlt, List.getElem?_append_left hlt]
+      -- `Pfull`/`Ppref` agree on generations of `Pre`-region barrier ops
+      have hgenPre : ∀ (η : ProgPoint) (cc : Cmd) (bb : Barrier) (parr : ℕ+),
+          η.idx < (Pre.prog η.thread).length → Pre.cmdAt η = some cc →
+          Cmd.barrierRef cc = some (bb, parr) →
+          pointGen Pfull τfull η = pointGen Ppref τpref η := by
+        intro η cc bb parr hlt hcmd hbr
+        rw [seq_glue_prefix_pointGen hpreXf htP htPL hτX hcmd hbr,
+          seq_glue_prefix_pointGen hpreXn htP htPL hτnX hcmd hbr]
+      -- `Pfull`/`Ppref` agree on commands in the first `n` batches
+      have hcmdLoopPref : ∀ (η : ProgPoint),
+          η.idx < (Pre.prog η.thread).length + n * (A.prog η.thread).length →
+          (Pre.prog η.thread).length ≤ η.idx → Ppref.cmdAt η = Pfull.cmdAt η := by
+        intro η hlt hle
+        obtain ⟨ηt, ηi⟩ := η; dsimp only at hlt hle ⊢
+        have hLpos : 0 < (A.prog ηt).length := by
+          rcases Nat.eq_zero_or_pos (A.prog ηt).length with h0 | h0
+          · rw [h0, Nat.mul_zero] at hlt; omega
+          · exact h0
+        change (Pre.prog ηt ++ Xpref.prog ηt)[ηi]? = (Pre.prog ηt ++ Xfull.prog ηt)[ηi]?
+        rw [List.getElem?_append_right hle, List.getElem?_append_right hle]
+        set e := ηi - (Pre.prog ηt).length with hedef
+        have heLt : e < n * (A.prog ηt).length := by omega
+        set p := e / (A.prog ηt).length with hpdef
+        set j := e % (A.prog ηt).length with hjdef
+        have hjL : j < (A.prog ηt).length := Nat.mod_lt _ hLpos
+        have hpn : p < n := by rw [hpdef, Nat.div_lt_iff_lt_mul hLpos]; omega
+        have hedecomp : e = p * (A.prog ηt).length + j := by
+          rw [hpdef, hjdef, Nat.mul_comm]; exact (Nat.div_add_mod e _).symm
+        have hXp : (Xpref.prog ηt)[e]? = (A.prog ηt)[j]? := by
+          have h1 : (Xpref.prog ηt)[e]? = ((A ^ n).prog ηt)[e]? := by
+            change ((A ^ n).prog ηt ++ E.prog ηt)[e]? = _
+            rw [List.getElem?_append_left (by rw [CTA.pow_prog_length]; exact heLt)]
+          rw [h1, hedecomp]; exact CTA.cmdAt_pow_batch_copy A hjL hpn
+        have hXf : (Xfull.prog ηt)[e]? = (A.prog ηt)[j]? := by
+          have h1 : (Xfull.prog ηt)[e]? = ((A ^ (n + 1)).prog ηt)[e]? := by
+            change ((A ^ (n + 1)).prog ηt ++ E.prog ηt)[e]? = _
+            rw [List.getElem?_append_left (by
+              rw [CTA.pow_prog_length]
+              calc e < n * (A.prog ηt).length := heLt
+                _ ≤ (n + 1) * (A.prog ηt).length := Nat.mul_le_mul_right _ (by omega))]
+          rw [h1, hedecomp]; exact CTA.cmdAt_pow_batch_copy A hjL (by omega)
+        rw [hXp, hXf]
+      -- `Pfull`/`Ppref` agree on generations of first-`n`-batch barrier ops
+      have hloopgen : ∀ (η : ProgPoint) (cc : Cmd) (bb : Barrier) (parr : ℕ+),
+          (Pre.prog η.thread).length ≤ η.idx →
+          η.idx < (Pre.prog η.thread).length + n * (A.prog η.thread).length →
+          Pfull.cmdAt η = some cc → Cmd.barrierRef cc = some (bb, parr) →
+          pointGen Pfull τfull η = pointGen Ppref τpref η := by
+        intro η cc bb parr hle hlt hcmd hbr
+        obtain ⟨ηt, ηi⟩ := η; dsimp only at hle hlt hcmd ⊢
+        have hcXf : Xfull.cmdAt ⟨ηt, ηi - (Pre.prog ηt).length⟩ = some cc :=
+          hcmdXf ⟨ηt, ηi⟩ cc hle hcmd
+        have hcmdP : Ppref.cmdAt ⟨ηt, ηi⟩ = some cc := by
+          rw [hcmdLoopPref ⟨ηt, ηi⟩ hlt hle]; exact hcmd
+        have hLg := hgXf ηt (ηi - (Pre.prog ηt).length) cc bb parr hcXf hbr
+        rw [show (Pre.prog ηt).length + (ηi - (Pre.prog ηt).length) = ηi from by omega] at hLg
+        have hRg := hgenXp ⟨ηt, ηi⟩ cc bb parr hle hcmdP hbr
+        have hag := hfcNX ηt (ηi - (Pre.prog ηt).length) cc bb parr (by rw [← hA]; omega) hcXf hbr
+        rw [hLg, hRg, hag]
+      -- command of an `E`-region point shifts by `+L`
+      have hcmdEshift : ∀ (η : ProgPoint) (cc : Cmd), (Pre.prog η.thread).length ≤ η.idx →
+          Ppref.cmdAt η = some cc →
+          Pfull.cmdAt ⟨η.thread, η.idx + (A.prog η.thread).length⟩ = some cc := by
+        intro η cc hle hcmd
+        have hcXp : Xpref.cmdAt ⟨η.thread, η.idx - (Pre.prog η.thread).length⟩ = some cc :=
+          hcmdXp η cc hle hcmd
+        change (Pre.prog η.thread ++ Xfull.prog η.thread)[η.idx + (A.prog η.thread).length]?
+          = some cc
+        rw [List.getElem?_append_right (by omega), hXfullsplit,
+          List.getElem?_append_right (by omega),
+          show η.idx + (A.prog η.thread).length - (Pre.prog η.thread).length
+              - (A.prog η.thread).length = η.idx - (Pre.prog η.thread).length from by omega]
+        exact hcXp
+      -- generation of an `E`-region point shifts by `+δ_bb`
+      have hgenEshift : ∀ (η : ProgPoint) (cc : Cmd) (bb : Barrier) (parr : ℕ+),
+          (Pre.prog η.thread).length ≤ η.idx → Ppref.cmdAt η = some cc →
+          Cmd.barrierRef cc = some (bb, parr) →
+          pointGen Pfull τfull ⟨η.thread, η.idx + (A.prog η.thread).length⟩
+            = pointGen Ppref τpref η + (I.loopK h * I.arrivers bb / I.arrivalCount h bb) := by
+        intro η cc bb parr hle hcmd hbr
+        have hcXp : Xpref.cmdAt ⟨η.thread, η.idx - (Pre.prog η.thread).length⟩ = some cc :=
+          hcmdXp η cc hle hcmd
+        have hcXf : Xfull.cmdAt ⟨η.thread, (η.idx - (Pre.prog η.thread).length)
+            + (A.prog η.thread).length⟩ = some cc := by
+          change (Xfull.prog η.thread)[(η.idx - (Pre.prog η.thread).length)
+            + (A.prog η.thread).length]? = some cc
+          rw [hXfullsplit, List.getElem?_append_right (by omega),
+            show η.idx - (Pre.prog η.thread).length + (A.prog η.thread).length
+                - (A.prog η.thread).length = η.idx - (Pre.prog η.thread).length from by omega]
+          exact hcXp
+        have hshift := hshiftX ⟨η.thread, η.idx - (Pre.prog η.thread).length⟩ cc bb parr hcXp hbr
+        rw [← hA] at hshift
+        have hLg := hgXf η.thread ((η.idx - (Pre.prog η.thread).length) + (A.prog η.thread).length)
+          cc bb parr hcXf hbr
+        rw [show (Pre.prog η.thread).length + ((η.idx - (Pre.prog η.thread).length)
+            + (A.prog η.thread).length) = η.idx + (A.prog η.thread).length from by omega] at hLg
+        have hRg := hgenXp η cc bb parr hle hcmd hbr
+        rw [hLg, hshift, hRg]; omega
+      -- a `Pre`-region program point of `Ppref` is one of `Pfull`
+      have hPrePf : ∀ (η : ProgPoint), η ∈ Ppref.progPoints →
+          η.idx < (Pre.prog η.thread).length → η ∈ Pfull.progPoints := by
+        intro η hpp hlt
+        refine (mem_progPoints_iff Pfull η).mpr ⟨((mem_progPoints_iff Ppref η).mp hpp).1, ?_⟩
+        rw [hPfulllen]; omega
+      -- **Pre→Pre edge lift** (`ψ` is the identity on `Pre`)
+      have hPrePreEdge : ∀ (x y : ProgPoint), (x, y) ∈ initRelation Ppref τpref →
+          x.idx < (Pre.prog x.thread).length → y.idx < (Pre.prog y.thread).length →
+          happensBefore Pfull τfull x y := by
+        intro x y hxy hx hy
+        apply Relation.ReflTransGen.single
+        rw [mem_initRelation_iff] at hxy ⊢
+        rcases hxy with ⟨hxpts, hlt, hbeq⟩ | ⟨bb, mm, hxpts, hypts, hca, hcb, hg⟩
+            | ⟨bb, mm, hxpts, hypts, hca, hcb, hg⟩
+        · refine Or.inl ⟨hPrePf x hxpts hx, ?_, hbeq⟩
+          rw [hbeq] at hy; dsimp only at hy; rw [hPfulllen]; omega
+        · refine Or.inr (Or.inl ⟨bb, mm, hPrePf x hxpts hx, hPrePf y hypts hy, ?_, ?_, ?_⟩)
+          · rw [← hcmdPrePref x hx]; exact hca
+          · rw [← hcmdPrePref y hy]; exact hcb
+          · rw [hgenPre x (Cmd.arrive bb mm) bb mm hx (hPreOfPpref x _ hx hca) rfl,
+              hgenPre y (Cmd.sync bb mm) bb mm hy (hPreOfPpref y _ hy hcb) rfl]; exact hg
+        · refine Or.inr (Or.inr ⟨bb, mm, hPrePf x hxpts hx, hPrePf y hypts hy, ?_, ?_, ?_⟩)
+          · rw [← hcmdPrePref x hx]; exact hca
+          · rw [← hcmdPrePref y hy]; exact hcb
+          · rw [hgenPre x (Cmd.sync bb mm) bb mm hx (hPreOfPpref x _ hx hca) rfl,
+              hgenPre y (Cmd.sync bb mm) bb mm hy (hPreOfPpref y _ hy hcb) rfl]; exact hg
+      -- **crossing barrier edge lift** (`x` in `Pre`, `y` in the loop+epilogue): `ψ` sends the edge
+      -- to a `Pfull` happens-before from `x` to `y + L`.
+      have hcrossbar : ∀ (x y : ProgPoint) (cx : Cmd) (bb : Barrier) (mm : ℕ+),
+          x.idx < (Pre.prog x.thread).length → (Pre.prog y.thread).length ≤ y.idx →
+          x ∈ Ppref.progPoints → y ∈ Ppref.progPoints →
+          Ppref.cmdAt x = some cx → Cmd.barrierRef cx = some (bb, mm) →
+          Ppref.cmdAt y = some (Cmd.sync bb mm) →
+          pointGen Ppref τpref x = pointGen Ppref τpref y →
+          happensBefore Pfull τfull x ⟨y.thread, y.idx + (A.prog y.thread).length⟩ := by
+        intro x y cx bb mm hx hy hxpp hypp hcx hbr hcy hg
+        have hxPre : Pre.cmdAt x = some cx := hPreOfPpref x cx hx hcx
+        have hxpf : x ∈ Pfull.progPoints := hPrePf x hxpp hx
+        have hcmdPfx : Pfull.cmdAt x = some cx := by rw [← hcmdPrePref x hx]; exact hcx
+        have hgenPfx : pointGen Pfull τfull x = pointGen Ppref τpref x :=
+          hgenPre x cx bb mm hx hxPre hbr
+        have hyLpf : (⟨y.thread, y.idx + (A.prog y.thread).length⟩ : ProgPoint)
+            ∈ Pfull.progPoints :=
+          (mem_progPoints_iff Pfull _).mpr ⟨((mem_progPoints_iff Ppref y).mp hypp).1, by
+            dsimp only
+            rw [hPfulllen]
+            have := ((mem_progPoints_iff Ppref y).mp hypp).2; rw [hPpreflen] at this
+            have hmul : (n + 1) * (A.prog y.thread).length
+              = n * (A.prog y.thread).length + (A.prog y.thread).length := by
+              rw [Nat.add_mul, one_mul]
+            omega⟩
+        by_cases hyloop : y.idx < (Pre.prog y.thread).length + n * (A.prog y.thread).length
+        · -- `y` in the loop: `x → y` is a `Pfull` edge, then program order `y → y+L`
+          have hcmdPfy : Pfull.cmdAt y = some (Cmd.sync bb mm) := by
+            rw [← hcmdLoopPref y hyloop hy]; exact hcy
+          have hgenPfy : pointGen Pfull τfull y = pointGen Ppref τpref y :=
+            hloopgen y (Cmd.sync bb mm) bb mm hy hyloop hcmdPfy rfl
+          have hypf : y ∈ Pfull.progPoints :=
+            (mem_progPoints_iff Pfull y).mpr ⟨((mem_progPoints_iff Ppref y).mp hypp).1, by
+              rw [hPfulllen]
+              have := ((mem_progPoints_iff Ppref y).mp hypp).2; rw [hPpreflen] at this
+              have hmul : (n + 1) * (A.prog y.thread).length
+                = n * (A.prog y.thread).length + (A.prog y.thread).length := by
+                rw [Nat.add_mul, one_mul]
+              omega⟩
+          have hstep : happensBefore Pfull τfull x y := by
+            apply Relation.ReflTransGen.single
+            rw [mem_initRelation_iff]
+            cases cx with
+            | read g => simp [Cmd.barrierRef] at hbr
+            | write g => simp [Cmd.barrierRef] at hbr
+            | arrive b' n' =>
+              simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbr
+              obtain ⟨rfl, rfl⟩ := hbr
+              exact Or.inr (Or.inl ⟨b', n', hxpf, hypf, hcmdPfx, hcmdPfy,
+                by rw [hgenPfx, hgenPfy]; exact hg⟩)
+            | sync b' n' =>
+              simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbr
+              obtain ⟨rfl, rfl⟩ := hbr
+              exact Or.inr (Or.inr ⟨b', n', hxpf, hypf, hcmdPfx, hcmdPfy,
+                by rw [hgenPfx, hgenPfy]; exact hg⟩)
+          refine hstep.trans (happensBefore_progOrder (by omega) ?_)
+          rw [hPfulllen]; have := ((mem_progPoints_iff Ppref y).mp hypp).2; rw [hPpreflen] at this
+          have hmul : (n + 1) * (A.prog y.thread).length
+            = n * (A.prog y.thread).length + (A.prog y.thread).length := by
+            rw [Nat.add_mul, one_mul]
+          omega
+        · -- `y` in `E`: rule out `bb ∈ I.barriers`; then `x → y+L` is a direct `Pfull` edge (`δ=0`)
+          rw [Nat.not_lt] at hyloop
+          have hbbni : bb ∉ I.barriers := by
+            intro hbbI
+            have hδbb1 : 1 ≤ I.loopK h * I.arrivers bb / I.arrivalCount h bb :=
+              one_le_delta h rfl hbbI
+            have hxle : pointGen Ppref τpref x ≤ recycleCount bb tP (tP.length - 2) + 1 := by
+              rw [seq_glue_prefix_pointGen hpreXn htP htPL hτnX hxPre hbr]
+              exact barrierOp_gen_le_total htP htPL hxPre hbr
+            have hcXp : Xpref.cmdAt ⟨y.thread, y.idx - (Pre.prog y.thread).length⟩
+                = some (Cmd.sync bb mm) := hcmdXp y _ hy hcy
+            have hcXfL : Xfull.cmdAt ⟨y.thread, (y.idx - (Pre.prog y.thread).length)
+                + (A.prog y.thread).length⟩ = some (Cmd.sync bb mm) := by
+              change (Xfull.prog y.thread)[(y.idx - (Pre.prog y.thread).length)
+                + (A.prog y.thread).length]? = _
+              rw [hXfullsplit, List.getElem?_append_right (by omega),
+                show y.idx - (Pre.prog y.thread).length + (A.prog y.thread).length
+                    - (A.prog y.thread).length = y.idx - (Pre.prog y.thread).length from by omega]
+              exact hcXp
+            have hshift := hshiftX ⟨y.thread, y.idx - (Pre.prog y.thread).length⟩ (Cmd.sync bb mm)
+              bb mm hcXp rfl
+            rw [← hA] at hshift
+            have hlow := (hgbX bb).2.2 hbbI ⟨y.thread, (y.idx - (Pre.prog y.thread).length)
+              + (A.prog y.thread).length⟩ (Cmd.sync bb mm) mm hcXfL rfl (by
+                dsimp only; rw [← hA]
+                have hLloop : (A.prog y.thread).length ≤ n * (A.prog y.thread).length :=
+                  Nat.le_mul_of_pos_left _ hn
+                omega)
+            rw [hshift] at hlow
+            have hgy := hgenXp y (Cmd.sync bb mm) bb mm hy hcy rfl
+            omega
+          have hδbb0 : I.loopK h * I.arrivers bb / I.arrivalCount h bb = 0 := by
+            have harr0 : I.arrivers bb = 0 := by
+              rw [CTA.arrivers]; apply Finset.sum_eq_zero
+              intro i hi; rw [List.countP_eq_zero]; intro r hr hrb
+              exact hbbni (by
+                rw [CTA.barriers, Finset.mem_biUnion]
+                exact ⟨i, hi, List.mem_toFinset.mpr (List.mem_map.mpr ⟨r, hr, eq_of_beq hrb⟩)⟩)
+            rw [harr0, Nat.mul_zero, Nat.zero_div]
+          have hcmdPfyL : Pfull.cmdAt ⟨y.thread, y.idx + (A.prog y.thread).length⟩
+              = some (Cmd.sync bb mm) := hcmdEshift y (Cmd.sync bb mm) hy hcy
+          have hgenPfyL : pointGen Pfull τfull ⟨y.thread, y.idx + (A.prog y.thread).length⟩
+              = pointGen Ppref τpref y := by
+            rw [hgenEshift y (Cmd.sync bb mm) bb mm hy hcy rfl, hδbb0, Nat.add_zero]
+          apply Relation.ReflTransGen.single
+          rw [mem_initRelation_iff]
+          cases cx with
+          | read g => simp [Cmd.barrierRef] at hbr
+          | write g => simp [Cmd.barrierRef] at hbr
+          | arrive b' n' =>
+            simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbr
+            obtain ⟨rfl, rfl⟩ := hbr
+            exact Or.inr (Or.inl ⟨b', n', hxpf, hyLpf, hcmdPfx, hcmdPfyL,
+              by rw [hgenPfx, hgenPfyL]; exact hg⟩)
+          | sync b' n' =>
+            simp only [Cmd.barrierRef, Option.some.injEq, Prod.mk.injEq] at hbr
+            obtain ⟨rfl, rfl⟩ := hbr
+            exact Or.inr (Or.inr ⟨b', n', hxpf, hyLpf, hcmdPfx, hcmdPfyL,
+              by rw [hgenPfx, hgenPfyL]; exact hg⟩)
+      -- **crossing edge lift** (any edge type): the single `Pre`→loop+epilogue boundary edge
+      have hCrossEdge : ∀ (x y : ProgPoint), (x, y) ∈ initRelation Ppref τpref →
+          x.idx < (Pre.prog x.thread).length → (Pre.prog y.thread).length ≤ y.idx →
+          happensBefore Pfull τfull x ⟨y.thread, y.idx + (A.prog y.thread).length⟩ := by
+        intro x y hxy hx hy
+        rw [mem_initRelation_iff] at hxy
+        rcases hxy with ⟨hxpts, hlt, hbeq⟩ | ⟨bb, mm, hxpts, hypts, hca, hcb, hg⟩
+            | ⟨bb, mm, hxpts, hypts, hca, hcb, hg⟩
+        · -- program-order seam: walk through the inserted batch
+          subst hbeq; dsimp only at hy ⊢
+          refine happensBefore_progOrder (by omega) ?_
+          rw [hPfulllen]; rw [hPpreflen] at hlt
+          have hmul : (n + 1) * (A.prog x.thread).length
+              = n * (A.prog x.thread).length + (A.prog x.thread).length := by
+            rw [Nat.add_mul, one_mul]
+          omega
+        · exact hcrossbar x y (Cmd.arrive bb mm) bb mm hx hy hxpts hypts hca rfl hcb hg
+        · exact hcrossbar x y (Cmd.sync bb mm) bb mm hx hy hxpts hypts hca rfl hcb hg
+      -- **the lift**: `happensBefore Ppref c1 c3'` ⟹ `happensBefore Pfull c1 (c2-1)`.  Peel the
+      -- chain from `c1`; in `Pre` use `hPrePreEdge`, at the crossing use `hCrossEdge` then the
+      -- X-region machinery (`hback`/`hmonoX`/`hforward`).
+      have hPrefix : ∀ (a : ProgPoint),
+          happensBefore Ppref τpref a ⟨c2.thread, c2.idx - (A.prog c2.thread).length - 1⟩ →
+          a.idx < (Pre.prog a.thread).length →
+          happensBefore Pfull τfull a ⟨c2.thread, c2.idx - 1⟩ := by
+        intro a hR
+        induction hR using Relation.ReflTransGen.head_induction_on with
+        | refl => intro _; exact happensBefore_progOrder (by omega) (by omega)
+        | @head x y hxy hrest ih =>
+          intro hx
+          by_cases hy : y.idx < (Pre.prog y.thread).length
+          · exact (hPrePreEdge x y hxy hx hy).trans (ih hy)
+          · rw [Nat.not_lt] at hy
+            obtain ⟨hc3ge, hHBxpref⟩ := hback y _ hrest hy
+            dsimp only at hc3ge hHBxpref
+            have hHBxfull := hmonoX _ _ hHBxpref
+            have hHBpfull := hforward _ _ hHBxfull
+            dsimp only at hHBpfull
+            rw [show y.idx - (Pre.prog y.thread).length + (A.prog y.thread).length
+                    + (Pre.prog y.thread).length = y.idx + (A.prog y.thread).length from by omega,
+              show c2.idx - (A.prog c2.thread).length - 1 - (Pre.prog c2.thread).length
+                  + (A.prog c2.thread).length + (Pre.prog c2.thread).length = c2.idx - 1 from by
+                omega] at hHBpfull
+            exact (hCrossEdge x y hxy hx hy).trans hHBpfull
+      -- order the down-shifted pair `(c1, c2-L)` in `Ppref`, then lift
+      have hc2Lge : (Pre.prog c2.thread).length + (A.prog c2.thread).length ≤ c2.idx := by omega
+      have hsync1P : Ppref.cmdAt c1 = some (Cmd.sync b nn) := by
+        rw [hcmdPrePref c1 hc1pre]; exact hsync1
+      have hbar2P : (Ppref.cmdAt ⟨c2.thread, c2.idx - (A.prog c2.thread).length⟩).bind
+          Cmd.barrier? = some b := by
+        rw [hcmdrm c2 cc2 hc2Lge hc2cmd]; rw [hc2cmd] at hbar2; exact hbar2
+      have hgenP : pointGen Ppref τpref ⟨c2.thread, c2.idx - (A.prog c2.thread).length⟩
+          = pointGen Ppref τpref c1 + 1 := by
+        have h2 := hgenrm c2 cc2 par2 hc2Lge hc2cmd hc2ref
+        have hc1eqgen : pointGen Pfull τfull c1 = pointGen Ppref τpref c1 :=
+          hgenPre c1 (Cmd.sync b nn) b nn hc1pre hc1Pre rfl
+        omega
+      have hidxP : 1 ≤ c2.idx - (A.prog c2.thread).length := by omega
+      by_cases hc1eq : c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)
+      · rw [← hc1eq]
+        exact subset_iterate_transClosureStep _ _ (by
+          rw [mem_initRelation_iff]
+          exact Or.inr (Or.inr ⟨b, nn, hc1, hc1, hsync1, hsync1, rfl⟩))
+      · have hmem := mem_transClosure_of_check hcheckPref
+          (mem_progPoints_of_cmdAt _ hsync1P) hsync1P
+          (mem_progPoints_of_cmdAt _ (hcmdrm c2 cc2 hc2Lge hc2cmd)) hbar2P hgenP hidxP
+        have hHBppref : happensBefore Ppref τpref c1
+            ⟨c2.thread, c2.idx - (A.prog c2.thread).length - 1⟩ :=
+          (mem_transClosure_imp_transGen _ hmem).to_reflTransGen
+        have hHB := hPrefix c1 hHBppref hc1pre
+        rw [happensBefore, Relation.reflTransGen_iff_eq_or_transGen] at hHB
+        rcases hHB with heq | htg
+        · exact absurd heq.symm hc1eq
+        · exact mem_transClosure_of_transGen _ hc1eq htg
+    · rw [Nat.not_lt] at hc1pre
+      have hc1L : (Pre.prog c1.thread).length + (A.prog c1.thread).length ≤ c1.idx := by
+        rcases hc1core with hh | hh
+        · omega
+        · exact hh
+      have hc2L : (Pre.prog c2.thread).length + (A.prog c2.thread).length ≤ c2.idx := by omega
+      -- the flagged pair shifted down by one batch is flagged in `Ppref`
+      have hsync1P : Ppref.cmdAt ⟨c1.thread, c1.idx - (A.prog c1.thread).length⟩
+          = some (Cmd.sync b nn) := hcmdrm c1 _ hc1L hsync1
+      have hbar2P : (Ppref.cmdAt ⟨c2.thread, c2.idx - (A.prog c2.thread).length⟩).bind
+          Cmd.barrier? = some b := by
+        rw [hcmdrm c2 cc2 hc2L hc2cmd]; rw [hc2cmd] at hbar2; exact hbar2
+      have hgenP : pointGen Ppref τpref ⟨c2.thread, c2.idx - (A.prog c2.thread).length⟩
+          = pointGen Ppref τpref ⟨c1.thread, c1.idx - (A.prog c1.thread).length⟩ + 1 := by
+        have h1 := hgenrm c1 (Cmd.sync b nn) nn hc1L hsync1 rfl
+        have h2 := hgenrm c2 cc2 par2 hc2L hc2cmd hc2ref
+        omega
+      have hidxP : 1 ≤ c2.idx - (A.prog c2.thread).length := by omega
+      by_cases hc1c3 : c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)
+      · rw [← hc1c3]
+        exact subset_iterate_transClosureStep _ _ (by
+          rw [mem_initRelation_iff]
+          exact Or.inr (Or.inr ⟨b, nn, hc1, hc1, hsync1, hsync1, rfl⟩))
+      · have hmem := mem_transClosure_of_check hcheckPref
+          (mem_progPoints_of_cmdAt _ hsync1P) hsync1P
+          (mem_progPoints_of_cmdAt _ (hcmdrm c2 cc2 hc2L hc2cmd)) hbar2P hgenP hidxP
+        have hHBppref : happensBefore Ppref τpref
+            ⟨c1.thread, c1.idx - (A.prog c1.thread).length⟩
+            ⟨c2.thread, c2.idx - (A.prog c2.thread).length - 1⟩ :=
+          (mem_transClosure_imp_transGen _ hmem).to_reflTransGen
+        have hc1Xge : (Pre.prog c1.thread).length ≤ c1.idx - (A.prog c1.thread).length := by omega
+        obtain ⟨hc3Xge, hHBxpref⟩ := hback _ _ hHBppref hc1Xge
+        dsimp only at hc3Xge hHBxpref
+        have hHBxfull := hmonoX _ _ hHBxpref
+        have hHBpfull := hforward _ _ hHBxfull
+        dsimp only at hHBpfull
+        rw [show c1.idx - (A.prog c1.thread).length - (Pre.prog c1.thread).length
+              + (A.prog c1.thread).length + (Pre.prog c1.thread).length = c1.idx from by omega,
+          show c2.idx - (A.prog c2.thread).length - 1 - (Pre.prog c2.thread).length
+              + (A.prog c2.thread).length + (Pre.prog c2.thread).length = c2.idx - 1 from by omega]
+          at hHBpfull
+        rw [happensBefore, Relation.reflTransGen_iff_eq_or_transGen] at hHBpfull
+        rcases hHBpfull with heq | htg
+        · exact absurd heq.symm hc1c3
+        · exact mem_transClosure_of_transGen _ hc1c3 htg
+
+/-- **Loop-with-prefix-and-epilogue, generalized.** For a prefix `Pre`, body `I^k`
+(`k = I.loopK h`) and epilogue `E`, every unrolling `Pre ⨾ (I^k)^n ⨾ E` (`n ≥ 1`) is
+well-synchronized, given: `Pre` is well-synchronized (`hPre`), the single-batch unrolling
+`Pre ⨾ (I^k) ⨾ E` is (`hPreBatchE`, the base case), and the two-batch front reference
+`Pre ⨾ (I^k)^2 ⨾ E_ref` is (`hPre2BatchRef`; a *separate* epilogue `E_ref` because front pairs
+are epilogue-independent). These three certifications are exactly what the loop check supplies
+(`WS(P)`, the `i = k+r ≤ 2k` unrolling, the `i = 2k` unrolling). The prefix is carried through
+the epilogue development of `loop_with_epilogue` by re-anchoring the replay construction at
+`Pre`'s post-execution done state. -/
+theorem CTA.WellSynchronized.loop_with_prefix_epilogue {I : CTA} (h : I.ConsistentArrivalCounts)
+    {k : Nat} (hk : k = I.loopK h) {Pre E E_ref : CTA}
+    (hpre : Pre.ids = (I ^ k).ids) (hids : (I ^ k).ids = E.ids)
+    (hidsRef : (I ^ k).ids = E_ref.ids)
+    (hPre : Pre.WellSynchronized)
+    (hPreBody : (Pre.seq (I ^ k) hpre).WellSynchronized)
+    (hPreBatchE : (CTA.loopProgram Pre (I ^ k) E hpre hids 1).WellSynchronized)
+    (hPre2BatchRef : (CTA.loopProgram Pre (I ^ k) E_ref hpre hidsRef 2).WellSynchronized) :
+    ∀ n, 1 ≤ n → (CTA.loopProgram Pre (I ^ k) E hpre hids n).WellSynchronized := by
+  intro n hn
+  induction n, hn using Nat.le_induction with
+  | base => exact hPreBatchE
+  | succ n hn ih =>
+    exact CTA.WellSynchronized.loop_prefix_epilogue_inductive_step h hk hpre hids hidsRef hPre
+      hPreBody hPreBatchE hPre2BatchRef hn ih
+
+/-- **Correctness of the loop check.** The executable check
+`checkLoopWellSynchronized P I E h h1 h2 τp τpk τ` returns `true` iff the prefix `P` is
+well-synchronized, the prefix-plus-one-body `P ⨾ I^k` (`k = loopK`) is, *and* every unrolling
+`loopProgram P I E h1 h2 n = P ⨾ I^n ⨾ E` (`n ≥ 0`) is — i.e. the loop runs safely for any
+iteration count. `τp`/`τpk`/`τ i` are the standing successful traces `CheckWellSynchronized`
+assumes of `P`, `P ⨾ I^k`, and each `i`-fold unrolling.
+
+Two conjuncts are genuinely part of the spec, *not* implied by the unrollings (a program-prefix
+of a WS CTA need not be WS):
+* `WS(P)` — anchors the prefix in the trace construction;
+* `WS(P ⨾ I^k)` — guarantees the loop body, run from `P`'s post-execution done-state `s_P`,
+  *terminates on its own* (doesn't depend on the epilogue to complete a sync). Without it `I^k`
+  from `s_P` can deadlock even though every `P ⨾ Iⁿ ⨾ E` is well-synchronized, and the
+  replay-restores-`s_P` construction in `loop_with_prefix_epilogue` fails.
+Both are checked separately and so appear in the conclusion.
+
+* **(`←`)** trivial: the spec gives back each checked instance via
+  `checkWellSynchronized_correct_impl`.
+* **(`→`)** From `true`, `WS(P)`, `WS(P ⨾ I^k)`, and every checked unrolling `j ≤ 2k` hold.
+  For `n ≤ 2k` the unrolling is the goal directly; for `n > 2k`, write `n = k * c + r`, regroup
+  `I^r` into the epilogue (`loopProgram_regroup`), and apply `loop_with_prefix_epilogue` with
+  `Pre := P`, body `I^k`, epilogue `I^r ⨾ E`. -/
+theorem checkLoopWellSynchronized_correct_impl {P I E : CTA} (h : I.ConsistentArrivalCounts)
+    (h1 : P.ids = I.ids) (h2 : I.ids = E.ids)
+    {τp : List Config}
+    (hτp : IsSuccessfulTraceFrom (Config.run State.initial P) τp)
+    {τpk : List Config}
+    (hτpk : IsSuccessfulTraceFrom (Config.run State.initial
+      (P.seq (I ^ I.loopK h) (h1.trans (CTA.pow_ids I (I.loopK h)).symm))) τpk)
     {τ : Fin (2 * I.loopK h + 1) → List Config}
     (hτ : ∀ i : Fin (2 * I.loopK h + 1),
-      IsSuccessfulTraceFrom (Config.run State.initial (I ^ i.val)) (τ i)) :
-    checkLoopWellSynchronized I h τ = true ↔ ∀ n : Nat, (I ^ n).WellSynchronized := by
-  -- Eliminate the checker: `check = true ↔ every unrolling in [0, 2k] is well-synchronized`.
-  have hbridge : checkLoopWellSynchronized I h τ = true ↔
-      ∀ i : Fin (2 * I.loopK h + 1), (I ^ i.val).WellSynchronized := by
-    simp only [checkLoopWellSynchronized, List.all_eq_true]
+      IsSuccessfulTraceFrom (Config.run State.initial (CTA.loopProgram P I E h1 h2 i.val)) (τ i)) :
+    checkLoopWellSynchronized P I E h h1 h2 τp τpk τ = true
+      ↔ P.WellSynchronized
+        ∧ (P.seq (I ^ I.loopK h) (h1.trans (CTA.pow_ids I (I.loopK h)).symm)).WellSynchronized
+        ∧ ∀ n : Nat, (CTA.loopProgram P I E h1 h2 n).WellSynchronized := by
+  -- Eliminate the checker: `check = true ↔ WS(P) ∧ WS(P ⨾ I^k) ∧ every unrolling in [0, 2k] is WS`.
+  have hbridge : checkLoopWellSynchronized P I E h h1 h2 τp τpk τ = true ↔
+      P.WellSynchronized
+        ∧ (P.seq (I ^ I.loopK h) (h1.trans (CTA.pow_ids I (I.loopK h)).symm)).WellSynchronized
+        ∧ ∀ i : Fin (2 * I.loopK h + 1), (CTA.loopProgram P I E h1 h2 i.val).WellSynchronized := by
+    simp only [checkLoopWellSynchronized, Bool.and_eq_true, List.all_eq_true]
     constructor
-    · intro hall i
-      exact (checkWellSynchronized_correct_impl (hτ i)).mp (hall i (List.mem_finRange i))
-    · intro hall i _
-      exact (checkWellSynchronized_correct_impl (hτ i)).mpr (hall i)
+    · rintro ⟨⟨hP, hPk⟩, hall⟩
+      exact ⟨(checkWellSynchronized_correct_impl hτp).mp hP,
+        (checkWellSynchronized_correct_impl hτpk).mp hPk,
+        fun i => (checkWellSynchronized_correct_impl (hτ i)).mp (hall i (List.mem_finRange i))⟩
+    · rintro ⟨hP, hPk, hall⟩
+      exact ⟨⟨(checkWellSynchronized_correct_impl hτp).mpr hP,
+          (checkWellSynchronized_correct_impl hτpk).mpr hPk⟩,
+        fun i _ => (checkWellSynchronized_correct_impl (hτ i)).mpr (hall i)⟩
   rw [hbridge]
-  set k := I.loopK h with hk
   constructor
-  · -- forward: the checked unrollings `[0, 2k]` force every unrolling
-    intro hchecked
-    have hle : ∀ j, j ≤ 2 * k → (I ^ j).WellSynchronized := fun j hj => hchecked ⟨j, by omega⟩
+  · -- forward: `WS(P)`, `WS(P ⨾ I^k)`, and the checked unrollings `[0, 2k]` force every `n`
+    rintro ⟨hP, hPk, hchecked⟩
+    refine ⟨hP, hPk, ?_⟩
+    set k := I.loopK h with hk
     have hkpos : 0 < k := by rw [hk]; exact I.loopK_pos h
     intro n
     rcases Nat.lt_or_ge n (2 * k) with hsmall | hbig
-    · exact hle n hsmall.le
-    · -- `n > 2k`: write `n = k * c + r`, `0 ≤ r < k`, `c ≥ 1`, then apply the epilogue lemma.
+    · exact hchecked ⟨n, by omega⟩
+    · -- `n ≥ 2k`: write `n = k * c + r`, regroup `I^r` into the epilogue, apply the prefix lemma.
       set c := n / k with hc
       set r := n % k with hrdef
       have hr : r < k := Nat.mod_lt n hkpos
       have hsplit : n = k * c + r := by rw [hc, hrdef]; exact (Nat.div_add_mod n k).symm
       have hc1 : 1 ≤ c := by rw [hc, Nat.one_le_div_iff hkpos]; omega
-      have hbatch : (I ^ k).WellSynchronized := hle k (by omega)
-      have h2batch : ((I ^ k) ^ 2).WellSynchronized := by
-        rw [CTA.pow_mul I k 2]; exact hle (k * 2) (by omega)
-      have hbatchE := hle (k + r) (by omega)
-      rw [CTA.pow_add_eq_seq I k r] at hbatchE
-      rw [hsplit, CTA.pow_split]
-      exact CTA.WellSynchronized.loop_with_epilogue h hk _ hbatch h2batch hbatchE c hc1
-  · -- reverse: every unrolling well-synchronized ⇒ in particular the checked ones
-    intro hall i
-    exact hall i.val
+      have hbe := hchecked ⟨k * 1 + r, by omega⟩
+      rw [CTA.loopProgram_regroup P I E h1 h2 k 1 r] at hbe
+      have hbr := hchecked ⟨k * 2 + 0, by omega⟩
+      rw [CTA.loopProgram_regroup P I E h1 h2 k 2 0] at hbr
+      rw [hsplit, CTA.loopProgram_regroup P I E h1 h2 k c r]
+      exact CTA.WellSynchronized.loop_with_prefix_epilogue
+        (Pre := P) (E := (I ^ r).seq E ((CTA.pow_ids I r).trans h2))
+        (E_ref := (I ^ 0).seq E ((CTA.pow_ids I 0).trans h2)) h hk
+        (h1.trans (CTA.pow_ids I k).symm)
+        ((CTA.pow_ids I k).trans (CTA.pow_ids I r).symm)
+        ((CTA.pow_ids I k).trans (CTA.pow_ids I 0).symm)
+        hP hPk hbe hbr c hc1
+  · -- reverse: the spec (incl. `WS(P)`, `WS(P ⨾ I^k)`) gives back the checked instances
+    rintro ⟨hP, hPk, hall⟩
+    exact ⟨hP, hPk, fun i => hall i.val⟩
+
+/-- **Loop check for a bare loop (no prefix or epilogue).** Specializing `checkLoopWellSynchronized`
+to an empty prefix and epilogue (`CTA.empty I.ids`), the check is correct iff *every* unrolling
+`I ^ n` is well-synchronized. Unlike `checkLoopWellSynchronized_correct` it requires neither the
+`WS(P)` nor the `WS(P ⨾ I^k)` certificate, and neither of their trace witnesses: an empty prefix is
+trivially well-synchronized, while `P ⨾ I^k` is just the unrolling `I^k`, so its trace is the
+unrolling `τ ⟨k, _⟩` already supplied (and the empty prefix's trace is the `0`-unrolling
+`τ ⟨0, _⟩`). -/
+theorem checkLoopWellSynchronized_correct_empty_impl {I : CTA} (h : I.ConsistentArrivalCounts)
+    {τ : Fin (2 * I.loopK h + 1) → List Config}
+    (hτ : ∀ i : Fin (2 * I.loopK h + 1),
+      IsSuccessfulTraceFrom (Config.run State.initial
+        (CTA.loopProgram (CTA.empty I.ids I.ids_nonempty) I (CTA.empty I.ids I.ids_nonempty)
+          rfl rfl i.val)) (τ i)) :
+    checkLoopWellSynchronized (CTA.empty I.ids I.ids_nonempty) I (CTA.empty I.ids I.ids_nonempty)
+        h rfl rfl (τ ⟨0, by omega⟩) (τ ⟨I.loopK h, by omega⟩) τ = true
+      ↔ ∀ n : Nat, (I ^ n).WellSynchronized := by
+  have hOemp : ∀ t, (CTA.empty I.ids I.ids_nonempty).prog t = [] := fun _ => rfl
+  -- the empty prefix's trace is the `0`-unrolling (which equals the empty CTA)
+  have hτp : IsSuccessfulTraceFrom (Config.run State.initial (CTA.empty I.ids I.ids_nonempty))
+      (τ ⟨0, by omega⟩) := hτ ⟨0, by omega⟩
+  -- `P ⨾ I^k` is the `k`-unrolling with its trailing (empty) epilogue dropped
+  have hloopk : CTA.loopProgram (CTA.empty I.ids I.ids_nonempty) I
+        (CTA.empty I.ids I.ids_nonempty) rfl rfl (I.loopK h)
+      = (CTA.empty I.ids I.ids_nonempty).seq (I ^ I.loopK h)
+        (rfl.trans (CTA.pow_ids I (I.loopK h)).symm) := by
+    apply CTA.ext
+    · rfl
+    · funext t
+      change (CTA.empty I.ids I.ids_nonempty).prog t ++ (I ^ I.loopK h).prog t
+          ++ (CTA.empty I.ids I.ids_nonempty).prog t
+        = (CTA.empty I.ids I.ids_nonempty).prog t ++ (I ^ I.loopK h).prog t
+      rw [hOemp, List.append_nil]
+  have hτpk : IsSuccessfulTraceFrom (Config.run State.initial
+      ((CTA.empty I.ids I.ids_nonempty).seq (I ^ I.loopK h)
+        (rfl.trans (CTA.pow_ids I (I.loopK h)).symm))) (τ ⟨I.loopK h, by omega⟩) := by
+    have ht := hτ ⟨I.loopK h, by omega⟩
+    rwa [hloopk] at ht
+  -- `P ⨾ I^k = I^k` (empty prefix) and `loopProgram (empty) I (empty) n = I^n`
+  have hpkeq : (CTA.empty I.ids I.ids_nonempty).seq (I ^ I.loopK h)
+        (rfl.trans (CTA.pow_ids I (I.loopK h)).symm) = I ^ I.loopK h := by
+    apply CTA.ext
+    · change I.ids = (I ^ I.loopK h).ids; rw [CTA.pow_ids]
+    · funext t
+      change (CTA.empty I.ids I.ids_nonempty).prog t ++ (I ^ I.loopK h).prog t
+        = (I ^ I.loopK h).prog t
+      rw [hOemp, List.nil_append]
+  have hloopeq : ∀ n, CTA.loopProgram (CTA.empty I.ids I.ids_nonempty) I
+      (CTA.empty I.ids I.ids_nonempty) rfl rfl n = I ^ n := by
+    intro n
+    apply CTA.ext
+    · change I.ids = (I ^ n).ids; rw [CTA.pow_ids]
+    · funext t
+      rw [CTA.loopProgram_prog, hOemp, List.nil_append, List.append_nil]
+  rw [checkLoopWellSynchronized_correct_impl (P := CTA.empty I.ids I.ids_nonempty)
+    (E := CTA.empty I.ids I.ids_nonempty) h rfl rfl hτp hτpk hτ, hpkeq]
+  simp only [hloopeq]
+  exact ⟨fun ⟨_, _, hall⟩ => hall,
+    fun hall => ⟨CTA.WellSynchronized.of_empty hOemp, hall (I.loopK h), hall⟩⟩
 
 end Weft

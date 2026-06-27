@@ -125,12 +125,41 @@ theorem CTA.WellSynchronized.loop_well_synchronized {I : CTA} (h : I.ConsistentA
     ((I ^ k) ^ (n)).WellSynchronized :=
   CTA.WellSynchronized.loop_well_synchronized_impl h hk hn hWS
 
-theorem checkLoopWellSynchronized_correct {I : CTA} (h : I.ConsistentArrivalCounts)
+theorem checkLoopWellSynchronized_correct {P I E : CTA}
+    (h : I.ConsistentArrivalCounts)
+    (h1 : P.ids = I.ids)
+    (h2 : I.ids = E.ids)
+    {τp : List Config}
+    (hτp : IsSuccessfulTraceFrom (Config.run State.initial P) τp)
+    {τpk : List Config}
+    (hτpk : IsSuccessfulTraceFrom (Config.run State.initial
+      (P.seq (I ^ I.loopK h) (h1.trans (CTA.pow_ids I (I.loopK h)).symm))) τpk)
     {τ : Fin (2 * I.loopK h + 1) → List Config}
     (hτ : ∀ i : Fin (2 * I.loopK h + 1),
-      IsSuccessfulTraceFrom (Config.run State.initial (I ^ i.val)) (τ i)) :
-    checkLoopWellSynchronized I h τ = true ↔ ∀ n : Nat, (I ^ n).WellSynchronized :=
-    checkLoopWellSynchronized_correct_impl h hτ
+      IsSuccessfulTraceFrom (Config.run State.initial (CTA.loopProgram P I E h1 h2 i.val)) (τ i)) :
+    checkLoopWellSynchronized P I E h h1 h2 τp τpk τ = true
+      ↔ P.WellSynchronized
+        ∧ (P.seq (I ^ I.loopK h) (h1.trans (CTA.pow_ids I (I.loopK h)).symm)).WellSynchronized
+        ∧ ∀ n : Nat, (CTA.loopProgram P I E h1 h2 n).WellSynchronized :=
+  checkLoopWellSynchronized_correct_impl h h1 h2 hτp hτpk hτ
+
+/-- **Loop check for a bare loop (no prefix or epilogue).** Specializing `checkLoopWellSynchronized`
+to an empty prefix and epilogue (`CTA.empty I.ids`), the check is correct iff *every* unrolling
+`I ^ n` is well-synchronized. Unlike `checkLoopWellSynchronized_correct` it requires neither the
+`WS(P)` nor the `WS(P ⨾ I^k)` certificate, and neither of their trace witnesses: an empty prefix is
+trivially well-synchronized, while `P ⨾ I^k` is just the unrolling `I^k`, so its trace is the
+unrolling `τ ⟨k, _⟩` already supplied (and the empty prefix's trace is the `0`-unrolling
+`τ ⟨0, _⟩`). -/
+theorem checkLoopWellSynchronized_correct_empty {I : CTA} (h : I.ConsistentArrivalCounts)
+    {τ : Fin (2 * I.loopK h + 1) → List Config}
+    (hτ : ∀ i : Fin (2 * I.loopK h + 1),
+      IsSuccessfulTraceFrom (Config.run State.initial
+        (CTA.loopProgram (CTA.empty I.ids I.ids_nonempty) I (CTA.empty I.ids I.ids_nonempty)
+          rfl rfl i.val)) (τ i)) :
+    checkLoopWellSynchronized (CTA.empty I.ids I.ids_nonempty) I (CTA.empty I.ids I.ids_nonempty)
+        h rfl rfl (τ ⟨0, by omega⟩) (τ ⟨I.loopK h, by omega⟩) τ = true
+      ↔ ∀ n : Nat, (I ^ n).WellSynchronized :=
+  checkLoopWellSynchronized_correct_empty_impl h hτ
 
 end LoopProofs
 

@@ -148,6 +148,15 @@ def wake (T : CTA) (I : List ThreadId) : CTA where
 
 end CTA
 
+/-- The **empty CTA** on a thread set `ids`: every thread's program is empty. It carries no
+instructions, so it is the unit of sequential composition (`empty ⨾ T` and `T ⨾ empty` have `T`'s
+program up to `[]`-append) and is trivially well-synchronized (`CTA.WellSynchronized.of_empty`). -/
+def CTA.empty (ids : Finset ThreadId) (hne : ids.Nonempty) : CTA where
+  ids := ids
+  prog := fun _ => []
+  nil_outside_ids := fun _ _ => rfl
+  ids_nonempty := hne
+
 namespace Cmd
 
 /-- A command is a synchronization command (`sync`/`arrive`) as opposed to a
