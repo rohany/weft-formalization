@@ -537,20 +537,29 @@ def CheckWellSynchronized (T : CTA) (τ : List Config) :
   -- Step 2 (line 17): the happens-before relation is the transitive closure of R.
   let hb : Finset (ProgPoint × ProgPoint) := transClosure R
   -- Step 3 (lines 18–22): check each (generation k, generation k+1) barrier pair.
+  -- The source `c1` ranges over *every* barrier operation (`sync` *and* `arrive`),
+  -- not just `sync`s: an `arrive` of generation `k` must likewise happen-before any
+  -- generation-`k+1` operation on the same barrier.
   let ok : Bool := T.progPoints.all fun c1 =>
-    match T.cmdAt c1 with
-    | some (.sync b _) =>
+    match (T.cmdAt c1).bind Cmd.barrier? with
+    | some b =>
         let k := pointGen T τ c1
         T.progPoints.all fun c2 =>
           match (T.cmdAt c2).bind Cmd.barrier? with
           | some b' =>
               if b = b' ∧ pointGen T τ c2 = k + 1 ∧ 1 ≤ c2.idx then
                 -- `c3 = ⟨c2.thread, c2.idx - 1⟩` is `c2`'s predecessor (`c3 ; c2 ∈ T`).
-                decide ((c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈ hb)
+                -- The required ordering is the reflexive `c1 ≤ c3`: the `c1 = c3`
+                -- disjunct accounts for reflexivity directly (the finite `hb` carries
+                -- only the irreflexive part), so a source that *is* `c2`'s predecessor
+                -- — e.g. an `arrive` closing its round just before `c2` — is not
+                -- spuriously flagged.
+                decide (c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∨
+                  (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈ hb)
               else
                 true
           | none => true
-    | _ => true
+    | none => true
   (ok, hb)
 
 /-- The happens-before relation of Figure 4, as a *relation* on program points (the
@@ -2305,77 +2314,84 @@ theorem happensBefore_arrive {T : CTA} {τ : List Config} {c1 c2 : ProgPoint}
 expressed as a nested `List.all`. -/
 theorem fst_checkWellSynchronized (T : CTA) (τ : List Config) :
     (CheckWellSynchronized T τ).1 = T.progPoints.all (fun c1 =>
-      match T.cmdAt c1 with
-      | some (.sync b _) =>
+      match (T.cmdAt c1).bind Cmd.barrier? with
+      | some b =>
           T.progPoints.all fun c2 =>
             match (T.cmdAt c2).bind Cmd.barrier? with
             | some b' =>
                 if b = b' ∧ pointGen T τ c2 = pointGen T τ c1 + 1 ∧ 1 ≤ c2.idx then
-                  decide ((c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈
-                    transClosure (initRelation T τ))
+                  decide (c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∨
+                    (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈
+                      transClosure (initRelation T τ))
                 else true
             | none => true
-      | _ => true) := rfl
+      | none => true) := rfl
 
 /-- **Extract a failing pair from `check = false`.** Unwinding the two nested
 `List.all`s and the `match`/`if` of Step 3 (Figure 4 lines 18–22): a `false` result
-exhibits a generation-`k` `sync` `c1` on `b` and a generation-`k+1` barrier op `c2` on
-`b` (with `1 ≤ c2.idx`) whose predecessor `c3` the relation fails to order after `c1`. -/
+exhibits a generation-`k` **barrier op** `c1` on `b` (a `sync` *or* an `arrive`) and a
+generation-`k+1` barrier op `c2` on `b` (with `1 ≤ c2.idx`) whose predecessor `c3` the
+relation fails to order after `c1`. The reflexive disjunct of the Step-3 check means a
+genuine failure also delivers `c1 ≠ c3` (a flagged pair with `c1 = c3` would have passed
+via reflexivity). -/
 theorem exists_failing_pair {T : CTA} {τ : List Config}
     (hcheck : (CheckWellSynchronized T τ).1 = false) :
-    ∃ c1 ∈ T.progPoints, ∃ b nn, T.cmdAt c1 = some (.sync b nn) ∧
+    ∃ c1 ∈ T.progPoints, ∃ b, (T.cmdAt c1).bind Cmd.barrier? = some b ∧
       ∃ c2 ∈ T.progPoints, (T.cmdAt c2).bind Cmd.barrier? = some b ∧
         pointGen T τ c2 = pointGen T τ c1 + 1 ∧ 1 ≤ c2.idx ∧
+        c1 ≠ (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∧
         (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∉ (CheckWellSynchronized T τ).2 := by
   rw [fst_checkWellSynchronized] at hcheck
   obtain ⟨c1, hc1, hf1⟩ := List.all_eq_false.mp hcheck
   refine ⟨c1, hc1, ?_⟩
-  cases hcmd1 : T.cmdAt c1 with
-  | none => simp [hcmd1] at hf1
-  | some cmd1 =>
-    cases cmd1 with
-    | read g => simp [hcmd1] at hf1
-    | write g => simp [hcmd1] at hf1
-    | arrive bb n => simp [hcmd1] at hf1
-    | sync b nn =>
-      refine ⟨b, nn, rfl, ?_⟩
-      simp only [hcmd1, Bool.not_eq_true] at hf1
-      obtain ⟨c2, hc2, hf2⟩ := List.all_eq_false.mp hf1
-      refine ⟨c2, hc2, ?_⟩
-      rw [snd_checkWellSynchronized]
-      obtain ⟨b', hbar2⟩ : ∃ b', (T.cmdAt c2).bind Cmd.barrier? = some b' := by
-        cases hb : (T.cmdAt c2).bind Cmd.barrier? with
-        | none => simp [hb] at hf2
-        | some b' => exact ⟨b', rfl⟩
-      simp only [hbar2] at hf2
-      by_cases hcond : b = b' ∧ pointGen T τ c2 = pointGen T τ c1 + 1 ∧ 1 ≤ c2.idx
-      · rw [if_pos hcond, Bool.not_eq_true, decide_eq_false_iff_not] at hf2
-        obtain ⟨hbb, hgen, hidx⟩ := hcond
-        subst hbb
-        exact ⟨hbar2, hgen, hidx, hf2⟩
-      · rw [if_neg hcond] at hf2; exact (hf2 rfl).elim
+  -- decode `c1`'s barrier (`read`/`write` give `none`, contradicting `hf1`)
+  obtain ⟨b, hbar1⟩ : ∃ b, (T.cmdAt c1).bind Cmd.barrier? = some b := by
+    cases hb : (T.cmdAt c1).bind Cmd.barrier? with
+    | none => simp [hb] at hf1
+    | some b => exact ⟨b, rfl⟩
+  refine ⟨b, hbar1, ?_⟩
+  simp only [hbar1, Bool.not_eq_true] at hf1
+  obtain ⟨c2, hc2, hf2⟩ := List.all_eq_false.mp hf1
+  refine ⟨c2, hc2, ?_⟩
+  rw [snd_checkWellSynchronized]
+  obtain ⟨b', hbar2⟩ : ∃ b', (T.cmdAt c2).bind Cmd.barrier? = some b' := by
+    cases hb : (T.cmdAt c2).bind Cmd.barrier? with
+    | none => simp [hb] at hf2
+    | some b' => exact ⟨b', rfl⟩
+  simp only [hbar2] at hf2
+  by_cases hcond : b = b' ∧ pointGen T τ c2 = pointGen T τ c1 + 1 ∧ 1 ≤ c2.idx
+  · rw [if_pos hcond, Bool.not_eq_true, decide_eq_false_iff_not] at hf2
+    obtain ⟨hbb, hgen, hidx⟩ := hcond
+    subst hbb
+    push Not at hf2
+    exact ⟨hbar2, hgen, hidx, hf2.1, hf2.2⟩
+  · rw [if_neg hcond] at hf2; exact (hf2 rfl).elim
 
 /-- **Dual of `exists_failing_pair`.** From `check = true`, *every* flagged line-18 pair is
-ordered: given a `sync b'` `c1` and a same-barrier op `c2` (with `1 ≤ c2.idx`) of generation
-`pointGen c1 + 1`, the predecessor `c3 = ⟨c2.thread, c2.idx - 1⟩` satisfies
-`(c1, c3) ∈ transClosure (initRelation T τ)`. This unwinds the two nested `List.all`s of
-`fst_checkWellSynchronized` at the witnesses `c1, c2`, then reads off the `decide` in the
-`if`-`then` branch (whose guard holds by hypothesis). -/
-theorem mem_transClosure_of_check {T : CTA} {τ : List Config}
+ordered: given a **barrier op** `c1` on `b'` (a `sync` *or* an `arrive`) and a same-barrier
+op `c2` (with `1 ≤ c2.idx`) of generation `pointGen c1 + 1`, the predecessor
+`c3 = ⟨c2.thread, c2.idx - 1⟩` satisfies `happensBefore T τ c1 c3`. This unwinds the two
+nested `List.all`s of `fst_checkWellSynchronized` at the witnesses `c1, c2`, then reads off
+the reflexive-or-`transClosure` `decide` in the `if`-`then` branch (whose guard holds by
+hypothesis): the `c1 = c3` disjunct is reflexivity, the membership disjunct is a
+`transClosure` path (`mem_transClosure_imp_transGen`). -/
+theorem happensBefore_of_check {T : CTA} {τ : List Config}
     (hcheck : (CheckWellSynchronized T τ).1 = true)
-    {c1 : ProgPoint} (hc1 : c1 ∈ T.progPoints) {b' : Barrier} {nn : ℕ+}
-    (hsync1 : T.cmdAt c1 = some (.sync b' nn))
+    {c1 : ProgPoint} (hc1 : c1 ∈ T.progPoints) {b' : Barrier}
+    (hbar1 : (T.cmdAt c1).bind Cmd.barrier? = some b')
     {c2 : ProgPoint} (hc2 : c2 ∈ T.progPoints)
     (hbar2 : (T.cmdAt c2).bind Cmd.barrier? = some b')
     (hgen : pointGen T τ c2 = pointGen T τ c1 + 1) (hidx : 1 ≤ c2.idx) :
-    (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈ transClosure (initRelation T τ) := by
+    happensBefore T τ c1 (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) := by
   rw [fst_checkWellSynchronized] at hcheck
   have hf1 := List.all_eq_true.mp hcheck c1 hc1
-  simp only [hsync1] at hf1
+  simp only [hbar1] at hf1
   have hf2 := List.all_eq_true.mp hf1 c2 hc2
   simp only [hbar2] at hf2
   rw [if_pos ⟨True.intro, hgen, hidx⟩, decide_eq_true_eq] at hf2
-  exact hf2
+  rcases hf2 with heq | hmem
+  · rw [heq]; exact Relation.ReflTransGen.refl
+  · exact (mem_transClosure_imp_transGen _ hmem).to_reflTransGen
 
 /-! ## Theorem 1 — soundness of `CheckWellSynchronized`
 
@@ -2762,6 +2778,30 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
     have hgl : (τ'.take (p + d₀) ++ [Config.err Tm]).getLast? = some (Config.err Tm) := by simp
     rw [hgl] at hdone2; simp at hdone2
 
+/-- **Competing arrive/sync reversal** — the operational analog of `competing_sync_false`
+for an `arrive` *source*. The flagged source `c1` is an `arrive b` of generation `k`; `c2`
+is a `sync b` of generation `k+1` whose in-thread predecessor `c3` is *not* ordered after
+`c1` (`¬ happensBefore c1 c3`), yet `c2` *is* forced after `c1` (`happensBefore c1 c2`).
+
+This is the new obligation introduced by extending Step 3's generation check to `arrive`
+sources (not just `sync`s). The intended argument mirrors `competing_sync_false`: run the
+ideal `G = {η | ¬ happensBefore c1 η}` to its cut, where `c1` heads its thread poised to
+`arrive b` and `c2` heads its thread poised to `sync b`; step `c2` into `b`'s still-open
+round (generation `≤ k`, or `err` on over-fill), contradicting `hws`. Unlike the `sync`
+case, the source `c1` parks in `b.arrived` (not `b.synced`) when it executes, so the
+firing-configuration witness (`synced_before_recycle` in `competing_sync_false`) must be
+re-derived from the `arrived` list. Stated here as the single isolated operational stub for
+the `arrive`-source path; it rests on the same `run_ideal` cut as `competing_sync_false`. -/
+theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ) (hws : T.WellSynchronized)
+    {c1 c2 : ProgPoint} {b : Barrier} {nn mm : ℕ+}
+    (hc1 : c1 ∈ T.progPoints) (hc2 : c2 ∈ T.progPoints)
+    (hcmd1 : T.cmdAt c1 = some (.arrive b nn)) (hcmd2 : T.cmdAt c2 = some (.sync b mm))
+    (hgen : pointGen T τ c2 = pointGen T τ c1 + 1) (hidx : 1 ≤ c2.idx)
+    (hnothb3 : ¬ happensBefore T τ c1 ⟨c2.thread, c2.idx - 1⟩)
+    (hhb : happensBefore T τ c1 c2) : False := by
+  sorry
+
 /-- **Theorem 2 (completeness).** If `τ` is a complete trace from `(I, T)` ending in
 `done` (`τ ≡ (I, T) ⤳* (F, done)`) and `CheckWellSynchronized T τ` returns `false`,
 then `T` is *not* well-synchronized.
@@ -2772,20 +2812,14 @@ theorem not_wellSynchronized_of_check_false {T : CTA} {τ : List Config}
     (hcheck : (CheckWellSynchronized T τ).1 = false) :
     ¬ T.WellSynchronized := by
   intro hws
-  obtain ⟨c1, hc1, b, nn, hcmd1, c2, hc2, hbar2, hgen, hidx, hnotmem⟩ :=
+  obtain ⟨c1, hc1, b, hc1bar, c2, hc2, hbar2, hgen, hidx, hc1ne3, hnotmem⟩ :=
     exists_failing_pair hcheck
-  have hc1bar : (T.cmdAt c1).bind Cmd.barrier? = some b := by rw [hcmd1]; rfl
   -- the predecessor `c3` of `c2` is a valid program point
   have hc3 : (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∈ T.progPoints := by
     obtain ⟨hth, hlt⟩ := (mem_progPoints_iff T c2).mp hc2
     exact (mem_progPoints_iff T _).mpr ⟨hth, by simp only; omega⟩
-  -- `c1 ≠ c3`: otherwise the `sync` self-loop would already place `(c1, c3)` in `R`
-  have hc1ne3 : c1 ≠ (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) := by
-    rintro hrfl
-    apply hnotmem
-    rw [snd_checkWellSynchronized, ← hrfl]
-    exact subset_iterate_transClosureStep (initRelation T τ) _
-      (mem_initRelation_syncSelf hc1 hcmd1)
+  -- `c1 ≠ c3` is delivered by `exists_failing_pair` (the reflexive disjunct of the check):
+  -- combined with `(c1, c3) ∉ R` it rules out `happensBefore c1 c3`.
   have hnothb3 : ¬ happensBefore T τ c1 ⟨c2.thread, c2.idx - 1⟩ :=
     not_happensBefore_of_not_mem hc1ne3 hnotmem
   cases hcmd2 : T.cmdAt c2 with
@@ -2801,7 +2835,8 @@ theorem not_wellSynchronized_of_check_false {T : CTA} {τ : List Config}
       have hnothb2 : ¬ happensBefore T τ c1 c2 := by
         intro h
         rcases happensBefore_arrive hcmd2 hidx h with heq | h3
-        · rw [heq] at hcmd1; rw [hcmd1] at hcmd2; simp at hcmd2
+        · -- `c1 = c2` is impossible: `gen c2 = gen c1 + 1`
+          rw [heq] at hgen; omega
         · exact hnothb3 h3
       exact reverse_barrier_contradiction hτ hws hc1 hc2 hc1bar hbar2 hgen hnothb2
     | sync bb m =>
@@ -2810,7 +2845,22 @@ theorem not_wellSynchronized_of_check_false {T : CTA} {τ : List Config}
       have hbbeq : bb = b := by rw [hcmd2] at hbar2; simpa [Cmd.barrier?] using hbar2
       subst hbbeq
       by_cases hhb : happensBefore T τ c1 c2
-      · exact competing_sync_false hτ hws hc1 hc2 hcmd1 hcmd2 hgen hidx hnothb3 hhb
+      · -- `c2` is forced after `c1`. Split on `c1`'s kind: a `sync` source is the original
+        -- competing-sync reversal; an `arrive` source is its operational analog.
+        cases hcmd1 : T.cmdAt c1 with
+        | none => rw [hcmd1] at hc1bar; simp [Cmd.barrier?] at hc1bar
+        | some cmd1 =>
+          cases cmd1 with
+          | read g => rw [hcmd1] at hc1bar; simp [Cmd.barrier?] at hc1bar
+          | write g => rw [hcmd1] at hc1bar; simp [Cmd.barrier?] at hc1bar
+          | sync b1 n1 =>
+            have hbeq : b1 = bb := by rw [hcmd1] at hc1bar; simpa [Cmd.barrier?] using hc1bar
+            subst hbeq
+            exact competing_sync_false hτ hws hc1 hc2 hcmd1 hcmd2 hgen hidx hnothb3 hhb
+          | arrive b1 n1 =>
+            have hbeq : b1 = bb := by rw [hcmd1] at hc1bar; simpa [Cmd.barrier?] using hc1bar
+            subst hbeq
+            exact competing_arrive_sync_false hτ hws hc1 hc2 hcmd1 hcmd2 hgen hidx hnothb3 hhb
       · exact reverse_barrier_contradiction hτ hws hc1 hc2 hc1bar hbar2 hgen hhb
 
 /-- **Correctness of `CheckWellSynchronized`** (Theorems 1 and 2 combined). For a CTA `T`
