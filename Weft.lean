@@ -134,8 +134,8 @@ theorem checkLoopWellSynchronized_correct {P I E : CTA}
     {τpk : List Config}
     (hτpk : IsSuccessfulTraceFrom (Config.run State.initial
       (P.seq (I ^ I.loopK h) (h1.trans (CTA.pow_ids I (I.loopK h)).symm))) τpk)
-    {τ : Fin (2 * I.loopK h + 1) → List Config}
-    (hτ : ∀ i : Fin (2 * I.loopK h + 1),
+    {τ : Fin (3 * I.loopK h + 1) → List Config}
+    (hτ : ∀ i : Fin (3 * I.loopK h + 1),
       IsSuccessfulTraceFrom (Config.run State.initial (CTA.loopProgram P I E h1 h2 i.val)) (τ i)) :
     checkLoopWellSynchronized P I E h h1 h2 τp τpk τ = true
       ↔ P.WellSynchronized
@@ -151,8 +151,8 @@ trivially well-synchronized, while `P ⨾ I^k` is just the unrolling `I^k`, so i
 unrolling `τ ⟨k, _⟩` already supplied (and the empty prefix's trace is the `0`-unrolling
 `τ ⟨0, _⟩`). -/
 theorem checkLoopWellSynchronized_correct_empty {I : CTA} (h : I.ConsistentArrivalCounts)
-    {τ : Fin (2 * I.loopK h + 1) → List Config}
-    (hτ : ∀ i : Fin (2 * I.loopK h + 1),
+    {τ : Fin (3 * I.loopK h + 1) → List Config}
+    (hτ : ∀ i : Fin (3 * I.loopK h + 1),
       IsSuccessfulTraceFrom (Config.run State.initial
         (CTA.loopProgram (CTA.empty I.ids I.ids_nonempty) I (CTA.empty I.ids I.ids_nonempty)
           rfl rfl i.val)) (τ i)) :
