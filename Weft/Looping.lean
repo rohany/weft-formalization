@@ -3535,7 +3535,8 @@ theorem arrive_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {
   obtain ⟨-, -, jj, CM1, CM1', hMeq, hCM1, hCM1', hprogM1, -⟩ := hM₁
   have hM1lt : M₁ < t₁.length := by have := (List.getElem?_eq_some_iff.mp hCM1').1; omega
   have h2 : 2 ≤ t₁.length := by omega
-  have hδ_eq : recycleCount b t₁ (t₁.length - 2) = I.loopK h * I.arrivers b / I.arrivalCount h b := by
+  have hδ_eq : recycleCount b t₁ (t₁.length - 2)
+      = I.loopK h * I.arrivers b / I.arrivalCount h b := by
     have hbA : b ∈ A.barrierSet := by
       rw [CTA.barrierSet, Finset.mem_biUnion]
       exact ⟨t, mem_ids_of_idx_lt A hjL, List.mem_toFinset.mpr
@@ -3543,7 +3544,7 @@ theorem arrive_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {
     rw [← recycleCount_done_last hchain1 ht₁L h2]
     exact Config.WellSynchronized.pow_barriers_advance_count h hwf_s (hfull b) ht₁ hbA
   by_contra hcon
-  push_neg at hcon
+  push Not at hcon
   set δ := I.loopK h * I.arrivers b / I.arrivalCount h b
   have heq : recycleCount b t₁ (M₁ - 1) = δ := by omega
   -- No recyclings from step M₁-1 onward: any such recycling would push the count past δ
@@ -3623,7 +3624,7 @@ theorem arrive_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {
     rw [heq,
         List.filterMap_cons_some (show Cmd.barrierRef (Cmd.arrive b par) = some (b, par) from rfl),
         List.countP_cons]
-    simp [beq_self_eq_true]
+    simp
   -- Φ(CM1) ≥ 1 (potential = arrivedLen + barrierProgCount)
   have hpot_pos : 1 ≤ CM1.barrierPotential b := by
     simp only [Config.barrierPotential]; omega
@@ -4024,7 +4025,8 @@ theorem CTA.WellSynchronized.last_batches_replay_bundle {I : CTA}
     obtain ⟨M₁, hM₁, hgp⟩ := keygen t j p c b par hjL hpn hcj hbr
     rw [hidxeq, hgp]
     -- strict recycle bound: `recycleCount b t₁ (M₁ - 1) + 1 ≤ δ` (arrive or sync)
-    have hbound : recycleCount b t₁ (M₁ - 1) + 1 ≤ I.loopK h * I.arrivers b / I.arrivalCount h b := by
+    have hbound : recycleCount b t₁ (M₁ - 1) + 1
+        ≤ I.loopK h * I.arrivers b / I.arrivalCount h b := by
       cases c with
       | read g => simp [Cmd.barrierRef] at hbr
       | write g => simp [Cmd.barrierRef] at hbr
@@ -7039,8 +7041,8 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
                 = recycleCount b t₁ (M₁ - 1) + 1
                   + p * (k * I.arrivers b / I.arrivalCount h b)) ∧
           -- (epilogue-region front closed form) the *last* batch `p = n` of `P` carries the same
-          -- `E`-independent generation `rec + 1 + n·δ` (via `gτepi` + `seq_front_pointGen`).  This is
-          -- the `p = n` analog of `hfrontpre` and supplies the 3-batch-front *reference*'s batch 2
+          -- `E`-independent generation `rec + 1 + n·δ` (via `gτepi` + `seq_front_pointGen`); the
+          -- `p = n` analog of `hfrontpre`, supplying the 3-batch-front *reference*'s batch 2
           -- (`n_ref = 2`, epilogue region) in `loop_prefix`.
           (∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (M₁ : Nat),
               j < ((I ^ k).prog t).length →
@@ -7051,9 +7053,9 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
                 = recycleCount b t₁ (M₁ - 1) + 1
                   + n * (k * I.arrivers b / I.arrivalCount h b)) ∧
           -- (epilogue bridge) for *any* barrier op of `B = (I^k) ⨾ E` at `⟨t,e⟩`, `P`'s generation
-          -- at the last-batch-onward position `n·L+e` is `B`'s generation at `e` plus `n·δ` (`gτepi`
-          -- in (n+1)-form).  With `seq_epilogue_pointGen_lower` this gives the E-region `≥(δ+1)+n·δ`
-          -- lower bound `loop_prefix`'s 3-batch dispatch needs.
+          -- at the last-batch-onward position `n·L+e` is `B`'s generation at `e` plus `n·δ`
+          -- (`gτepi`, (n+1)-form).  With `seq_epilogue_pointGen_lower` this gives the E-region
+          -- `≥(δ+1)+n·δ` lower bound `loop_prefix`'s 3-batch dispatch needs.
           (∀ (t : ThreadId) (e : Nat) (c : Cmd) (b : Barrier) (par : ℕ+),
               ((I ^ k).seq E hids).cmdAt ⟨t, e⟩ = some c → Cmd.barrierRef c = some (b, par) →
               pointGen (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids)) τ
@@ -8167,7 +8169,8 @@ theorem CTA.WellSynchronized.loop_epilogue_inductive_step {I : CTA}
   rw [hinit] at ht₁L
   obtain ⟨tE, htE, htEpre⟩ := CTA.WellSynchronized.seq_angelic_prefix hids hbatchE t₁ ht₁
   -- The shared replay traces and the uniform `+L` shift/monotonicity facts (`P = (I^k) ⨾ Pn`).
-  obtain ⟨τ, hτ, hcoloc, τn, hτn, hshift, hmono, τ2, hτ2, hfrontgen, hfrontmono, hgenbounds, hfrontclosed, -, -, -, -⟩ :=
+  obtain ⟨τ, hτ, hcoloc, τn, hτn, hshift, hmono, τ2, hτ2, hfrontgen, hfrontmono, hgenbounds,
+      hfrontclosed, -, -, -, -⟩ :=
     CTA.WellSynchronized.loop_epilogue_replay_bundle h hk hids hn ht₁ ht₁L htE htEpre
       (fun _ => rfl) (fun _ => WF_initial)
   set Pn := ((I ^ k) ^ n).seq E ((CTA.pow_ids (I ^ k) n).trans hids) with hPn
@@ -8221,7 +8224,7 @@ theorem CTA.WellSynchronized.loop_epilogue_inductive_step {I : CTA}
         rw [hcmd] at hbar2
         simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hbar2
         subst hbar2; exact ⟨_, mm, rfl, rfl⟩
-  -- Classify the pair as front-local or shiftable; sync uses the bundle's coloc; arrive uses bounds.
+  -- Classify the pair as front-local or shiftable; sync uses the bundle coloc, arrive the bounds.
   have hcoloc_result : (c1.idx < 2 * L1 ∧ c2.idx < 2 * L2) ∨ (L1 ≤ c1.idx ∧ L2 < c2.idx) := by
     cases hcc1 : cc1 with
     | sync b' par1' =>
@@ -8335,7 +8338,7 @@ theorem CTA.WellSynchronized.loop_epilogue_inductive_step {I : CTA}
     have hcheck₂ : (CheckWellSynchronized ((I ^ k) ^ 2) τ2).1 = true :=
       (checkWellSynchronized_correct_impl hτ2).mpr h2batch
     exact hfrontmono c1 ⟨c2.thread, c2.idx - 1⟩ hc1s
-      (by show c2.idx - 1 < 2 * ((I ^ k).prog c2.thread).length; omega)
+      (by change c2.idx - 1 < 2 * ((I ^ k).prog c2.thread).length; omega)
       (happensBefore_of_check hcheck₂ (mem_progPoints_of_cmdAt _ hc1₂) hbar1₂
         (mem_progPoints_of_cmdAt _ hc2₂) hbar2₂ hgen₂ hidx)
   · -- **Core case.** Both endpoints lie in the shifted prefix `Pn`; order via `hprev` and lift.
@@ -9788,7 +9791,7 @@ theorem checkLoopWellSynchronized_correct_impl {P I E : CTA} (h : I.ConsistentAr
       have hr : r < k := Nat.mod_lt n hkpos
       have hsplit : n = k * c + r := by rw [hc, hrdef]; exact (Nat.div_add_mod n k).symm
       have hc1 : 1 ≤ c := by rw [hc, Nat.one_le_div_iff hkpos]; omega
-      -- the `c = 1, 2` bases (real epilogue `I^r ⨾ E`) and the `c = 3` front reference (`E_ref = E`)
+      -- the `c = 1, 2` bases (epilogue `I^r ⨾ E`) and the `c = 3` front reference (`E_ref = E`)
       have hbe := hchecked ⟨k * 1 + r, by omega⟩
       rw [CTA.loopProgram_regroup P I E h1 h2 k 1 r] at hbe
       have hbe2 := hchecked ⟨k * 2 + r, by omega⟩
