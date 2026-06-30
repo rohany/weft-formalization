@@ -547,15 +547,24 @@ def CheckWellSynchronized (T : CTA) (τ : List Config) :
         T.progPoints.all fun c2 =>
           match (T.cmdAt c2).bind Cmd.barrier? with
           | some b' =>
-              if b = b' ∧ pointGen T τ c2 = k + 1 ∧ 1 ≤ c2.idx then
-                -- `c3 = ⟨c2.thread, c2.idx - 1⟩` is `c2`'s predecessor (`c3 ; c2 ∈ T`).
-                -- The required ordering is the reflexive `c1 ≤ c3`: the `c1 = c3`
-                -- disjunct accounts for reflexivity directly (the finite `hb` carries
-                -- only the irreflexive part), so a source that *is* `c2`'s predecessor
-                -- — e.g. an `arrive` closing its round just before `c2` — is not
-                -- spuriously flagged.
-                decide (c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∨
-                  (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈ hb)
+              if b = b' ∧ pointGen T τ c2 = k + 1 then
+                if 1 ≤ c2.idx then
+                  -- `c3 = ⟨c2.thread, c2.idx - 1⟩` is `c2`'s predecessor (`c3 ; c2 ∈ T`).
+                  -- The required ordering is the reflexive `c1 ≤ c3`: the `c1 = c3`
+                  -- disjunct accounts for reflexivity directly (the finite `hb` carries
+                  -- only the irreflexive part), so a source that *is* `c2`'s predecessor
+                  -- — e.g. an `arrive` closing its round just before `c2` — is not
+                  -- spuriously flagged.
+                  decide (c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∨
+                    (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈ hb)
+                else
+                  -- `c2` is a generation-`(k+1)` barrier operation that is the *first*
+                  -- instruction of its thread (`c2.idx = 0`), so it has no in-thread
+                  -- predecessor `c3` on which to anchor the `c1 ≤ c3` happens-before.
+                  -- Nothing forces it to wait for generation `k`: a schedule that runs
+                  -- `c2` first lands it in an earlier generation, so the CTA is *not*
+                  -- well-synchronized. Reject.
+                  false
               else
                 true
           | none => true
@@ -2319,10 +2328,12 @@ theorem fst_checkWellSynchronized (T : CTA) (τ : List Config) :
           T.progPoints.all fun c2 =>
             match (T.cmdAt c2).bind Cmd.barrier? with
             | some b' =>
-                if b = b' ∧ pointGen T τ c2 = pointGen T τ c1 + 1 ∧ 1 ≤ c2.idx then
-                  decide (c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∨
-                    (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈
-                      transClosure (initRelation T τ))
+                if b = b' ∧ pointGen T τ c2 = pointGen T τ c1 + 1 then
+                  if 1 ≤ c2.idx then
+                    decide (c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∨
+                      (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈
+                        transClosure (initRelation T τ))
+                  else false
                 else true
             | none => true
       | none => true) := rfl
@@ -2338,9 +2349,11 @@ theorem exists_failing_pair {T : CTA} {τ : List Config}
     (hcheck : (CheckWellSynchronized T τ).1 = false) :
     ∃ c1 ∈ T.progPoints, ∃ b, (T.cmdAt c1).bind Cmd.barrier? = some b ∧
       ∃ c2 ∈ T.progPoints, (T.cmdAt c2).bind Cmd.barrier? = some b ∧
-        pointGen T τ c2 = pointGen T τ c1 + 1 ∧ 1 ≤ c2.idx ∧
-        c1 ≠ (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∧
-        (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∉ (CheckWellSynchronized T τ).2 := by
+        pointGen T τ c2 = pointGen T τ c1 + 1 ∧
+        ((1 ≤ c2.idx ∧
+            c1 ≠ (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∧
+            (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∉ (CheckWellSynchronized T τ).2) ∨
+          c2.idx = 0) := by
   rw [fst_checkWellSynchronized] at hcheck
   obtain ⟨c1, hc1, hf1⟩ := List.all_eq_false.mp hcheck
   refine ⟨c1, hc1, ?_⟩
@@ -2359,13 +2372,16 @@ theorem exists_failing_pair {T : CTA} {τ : List Config}
     | none => simp [hb] at hf2
     | some b' => exact ⟨b', rfl⟩
   simp only [hbar2] at hf2
-  by_cases hcond : b = b' ∧ pointGen T τ c2 = pointGen T τ c1 + 1 ∧ 1 ≤ c2.idx
-  · rw [if_pos hcond, Bool.not_eq_true, decide_eq_false_iff_not] at hf2
-    obtain ⟨hbb, hgen, hidx⟩ := hcond
+  by_cases hcond : b = b' ∧ pointGen T τ c2 = pointGen T τ c1 + 1
+  · rw [if_pos hcond] at hf2
+    obtain ⟨hbb, hgen⟩ := hcond
     subst hbb
-    push Not at hf2
-    exact ⟨hbar2, hgen, hidx, hf2.1, hf2.2⟩
-  · rw [if_neg hcond] at hf2; exact (hf2 rfl).elim
+    by_cases hidx : 1 ≤ c2.idx
+    · rw [if_pos hidx] at hf2
+      simp only [Bool.not_eq_true, decide_eq_false_iff_not, not_or] at hf2
+      exact ⟨hbar2, hgen, Or.inl ⟨hidx, hf2.1, hf2.2⟩⟩
+    · exact ⟨hbar2, hgen, Or.inr (by omega)⟩
+  · rw [if_neg hcond] at hf2; exact absurd hf2 (by simp)
 
 /-- **Dual of `exists_failing_pair`.** From `check = true`, *every* flagged line-18 pair is
 ordered: given a **barrier op** `c1` on `b'` (a `sync` *or* an `arrive`) and a same-barrier
@@ -2388,7 +2404,7 @@ theorem happensBefore_of_check {T : CTA} {τ : List Config}
   simp only [hbar1] at hf1
   have hf2 := List.all_eq_true.mp hf1 c2 hc2
   simp only [hbar2] at hf2
-  rw [if_pos ⟨True.intro, hgen, hidx⟩, decide_eq_true_eq] at hf2
+  rw [if_pos ⟨True.intro, hgen⟩, if_pos hidx, decide_eq_true_eq] at hf2
   rcases hf2 with heq | hmem
   · rw [heq]; exact Relation.ReflTransGen.refl
   · exact (mem_transClosure_imp_transGen _ hmem).to_reflTransGen
@@ -3157,6 +3173,456 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
     have hgl : (τ'.take (p + d₀) ++ [Config.err Tm]).getLast? = some (Config.err Tm) := by simp
     rw [hgl] at hdone2; simp at hdone2
 
+/-- A thread parked in barrier `b`'s synced list stays parked across any single step that is
+*not* a recycle of `b`. Every `interleave` step only ever *grows* synced lists (`sync_block`
+prepends, the configuring/arriving rules touch other fields), and a `recycle` of a *different*
+barrier leaves `b`'s synced list untouched; a recycle of `b` itself is exactly
+`stepRecyclesBarrier b = true`, which is excluded by hypothesis. -/
+theorem synced_mem_preserved {C C' : Config} (hstep : CTAStep C C') (b : Barrier)
+    (t : ThreadId) :
+    ∀ s s' T T', C = Config.run s T → C' = Config.run s' T' →
+      stepRecyclesBarrier b C C' = false → t ∈ (s.B b).synced → t ∈ (s'.B b).synced := by
+  cases hstep with
+  | @interleave s₀ sn T₀ i P' hi hbar hts =>
+    intro s s' T T' hC hC' _ hmem
+    injection hC with hs0 _; subst hs0
+    obtain ⟨Pi, hPi⟩ : ∃ P, T₀.prog i = P := ⟨_, rfl⟩
+    rw [hPi] at hts
+    revert hC'
+    cases hts with
+    | read_noop => intro hC'; injection hC' with h _; subst h; exact hmem
+    | write_noop => intro hC'; injection hC' with h _; subst h; exact hmem
+    | @arrive_configure _ _ ba _ _ _ hb =>
+      intro hC'; injection hC' with h _; subst h
+      by_cases hbb : b = ba
+      · subst hbb; rw [hb] at hmem; simp [BarrierState.unconfigured] at hmem
+      · simpa only [Function.update_of_ne hbb] using hmem
+    | @arrive_register _ _ ba _ _ I _ _ hb _ _ =>
+      intro hC'; injection hC' with h _; subst h
+      by_cases hbb : b = ba
+      · subst hbb; rw [hb] at hmem; simpa [Function.update_self] using hmem
+      · simpa only [Function.update_of_ne hbb] using hmem
+    | @sync_configure _ _ ba _ _ _ hb =>
+      intro hC'; injection hC' with h _; subst h
+      by_cases hbb : b = ba
+      · subst hbb; rw [hb] at hmem; simp [BarrierState.unconfigured] at hmem
+      · simpa only [Function.update_of_ne hbb] using hmem
+    | @sync_block _ _ ba _ _ I _ _ hb _ _ =>
+      intro hC'; injection hC' with h _; subst h
+      by_cases hbb : b = ba
+      · subst hbb; rw [hb] at hmem; simp only [Function.update_self]
+        exact List.mem_cons_of_mem _ hmem
+      · simpa only [Function.update_of_ne hbb] using hmem
+  | @recycle s₀ T₀ ba I A n hb hfull _ =>
+    intro s s' T T' hC hC' hnorec hmem
+    injection hC with hs0 _; subst hs0
+    injection hC' with hsn _; subst hsn
+    by_cases hbb : b = ba
+    · subst hbb
+      simp [stepRecyclesBarrier, Config.state?, hb, BarrierState.isFull, hfull,
+        Function.update_self] at hnorec
+    · simpa only [Function.update_of_ne hbb] using hmem
+  | done hdone hnofull => intro _ _ _ _ _ hC' _ _; simp at hC'
+  | error hts => intro _ _ _ _ _ hC' _ _; simp at hC'
+
+/-- A step that *recycles* barrier `b` wakes every thread parked in `b`'s synced list: such a
+thread's program advances past its parked `sync` (its head is dropped). An `interleave` step
+can never recycle a barrier (its guard keeps every barrier strictly under-full), and a
+`recycle` of a *different* barrier fails `stepRecyclesBarrier b`, so the recycling step is
+necessarily a `recycle` of `b`, which wakes exactly `b`'s synced list. -/
+theorem recycle_wakes_synced {C C' : Config} (hstep : CTAStep C C') (b : Barrier)
+    (t : ThreadId) :
+    ∀ s s' T T', C = Config.run s T → C' = Config.run s' T' →
+      stepRecyclesBarrier b C C' = true → t ∈ (s.B b).synced →
+      T'.prog t = (T.prog t).tail := by
+  cases hstep with
+  | @interleave s₀ sn T₀ i P' hi hbar hts =>
+    intro _ _ _ _ _ _ hrec _
+    exfalso
+    have hnf : (s₀.B b).isFull = false := by
+      rcases hbar b with h | ⟨I, A, n, hbn, hlt⟩
+      · rw [h]; simp [BarrierState.isFull, BarrierState.unconfigured]
+      · rw [hbn]; simp only [BarrierState.isFull]
+        exact beq_eq_false_iff_ne.mpr (Nat.ne_of_lt hlt)
+    simp [stepRecyclesBarrier, Config.state?, hnf] at hrec
+  | @recycle s₀ T₀ ba I A n hb hfull hpark =>
+    intro s s' T T' hC hC' hrec hmem
+    injection hC with hs0 hT0; subst hs0; subst hT0
+    injection hC' with _ hTw; subst hTw
+    by_cases hbb : ba = b
+    · subst hbb
+      have htI : t ∈ I := by rw [hb] at hmem; exact hmem
+      simp [CTA.wake, htI]
+    · exfalso
+      have hne : s₀.B b ≠ BarrierState.unconfigured := by
+        intro h; rw [h] at hmem; simp [BarrierState.unconfigured] at hmem
+      simp [stepRecyclesBarrier, Config.state?, Function.update_of_ne (Ne.symm hbb), hne] at hrec
+  | done hdone hnofull => intro _ _ _ _ _ hC' _ _; simp at hC'
+  | error hts => intro _ _ _ _ _ hC' _ _; simp at hC'
+
+/-- A single CTA step between two `run` configurations advances each thread's program by
+*at most one* command (`d ≤ 1`): `interleave` runs one thread for one (`d ≤ 1`) thread step,
+and `recycle` drops the parked `sync` head of each woken thread (`d = 1`) or leaves others
+unchanged (`d = 0`). (The `done` step, with its `d = |prog|`, only fires once programs are
+empty — excluded here since the target is a `run`.) -/
+theorem CTAStep.progOf_drop_run {C C' : Config} (hstep : CTAStep C C') (t : ThreadId) :
+    ∀ s s' T T', C = Config.run s T → C' = Config.run s' T' →
+      ∃ d, d ≤ 1 ∧ T'.prog t = (T.prog t).drop d := by
+  cases hstep with
+  | @interleave s₀ sn T₀ i P' hi hbar hts =>
+    intro _ _ _ _ hC hC'
+    injection hC with _ hT0; injection hC' with _ hT'; subst hT0; subst hT'
+    by_cases h : t = i
+    · subst h; obtain ⟨d, hd1, hd⟩ := hts.run_drop_le_one
+      exact ⟨d, hd1, by simp [CTA.set, Function.update_self, hd]⟩
+    · exact ⟨0, by omega, by simp [CTA.set, Function.update_of_ne h]⟩
+  | @recycle s₀ T₀ ba I A n hb hfull hpark =>
+    intro _ _ _ _ hC hC'
+    injection hC with _ hT0; injection hC' with _ hT'; subst hT0; subst hT'
+    by_cases h : t ∈ I
+    · exact ⟨1, le_refl 1, by simp [CTA.wake, if_pos h, List.drop_one]⟩
+    · exact ⟨0, by omega, by simp [CTA.wake, if_neg h]⟩
+  | done hdone hnofull => intro _ _ _ _ _ hC'; simp at hC'
+  | error hts => intro _ _ _ _ _ hC'; simp at hC'
+
+/-- **A first-instruction `sync` lands in its barrier's first generation.** If, in a complete
+trace `τ` from `(I, T)`, thread `t`'s very first instruction is `sync b m` and `t` registers
+into `b`'s synced list at the first step (`hC1`/`hsync1`/`hprog1`), and that `sync` executes
+at time `m'`, then no recycle of `b` happens strictly before `m'`: `recycleCount b τ (m'-1) = 0`.
+
+`t` stays parked in `b`'s synced list from step `1` until its wake at `m'`
+(`synced_mem_preserved`, its program frozen at `sync b m :: tail` via `progOf_drop_run` +
+`sync_drop_recycles`); any *earlier* recycle of `b` would wake `t` (`recycle_wakes_synced`),
+making its `sync` execute before `m'` — impossible by `IsTimeOf.unique`. -/
+theorem firstSync_recycleCount_zero {T : CTA} {τ : List Config} {t : ThreadId} {b : Barrier}
+    {m : ℕ+} {tail : Prog} {m' : Nat} {s1 : State} {T1 : CTA}
+    (hcomp : IsCompleteTraceFrom (Config.run State.initial T) τ)
+    (hprogT : T.prog t = Cmd.sync b m :: tail)
+    (hC1 : τ[1]? = some (Config.run s1 T1))
+    (hsync1 : t ∈ (s1.B b).synced) (hprog1 : T1.prog t = T.prog t)
+    (hm' : IsTimeOf (Config.run State.initial T) τ ⟨t, 0⟩ m') :
+    recycleCount b τ (m' - 1) = 0 := by
+  have hchain := hcomp.1.subtrace
+  have hhead : τ[0]? = some (Config.run State.initial T) := by
+    have h0 : τ[0]? = τ.head? := by cases τ <;> rfl
+    rw [h0]; exact hcomp.2
+  have hm'len : m' < τ.length := by
+    obtain ⟨_, _, _, _, _C', _, _, hCj1, _, _⟩ := hm'
+    have := (List.getElem?_eq_some_iff.mp hCj1).1; omega
+  have hrun : ∀ j, j < m' → ∃ s T2, τ[j]? = some (Config.run s T2) := by
+    intro j hj
+    obtain ⟨Cj, hCj⟩ : ∃ C, τ[j]? = some C :=
+      ⟨_, List.getElem?_eq_getElem (show j < τ.length by omega)⟩
+    obtain ⟨Cj1, hCj1⟩ : ∃ C, τ[j+1]? = some C :=
+      ⟨_, List.getElem?_eq_getElem (show j+1 < τ.length by omega)⟩
+    obtain ⟨s, T2, heq⟩ := CTAStep.source_run (chain_step hchain hCj hCj1)
+    exact ⟨s, T2, by rw [hCj, heq]⟩
+  have P : ∀ j, 1 ≤ j → j ≤ m' - 1 → ∃ sj Tj, τ[j]? = some (Config.run sj Tj) ∧
+      t ∈ (sj.B b).synced ∧ Tj.prog t = T.prog t := by
+    intro j
+    induction j with
+    | zero => intro h _; omega
+    | succ k ih =>
+      intro _ hk
+      rcases Nat.eq_zero_or_pos k with hk0 | hkpos
+      · subst hk0; exact ⟨s1, T1, hC1, hsync1, hprog1⟩
+      · obtain ⟨sk, Tk, hCk, hsk, hpk⟩ := ih hkpos (by omega)
+        obtain ⟨sk1, Tk1, hCk1⟩ := hrun (k+1) (by omega)
+        have hst : CTAStep (Config.run sk Tk) (Config.run sk1 Tk1) := chain_step hchain hCk hCk1
+        have hnorec : stepRecyclesBarrier b (Config.run sk Tk) (Config.run sk1 Tk1) = false := by
+          by_contra hc
+          rw [Bool.not_eq_false] at hc
+          have hwake := recycle_wakes_synced hst b t sk sk1 Tk Tk1 rfl rfl hc hsk
+          have htime : IsTimeOf (Config.run State.initial T) τ ⟨t, 0⟩ (k+1) := by
+            refine ⟨hcomp, ?_, k, _, _, rfl, hCk, hCk1, ?_, ?_⟩
+            · change 0 < (T.prog t).length; rw [hprogT]; simp
+            · change Tk.prog t = (T.prog t).drop 0; rw [List.drop_zero]; exact hpk
+            · change Tk1.prog t = (T.prog t).drop 1; rw [hwake, hpk, hprogT]; rfl
+          have := IsTimeOf.unique htime hm'; omega
+        refine ⟨sk1, Tk1, hCk1,
+          synced_mem_preserved hst b t sk sk1 Tk Tk1 rfl rfl hnorec hsk, ?_⟩
+        obtain ⟨d, hd1, hd⟩ := hst.progOf_drop_run t sk sk1 Tk Tk1 rfl rfl
+        obtain rfl | rfl : d = 0 ∨ d = 1 := by omega
+        · rw [hd, List.drop_zero]; exact hpk
+        · exfalso
+          have hrec := sync_drop_recycles hst
+            (show (Config.run sk Tk).progOf t = Cmd.sync b m :: tail by
+              change Tk.prog t = _; rw [hpk, hprogT])
+            (show (Config.run sk1 Tk1).progOf t = tail by
+              change Tk1.prog t = _; rw [hd, hpk, hprogT]; rfl)
+          rw [hrec] at hnorec; exact absurd hnorec (by simp)
+  rw [recycleCount, List.countP_eq_zero]
+  intro j hjmem
+  rw [List.mem_range] at hjmem
+  rw [Bool.not_eq_true]
+  rcases Nat.eq_zero_or_pos j with hj0 | hjpos
+  · subst hj0
+    rw [hhead, hC1]
+    simp [stepRecyclesBarrier, Config.state?, State.initial, BarrierState.isFull,
+      BarrierState.unconfigured]
+  · obtain ⟨sj, Tj, hCj, hsj, hpj⟩ := P j hjpos (by omega)
+    obtain ⟨sj1, Tj1, hCj1⟩ := hrun (j+1) (by omega)
+    rw [hCj, hCj1]
+    by_contra hc
+    rw [Bool.not_eq_false] at hc
+    have hst : CTAStep (Config.run sj Tj) (Config.run sj1 Tj1) := chain_step hchain hCj hCj1
+    have hwake := recycle_wakes_synced hst b t sj sj1 Tj Tj1 rfl rfl hc hsj
+    have htime : IsTimeOf (Config.run State.initial T) τ ⟨t, 0⟩ (j+1) := by
+      refine ⟨hcomp, ?_, j, _, _, rfl, hCj, hCj1, ?_, ?_⟩
+      · change 0 < (T.prog t).length; rw [hprogT]; simp
+      · change Tj.prog t = (T.prog t).drop 0; rw [List.drop_zero]; exact hpj
+      · change Tj1.prog t = (T.prog t).drop 1; rw [hwake, hpj, hprogT]; rfl
+    have := IsTimeOf.unique htime hm'; omega
+
+/-- Complete a trace after a chosen first step. Given a single CTA step from `(I, T)` to
+`C₁ = (s₁, T₁)`, there is a complete trace `(I, T) :: τr` from `(I, T)` whose *second*
+configuration is `C₁` (`exists_completeTrace` finishes the run from `C₁`). -/
+theorem exists_firstStep_complete {T : CTA} {s1 : State} {T1 : CTA}
+    (hstep01 : CTAStep (Config.run State.initial T) (Config.run s1 T1)) :
+    ∃ τr, IsCompleteTraceFrom (Config.run State.initial T) (Config.run State.initial T :: τr) ∧
+      (Config.run State.initial T :: τr)[1]? = some (Config.run s1 T1) := by
+  obtain ⟨τr, hτr⟩ := exists_completeTrace T.barrierSet (Config.run s1 T1)
+    (barriersWithin_of_reaches (Relation.ReflTransGen.single hstep01))
+  have hτrne : τr ≠ [] := by
+    intro h; rw [h] at hτr; obtain ⟨_, hl, _⟩ := hτr.1.ends; simp at hl
+  refine ⟨τr, ⟨⟨?_, ?_⟩, by simp⟩, ?_⟩
+  · change List.IsChain CTAStep (Config.run State.initial T :: τr)
+    rw [List.isChain_cons]
+    exact ⟨fun y hy => by rw [hτr.2, Option.mem_some_iff] at hy; subst hy; exact hstep01,
+      hτr.1.subtrace⟩
+  · obtain ⟨Cn, hlast, hterm⟩ := hτr.1.ends
+    exact ⟨Cn, by rw [List.getLast?_cons_of_ne_nil hτrne]; exact hlast, hterm⟩
+  · have h1 : (Config.run State.initial T :: τr)[1]? = τr[0]? := rfl
+    have h0 : τr[0]? = τr.head? := by cases τr <;> rfl
+    rw [h1, h0]; exact hτr.2
+
+/-- The shared `hws`-contradiction tail of the predecessor-less case. If `c2` is a barrier op
+on `b` whose witness generation is `≥ 2` (`hge2`), but some complete trace `τ''` from `(I, T)`
+assigns `c2` generation `1` — formally, every time `m'` of `c2` in `τ''` sees no prior recycle
+of `b` (`recycleCount b τ'' (m'-1) = 0`) — then the two traces disagree on `c2`'s generation,
+contradicting `hws`. -/
+theorem firstInstr_contradiction {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ) (hws : T.WellSynchronized)
+    {c2 : ProgPoint} (hc2 : c2 ∈ T.progPoints) {b : Barrier}
+    (hbar2 : (T.cmdAt c2).bind Cmd.barrier? = some b)
+    (hge2 : 2 ≤ pointGen T τ c2) {τ'' : List Config}
+    (hcomp'' : IsCompleteTraceFrom (Config.run State.initial T) τ'')
+    (hrc : ∀ m', IsTimeOf (Config.run State.initial T) τ'' c2 m' →
+      recycleCount b τ'' (m' - 1) = 0) : False := by
+  obtain ⟨sd, hdone⟩ := hτ.2
+  have hc2L : c2.idx < (T.prog c2.thread).length := ((mem_progPoints_iff T c2).mp hc2).2
+  obtain ⟨mτ, hmτ⟩ := exists_time_of_ends_done hτ.1 hdone hc2L
+  obtain ⟨g, _, hgτ, hgτ''⟩ := hws.2 τ τ'' hτ.1 hcomp'' c2 ⟨b, hbar2⟩
+  have hgeq : g = pointGen T τ c2 := IsGenOf.unique hgτ (isGenOf_pointGen hbar2 hmτ)
+  rw [hgeq] at hgτ''
+  obtain ⟨_, b', hb'cmd, hcase⟩ := hgτ''
+  rcases hcase with ⟨mm, hmm, hgenrec⟩ | ⟨h0eq, _⟩
+  · have hbb' : b' = b := by
+      have hh : (T.cmdAt c2).bind Cmd.barrier? = some b' := hb'cmd
+      rw [hbar2] at hh; exact (Option.some.inj hh).symm
+    subst hbb'
+    rw [hrc mm hmm] at hgenrec; omega
+  · rw [h0eq] at hge2; omega
+
+/-- **`2 ≤ pointGen` core of the predecessor-less case.** A barrier op `c2` that is its
+thread's first instruction (`c2.idx = 0`) but is assigned generation `≥ 2` by the witness
+trace cannot belong to a well-synchronized CTA: a schedule that steps `c2`'s thread first
+registers `c2` into generation `1`. The `arrive` case runs `c2` immediately (generation `1`,
+no recycle precedes step `1`); the `sync` case parks `c2` in `b`'s first round
+(`firstSync_recycleCount_zero`). Both route through `firstInstr_contradiction`. -/
+theorem firstInstr_highGen_not_wellSynchronized' {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ) (hws : T.WellSynchronized)
+    {c2 : ProgPoint} (hc2 : c2 ∈ T.progPoints) {b : Barrier}
+    (hbar2 : (T.cmdAt c2).bind Cmd.barrier? = some b)
+    (hge2 : 2 ≤ pointGen T τ c2) (hidx0 : c2.idx = 0) : False := by
+  have hi : c2.thread ∈ T.ids := ((mem_progPoints_iff T c2).mp hc2).1
+  have hc2eq : c2 = ⟨c2.thread, 0⟩ := by rw [← hidx0]
+  cases hcmd2 : T.cmdAt c2 with
+  | none => rw [hcmd2] at hbar2; simp [Cmd.barrier?] at hbar2
+  | some cmd2 =>
+    cases cmd2 with
+    | read g => rw [hcmd2] at hbar2; simp [Cmd.barrier?] at hbar2
+    | write g => rw [hcmd2] at hbar2; simp [Cmd.barrier?] at hbar2
+    | arrive bb m =>
+      have hbe : b = bb := by
+        have h := hbar2; rw [hcmd2] at h; simp [Cmd.barrier?] at h; exact h.symm
+      subst hbe
+      have hhead0 : (T.prog c2.thread)[0]? = some (Cmd.arrive b m) := by
+        have h := hcmd2; simp only [CTA.cmdAt, hidx0] at h; exact h
+      obtain ⟨tl, hprogT⟩ : ∃ tl, T.prog c2.thread = Cmd.arrive b m :: tl := by
+        have hne : T.prog c2.thread ≠ [] := by intro h; rw [h] at hhead0; simp at hhead0
+        obtain ⟨hd, tl, hp⟩ := List.exists_cons_of_ne_nil hne
+        rw [hp] at hhead0; simp only [List.getElem?_cons_zero, Option.some.injEq] at hhead0
+        exact ⟨tl, by rw [hp, hhead0]⟩
+      set s1 : State :=
+        { State.initial with B := Function.update State.initial.B b ⟨[], 1, some m⟩ } with hs1def
+      set T1 : CTA := T.set c2.thread hi tl with hT1def
+      have hts : ThreadStep (ThreadConfig.run State.initial c2.thread (T.prog c2.thread))
+          (ThreadConfig.run s1 c2.thread tl) := by
+        rw [hprogT]; exact ThreadStep.arrive_configure rfl rfl
+      have hstep01 : CTAStep (Config.run State.initial T) (Config.run s1 T1) :=
+        CTAStep.interleave hi (fun _ => Or.inl rfl) hts
+      obtain ⟨τr, hcomp'', hC1''⟩ := exists_firstStep_complete hstep01
+      have htime1 : IsTimeOf (Config.run State.initial T)
+          (Config.run State.initial T :: τr) ⟨c2.thread, 0⟩ 1 := by
+        refine ⟨hcomp'', ?_, 0, _, _, rfl, rfl, hC1'', ?_, ?_⟩
+        · change 0 < (T.prog c2.thread).length; rw [hprogT]; simp
+        · change T.prog c2.thread = (T.prog c2.thread).drop 0; rw [List.drop_zero]
+        · change T1.prog c2.thread = (T.prog c2.thread).drop 1
+          rw [hT1def, hprogT]; simp [CTA.set, Function.update_self]
+      refine firstInstr_contradiction hτ hws hc2 hbar2 hge2 hcomp'' ?_
+      intro m' hm'; rw [hc2eq] at hm'
+      rw [IsTimeOf.unique hm' htime1]; simp [recycleCount]
+    | sync bb m =>
+      have hbe : b = bb := by
+        have h := hbar2; rw [hcmd2] at h; simp [Cmd.barrier?] at h; exact h.symm
+      subst hbe
+      have hhead0 : (T.prog c2.thread)[0]? = some (Cmd.sync b m) := by
+        have h := hcmd2; simp only [CTA.cmdAt, hidx0] at h; exact h
+      obtain ⟨tl, hprogT⟩ : ∃ tl, T.prog c2.thread = Cmd.sync b m :: tl := by
+        have hne : T.prog c2.thread ≠ [] := by intro h; rw [h] at hhead0; simp at hhead0
+        obtain ⟨hd, tl, hp⟩ := List.exists_cons_of_ne_nil hne
+        rw [hp] at hhead0; simp only [List.getElem?_cons_zero, Option.some.injEq] at hhead0
+        exact ⟨tl, by rw [hp, hhead0]⟩
+      set s1 : State :=
+        { E := Function.update State.initial.E c2.thread false,
+          B := Function.update State.initial.B b ⟨[c2.thread], 0, some m⟩ } with hs1def
+      set T1 : CTA := T.set c2.thread hi (T.prog c2.thread) with hT1def
+      have hts : ThreadStep (ThreadConfig.run State.initial c2.thread (T.prog c2.thread))
+          (ThreadConfig.run s1 c2.thread (T.prog c2.thread)) := by
+        rw [hprogT]; exact ThreadStep.sync_configure rfl rfl
+      have hstep01 : CTAStep (Config.run State.initial T) (Config.run s1 T1) :=
+        CTAStep.interleave hi (fun _ => Or.inl rfl) hts
+      obtain ⟨τr, hcomp'', hC1''⟩ := exists_firstStep_complete hstep01
+      have hsync1 : c2.thread ∈ (s1.B b).synced := by rw [hs1def]; simp [Function.update_self]
+      have hprog1 : T1.prog c2.thread = T.prog c2.thread := by
+        rw [hT1def]; simp [CTA.set]
+      refine firstInstr_contradiction hτ hws hc2 hbar2 hge2 hcomp'' ?_
+      intro m' hm'; rw [hc2eq] at hm'
+      exact firstSync_recycleCount_zero hcomp'' hprogT hC1'' hsync1 hprog1 hm'
+
+/-- **Completeness, the predecessor-less (`c2.idx = 0`) case.** A barrier operation `c2`
+that is the *first instruction of its thread* (`c2.idx = 0`) yet is assigned generation
+`≥ 2` by the witness trace `τ` — here `pointGen T τ c2 = pointGen T τ c1 + 1` for a barrier
+op `c1`, whose generation is `≥ 1` on the `done`-reaching `τ` — cannot belong to a
+well-synchronized CTA: `c2` has no in-thread predecessor to anchor it after generation `k`,
+so a schedule that steps `c2`'s thread first registers `c2` into an *earlier* generation
+(generation `1`), making `c2`'s generation schedule-dependent. This is the formal version of
+the 4-thread counterexample (`arrive 0 2 ‖ arrive 0 2 ‖ sync 0 2 ‖ sync 0 2`) that motivates
+the `c2.idx = 0 ⇒ reject` clause of Step 3 in `CheckWellSynchronized`.
+
+TODO (rohany): construct the reordered complete trace `τ''` in which `c2`'s thread steps
+first and read off `pointGen T τ'' c2 = 1 ≠ pointGen T τ c2`, contradicting `hws`. -/
+theorem firstInstr_highGen_not_wellSynchronized {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hws : T.WellSynchronized)
+    {c1 : ProgPoint} (hc1 : c1 ∈ T.progPoints) {b : Barrier}
+    (hc1bar : (T.cmdAt c1).bind Cmd.barrier? = some b)
+    {c2 : ProgPoint} (hc2 : c2 ∈ T.progPoints)
+    (hbar2 : (T.cmdAt c2).bind Cmd.barrier? = some b)
+    (hgen : pointGen T τ c2 = pointGen T τ c1 + 1) (hidx0 : c2.idx = 0) : False := by
+  cases hcmd2 : T.cmdAt c2 with
+  | none => rw [hcmd2] at hbar2; simp [Cmd.barrier?] at hbar2
+  | some cmd2 =>
+    cases cmd2 with
+    | read g => rw [hcmd2] at hbar2; simp [Cmd.barrier?] at hbar2
+    | write g => rw [hcmd2] at hbar2; simp [Cmd.barrier?] at hbar2
+    | arrive bb m =>
+      -- `c2` is an `arrive` at index `0`: the *only* `initRelation` edge into an `arrive`
+      -- is program order from its predecessor (`initRelation_cases`), which an index-`0`
+      -- point has none of — so nothing happens-before `c2`, and the generic
+      -- reversing-trace argument (`reverse_barrier_contradiction`) applies.
+      have hnothb : ¬ happensBefore T τ c1 c2 := by
+        intro h
+        rcases Relation.ReflTransGen.cases_tail h with heq | ⟨d, _, hdc2⟩
+        · rw [heq] at hgen; omega
+        · obtain ⟨_, _, hcase⟩ := initRelation_cases hdc2
+          rcases hcase with hpo | ⟨bb', n', hsync, _, _⟩
+          · have hii : c2.idx = d.idx + 1 := by rw [hpo]
+            omega
+          · rw [hcmd2] at hsync; simp at hsync
+      exact reverse_barrier_contradiction hτ hws hc1 hc2 hc1bar hbar2 hgen hnothb
+    | sync bb m =>
+      -- `c2` is a `sync` at index `0`: it *can* carry same-generation incoming edges, so
+      -- `¬ happensBefore` is not free. Instead build a complete trace `τ''` whose first step
+      -- runs `c2`'s thread (`sync_configure b`), registering `c2` into `b`'s first round;
+      -- then `c2` has generation `1` (or never executes), contradicting `hws`, which forces
+      -- generation `pointGen T τ c2 = pointGen T τ c1 + 1 ≥ 2`.
+      have hbb : b = bb := by
+        have h := hbar2; rw [hcmd2] at h; simp [Cmd.barrier?] at h; exact h.symm
+      subst hbb
+      have hi : c2.thread ∈ T.ids := ((mem_progPoints_iff T c2).mp hc2).1
+      have hc2eq : c2 = ⟨c2.thread, 0⟩ := by rw [← hidx0]
+      have hhead0 : (T.prog c2.thread)[0]? = some (Cmd.sync b m) := by
+        have h := hcmd2; simp only [CTA.cmdAt, hidx0] at h; exact h
+      obtain ⟨tl, hprogT⟩ : ∃ tl, T.prog c2.thread = Cmd.sync b m :: tl := by
+        have hne : T.prog c2.thread ≠ [] := by
+          intro h; rw [h] at hhead0; simp at hhead0
+        obtain ⟨hd, tl, hp⟩ := List.exists_cons_of_ne_nil hne
+        rw [hp] at hhead0
+        simp only [List.getElem?_cons_zero, Option.some.injEq] at hhead0
+        exact ⟨tl, by rw [hp, hhead0]⟩
+      -- first step: `sync_configure` of thread `c2.thread`, then complete the trace
+      set s1 : State :=
+        { E := Function.update State.initial.E c2.thread false,
+          B := Function.update State.initial.B b ⟨[c2.thread], 0, some m⟩ } with hs1def
+      set T1 : CTA := T.set c2.thread hi (T.prog c2.thread) with hT1def
+      have hts : ThreadStep (ThreadConfig.run State.initial c2.thread (T.prog c2.thread))
+          (ThreadConfig.run s1 c2.thread (T.prog c2.thread)) := by
+        rw [hprogT]; exact ThreadStep.sync_configure rfl rfl
+      have hstep01 : CTAStep (Config.run State.initial T) (Config.run s1 T1) :=
+        CTAStep.interleave hi (fun _ => Or.inl rfl) hts
+      have hinv1 : (Config.run s1 T1).barriersWithin T.barrierSet :=
+        barriersWithin_of_reaches (Relation.ReflTransGen.single hstep01)
+      obtain ⟨τr, hτr⟩ := exists_completeTrace T.barrierSet (Config.run s1 T1) hinv1
+      have hτrne : τr ≠ [] := by
+        intro h; rw [h] at hτr; obtain ⟨_, hl, _⟩ := hτr.1.ends; simp at hl
+      have hcomp'' : IsCompleteTraceFrom (Config.run State.initial T)
+          (Config.run State.initial T :: τr) := by
+        refine ⟨⟨?_, ?_⟩, by simp⟩
+        · change List.IsChain CTAStep (Config.run State.initial T :: τr)
+          rw [List.isChain_cons]
+          refine ⟨fun y hy => ?_, hτr.1.subtrace⟩
+          rw [hτr.2, Option.mem_some_iff] at hy; subst hy; exact hstep01
+        · obtain ⟨Cn, hlast, hterm⟩ := hτr.1.ends
+          exact ⟨Cn, by rw [List.getLast?_cons_of_ne_nil hτrne]; exact hlast, hterm⟩
+      have hC1'' : (Config.run State.initial T :: τr)[1]? = some (Config.run s1 T1) := by
+        have h1 : (Config.run State.initial T :: τr)[1]? = τr[0]? := rfl
+        have h0 : τr[0]? = τr.head? := by cases τr <;> rfl
+        rw [h1, h0]; exact hτr.2
+      have hsync1 : c2.thread ∈ (s1.B b).synced := by
+        rw [hs1def]; simp [Function.update_self]
+      have hprog1 : T1.prog c2.thread = T.prog c2.thread := by
+        rw [hT1def]; simp [CTA.set]
+      -- read off generations from `hws`; the witness forces `pointGen T τ c2 ≥ 2`
+      obtain ⟨sd, hdone⟩ := hτ.2
+      have hc2L : c2.idx < (T.prog c2.thread).length := ((mem_progPoints_iff T c2).mp hc2).2
+      obtain ⟨mτ, hmτ⟩ := exists_time_of_ends_done hτ.1 hdone hc2L
+      have hgenc2 : IsGenOf (Config.run State.initial T) τ c2 (pointGen T τ c2) :=
+        isGenOf_pointGen hbar2 hmτ
+      have hc1L : c1.idx < (T.prog c1.thread).length := ((mem_progPoints_iff T c1).mp hc1).2
+      obtain ⟨mτ1, hmτ1⟩ := exists_time_of_ends_done hτ.1 hdone hc1L
+      have hpc1 : 1 ≤ pointGen T τ c1 := by
+        have hh := isGenOf_recycleCount (isGenOf_pointGen hc1bar hmτ1) hc1bar hmτ1; omega
+      have hge2 : 2 ≤ pointGen T τ c2 := by omega
+      obtain ⟨g, _, hgτ, hgτ''⟩ :=
+        hws.2 τ (Config.run State.initial T :: τr) hτ.1 hcomp'' c2 ⟨b, hbar2⟩
+      have hgeq : g = pointGen T τ c2 := IsGenOf.unique hgτ hgenc2
+      rw [hgeq] at hgτ''
+      obtain ⟨_, b', hb'cmd, hcase⟩ := hgτ''
+      rcases hcase with ⟨mm, hmm, hgenrec⟩ | ⟨h0eq, _⟩
+      · have hbb' : b' = b := by
+          simp only [ProgPoint.cmd, Config.progOf, hidx0] at hb'cmd
+          rw [hprogT] at hb'cmd
+          simp only [List.getElem?_cons_zero, Option.bind_some, Cmd.barrier?,
+            Option.some.injEq] at hb'cmd
+          exact hb'cmd.symm
+        subst hbb'
+        rw [hc2eq] at hmm
+        have hrc0 := firstSync_recycleCount_zero hcomp'' hprogT hC1'' hsync1 hprog1 hmm
+        rw [hrc0] at hgenrec; omega
+      · rw [h0eq] at hge2; omega
+
 /-- **Theorem 2 (completeness).** If `τ` is a complete trace from `(I, T)` ending in
 `done` (`τ ≡ (I, T) ⤳* (F, done)`) and `CheckWellSynchronized T τ` returns `false`,
 then `T` is *not* well-synchronized.
@@ -3167,8 +3633,16 @@ theorem not_wellSynchronized_of_check_false {T : CTA} {τ : List Config}
     (hcheck : (CheckWellSynchronized T τ).1 = false) :
     ¬ T.WellSynchronized := by
   intro hws
-  obtain ⟨c1, hc1, b, hc1bar, c2, hc2, hbar2, hgen, hidx, hc1ne3, hnotmem⟩ :=
+  obtain ⟨c1, hc1, b, hc1bar, c2, hc2, hbar2, hgen, hfail⟩ :=
     exists_failing_pair hcheck
+  -- The new `c2.idx = 0` failure mode is the predecessor-less counterexample; the remaining
+  -- (`1 ≤ c2.idx`) case is the original happens-before reversal that follows.
+  obtain ⟨hidx, hc1ne3, hnotmem⟩ :
+      1 ≤ c2.idx ∧ c1 ≠ (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∧
+        (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∉ (CheckWellSynchronized T τ).2 := by
+    rcases hfail with h | hidx0
+    · exact h
+    · exact (firstInstr_highGen_not_wellSynchronized hτ hws hc1 hc1bar hc2 hbar2 hgen hidx0).elim
   -- the predecessor `c3` of `c2` is a valid program point
   have hc3 : (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∈ T.progPoints := by
     obtain ⟨hth, hlt⟩ := (mem_progPoints_iff T c2).mp hc2
@@ -3251,38 +3725,52 @@ well-synchronized continuation.** From a configuration `(S, T)`, suppose:
 
 * `σ₁` is a step `(S, T) → C'` (`hσ₁`), the continuation `C'` is well-synchronized
   (`hWS`) and has a successful trace `τ` (`hτ`);
-* the executable check accepts the joined trace `σ₁ :: τ` of `T` (`hcheck`);
 * a second first step `σ₂`, namely `(S, T) → C''` (`hσ₂`) — *not* required to differ
   from `σ₁` (so `C''` may equal `C'`).
 
-Then the two one-step divergences reconverge — there are steps `σ₃ : C' → Cd` and
-`σ₄ : C'' → Cd` into a common configuration `Cd` — and the recovered generations agree:
+Then the two divergences reconverge — there are CTA-step *paths* `C' ⤳* Cd` and
+`C'' ⤳* Cd` into a common configuration `Cd`, given as config lists `C' :: p'` and
+`C'' :: p''` (each an `IsSubtrace` ending at `Cd`) — and the recovered generations agree:
 for every complete trace `τ'` from `Cd` and every barrier instruction `η` of `(S, T)`, the
-two joined traces `(S, T) :: C' :: τ'` and `(S, T) :: C'' :: τ'` assign `η` a *common,
-nonzero* generation. The conclusion is phrased with `IsGenOf` in the exact shape of the
-`Config.WellSynchronized` body (`∃ g, g ≠ 0 ∧ IsGenOf … ∧ IsGenOf …`), so it is a drop-in
-when discharging well-synchronization of `(S, T)` on this pair of complete traces.
+two reconverged traces — route through `C'` then follow `τ'`, vs. route through `C''` then
+follow `τ'` — assign `η` a *common, nonzero* generation. The `(C' :: p').dropLast ++ τ'`
+splice drops the shared `Cd` (contributed by `τ'`) so the glued list is a genuine trace.
+The conclusion is phrased with `IsGenOf` in the shape of the `Config.WellSynchronized` body
+(`∃ g, g ≠ 0 ∧ IsGenOf … ∧ IsGenOf …`), so it is a drop-in when discharging
+well-synchronization of `(S, T)`.
 
-(`σ₂` need not differ from `σ₁`: if `C'' = C'` the two joined traces coincide and the claim
-is immediate, so neither `σ₁ ≠ σ₂` nor `C'' ≠ C'` is assumed. A natural witness for the
-common generation `g` is `pointGen T … η`, related to `IsGenOf` by `isGenOf_pointGen`.)
+Multi-step legs (vs. a one-step `σ₃ : C' → Cd`) are forced: when `σ₁` *completes* a barrier
+(e.g. `arrive b n` with `n = 1`, or any `arrive`/`sync` that fills its barrier), the
+post-`σ₁` state has a full barrier, so the `interleave` guard blocks every replay of `σ₂`
+and no single-step `Cd` exists; the join then routes through a `recycle` leg. A single step
+is the special case `p' = [Cd]` (then `(C' :: p').dropLast ++ τ' = C' :: τ'`), and `p' = []`
+the degenerate `C' = Cd` leg.
 
-Rohan notes: This is a one-step diamond property that may be useful for proving the soundness
-of the well-sync algorithm.
+(`σ₂` need not differ from `σ₁`: if `C'' = C'` the two reconverged traces coincide and the
+claim is immediate. A natural witness for the common generation `g` is `pointGen T … η`,
+related to `IsGenOf` by `isGenOf_pointGen`.)
+
+Rohan notes: This is a (multi-step) diamond / local-confluence property that may be useful
+for proving the soundness of the well-sync algorithm.
 -/
-theorem soundness_lemma_one_step_diamond
+theorem soundness_lemma_diamond
     {S : State} {T : CTA} {C' C'' : Config}
     (hσ₁ : CTAStep (Config.run S T) C')
     {τ : List Config} (hτ : IsSuccessfulTraceFrom C' τ)
     (hWS : C'.WellSynchronized)
-    (hcheck : (CheckWellSynchronized T (Config.run S T :: τ)).1 = true)
+    -- TODO (rohany): Can we get rid of this premise?
+    -- (hcheck : (CheckWellSynchronized T (Config.run S T :: τ)).1 = true)
     (hσ₂ : CTAStep (Config.run S T) C'') :
-    ∃ (Cd : Config) (_σ₃ : CTAStep C' Cd) (_σ₄ : CTAStep C'' Cd),
+    ∃ (Cd : Config) (p' p'' : List Config),
+      IsSubtrace (C' :: p') ∧ (C' :: p').getLast? = some Cd ∧
+      IsSubtrace (C'' :: p'') ∧ (C'' :: p'').getLast? = some Cd ∧
       ∀ τ', IsCompleteTraceFrom Cd τ' →
         ∀ η : ProgPoint, (∃ b, (η.cmd (Config.run S T)).bind Cmd.barrier? = some b) →
           ∃ g, g ≠ 0 ∧
-            IsGenOf (Config.run S T) (Config.run S T :: C' :: τ') η g ∧
-            IsGenOf (Config.run S T) (Config.run S T :: C'' :: τ') η g := by
+            IsGenOf (Config.run S T)
+              (Config.run S T :: (C' :: p').dropLast ++ τ') η g ∧
+            IsGenOf (Config.run S T)
+              (Config.run S T :: (C'' :: p'').dropLast ++ τ') η g := by
   -- Case on both first steps. A `CTAStep` is `interleave` (a thread takes a `ThreadStep`),
   -- `recycle`, `done`, or `error`; on `interleave` we further case the `ThreadStep` rule
   -- (only the six non-error rules produce a `run` target, after generalizing the
