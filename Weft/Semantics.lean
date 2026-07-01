@@ -22,9 +22,9 @@ commands") and `err` (the state becomes the error state, the CTA is kept) — se
 `Config`. The CTA-level `interleave` rule nondeterministically picks one thread,
 runs it for a single thread-level step, and splices the result back in; this is
 only allowed while every barrier is unconfigured or still under-registered. When
-some barrier is exactly full it must instead be recycled, and a thread that
-produces an error propagates `err` to the whole CTA (independent of the barrier
-condition).
+some barrier is exactly full it must instead be recycled — *recycling has
+priority over every other rule*, including error propagation (see the deviation
+note below).
 
 ## Thread-level rules (`ThreadStep`)
 
@@ -42,12 +42,10 @@ condition).
 * `sync_block` — subsequent blocking sync: `E(id) = true`, `E' = E[false/id]`,
   `B(b) = (I,A,n)` with `0 < |I|+A < n`, `B' = B[(I::id, A, n)/b]`; control
   stays at `sync b n; c`.
-* `sync_err_full` — too many threads: `E(id) = true`, `B(b) = (I,A,n)`,
-  `|I|+A = n` ⇒ step to `err`.
 * `sync_err_count` — thread-count mismatch: `E(id) = true`, `B(b) = (I,A,n)`,
   `n ≠ m` ⇒ `sync b m; c` steps to `err`.
-* `arrive_err_full` / `arrive_err_count` — the error productions for `arrive`,
-  identical to the `sync` ones.
+* `arrive_err_count` — the error production for `arrive`, identical to the
+  `sync` one.
 
 ## CTA-level rules (`CTAStep`)
 
@@ -58,7 +56,34 @@ condition).
   blocked on it: set `E' = E[true/I]`, advance each thread in `I` past its
   `sync b n`, and reset the barrier to `([],0,⊥)`.
 * `done` — `E, B, return ‖ … ‖ return ⤳ E, B, done`.
-* `error` — if any thread produces `err`, the whole CTA goes to `err`.
+* `error` — if any thread produces `err`, the whole CTA goes to `err`; guarded by
+  the *same* all-barriers-under-full condition as `interleave`.
+
+## Deviation from the paper: recycle has priority over the error productions
+
+The paper's err productions carry no barrier condition, and it also has
+"too many threads" productions (`sync`/`arrive` at a barrier with `|I|+|A| = n`
+step to `err`). Together these make the paper's own Theorem 1 false: a full
+barrier is a *transient* state that the semantics is about to recycle (the
+`interleave` guard exists exactly so no thread can act on it), yet an unguarded
+err production lets a thread observe it and abort instead. Counterexample: the
+single thread `[arrive b 1, sync b 1]` passes `WELLSYNC` (generations 1 and 2,
+and the sync's predecessor *is* the generation-1 arrive), but after the `arrive`
+fills `b` the still-enabled thread could take the full-barrier err production in
+a race with the pending recycle, deadlocking Definition 6. On hardware the race
+does not exist — a completed named barrier "is immediately re-initialized"
+(§2.2), so fullness is never observable.
+
+We therefore (i) guard `CTAStep.error` with the `interleave` barrier condition —
+recycling a full barrier fires before any thread may observe it, erroring
+included — and (ii) drop the two "too many threads" productions
+(`sync_err_full` / `arrive_err_full`), which the guard makes unreachable at the
+CTA level (they require a full barrier; the guard forbids one). Genuine
+over-subscription is still caught by well-synchronization: the surplus
+registrant lands in a fresh generation and either deadlocks (generation `0`) or
+shifts generations between schedules. The count-mismatch productions
+(`sync_err_count` / `arrive_err_count`) remain, firing — under the guard — from
+ordinarily-reachable states.
 
 (Multi-step closure `⤳*`, traces, and timing are §4, out of scope here.)
 -/
@@ -136,28 +161,15 @@ inductive ThreadStep : ThreadConfig → ThreadConfig → Prop where
       ThreadStep (.run s i (Cmd.sync b n :: c))
         (.run { E := Function.update s.E i false,
                 B := Function.update s.B b ⟨i :: I, A, some n⟩ } i (Cmd.sync b n :: c))
-  /-- Too many threads register at `b` via `sync` (`|I|+A = n`): step to `err`. -/
-  | sync_err_full {s : State} {i : ThreadId} {b : Barrier} {n : ℕ+} {c : Prog}
-      {I : List ThreadId} {A : ℕ}
-      (he : s.E i = true)
-      (hb : s.B b = ⟨I, A, some n⟩)
-      (hfull : I.length + A = (n : Nat)) :
-      ThreadStep (.run s i (Cmd.sync b n :: c)) (.err i (Cmd.sync b n :: c))
   /-- Thread-count mismatch on `b`: barrier expects `n` but `sync b m` has `n ≠ m`;
-  step to `err`. -/
+  step to `err`. (The paper's companion "too many threads" production
+  `sync_err_full` is deliberately absent — see the module doc's deviation note.) -/
   | sync_err_count {s : State} {i : ThreadId} {b : Barrier} {m n : ℕ+} {c : Prog}
       {I : List ThreadId} {A : ℕ}
       (he : s.E i = true)
       (hb : s.B b = ⟨I, A, some n⟩)
       (hne : n ≠ m) :
       ThreadStep (.run s i (Cmd.sync b m :: c)) (.err i (Cmd.sync b m :: c))
-  /-- The `arrive` analogue of `sync_err_full` (identical, per the paper). -/
-  | arrive_err_full {s : State} {i : ThreadId} {b : Barrier} {n : ℕ+} {c : Prog}
-      {I : List ThreadId} {A : ℕ}
-      (he : s.E i = true)
-      (hb : s.B b = ⟨I, A, some n⟩)
-      (hfull : I.length + A = (n : Nat)) :
-      ThreadStep (.run s i (Cmd.arrive b n :: c)) (.err i (Cmd.arrive b n :: c))
   /-- The `arrive` analogue of `sync_err_count` (identical, per the paper). -/
   | arrive_err_count {s : State} {i : ThreadId} {b : Barrier} {m n : ℕ+} {c : Prog}
       {I : List ThreadId} {A : ℕ}
@@ -199,9 +211,14 @@ inductive CTAStep : Config → Config → Prop where
   | done {s : State} {T : CTA} (hdone : CTA.IsDone T)
       (hnofull : ∀ b I A n, s.B b = ⟨I, A, some n⟩ → I.length + A < (n : Nat)) :
       CTAStep (.run s T) (.done s)
-  /-- Error propagation: if any thread produces `err`, so does the whole CTA. This
-  rule is independent of the barrier condition guarding `interleave`. -/
+  /-- Error propagation: if any thread produces `err`, so does the whole CTA. The
+  rule carries the *same* barrier condition as `interleave` (`hbar`): when some
+  barrier is exactly full, only `recycle` may fire — no thread may observe the
+  transient full state, erroring included. See the module doc's deviation note
+  (the paper's unguarded err productions make its Theorem 1 false). -/
   | error {s : State} {T : CTA} {i : ThreadId} {P' : Prog}
+      (hbar : ∀ b, s.B b = BarrierState.unconfigured ∨
+                   ∃ I A n, s.B b = ⟨I, A, some n⟩ ∧ I.length + A < (n : Nat))
       (hstep : ThreadStep (.run s i (T.prog i)) (.err i P')) :
       CTAStep (.run s T) (.err T)
 

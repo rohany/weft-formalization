@@ -541,7 +541,7 @@ theorem barrierPotential_step {b : Barrier} {C C' : Config} (hstep : CTAStep C C
   | @done s T hdone _ =>
     simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount]
     rw [Finset.sum_eq_zero (fun j hj => by rw [hdone j hj]; simp)]
-  | @error s T i P' hth => exact absurd rfl (hne T)
+  | @error s T i P' _ hth => exact absurd rfl (hne T)
 
 /-- If no step of `τ` recycles `b` and no configuration is the error state, then `b`'s
 arrival potential is the same at the end of `τ` as at the start. -/
@@ -678,7 +678,7 @@ theorem bcount_step {b : Barrier} {nb : Nat} {C C' : Config} (hstep : CTAStep C 
   | @done s T hdone _ =>
     simp only [Config.bcount] at hn' hC
     exact hC n' hn'
-  | @error s T i P' hth => simp [Config.bcount] at hn'
+  | @error s T i P' _ hth => simp [Config.bcount] at hn'
 
 /-- The count-consistency invariant propagates along a chain: if `b`'s count is `nb`
 at the head and every configuration uses count `nb` on its `b`-commands, then `b`'s
@@ -828,7 +828,7 @@ theorem barrierPotential_step_count {b : Barrier} {nb : Nat} {C C' : Config}
       exfalso
       simp only [stepRecyclesBarrier, Config.state?, Bool.and_eq_true] at hrec
       exact BarrierState.isFull_ne_unconfigured hrec.1 (of_decide_eq_true hrec.2)
-    | @error s T i P' hth => exact absurd rfl (hne T)
+    | @error s T i P' _ hth => exact absurd rfl (hne T)
   · rw [Bool.not_eq_true] at hrec
     rw [if_neg (by rw [hrec]; simp), barrierPotential_step hstep hrec hne, Nat.add_zero]
 
@@ -953,7 +953,7 @@ theorem bstate_frozen_step {b : Barrier} {nb : Nat} {I₀ : List ThreadId} {A₀
     simp only [Config.state?, Option.some.injEq] at hs'
     subst hs'
     exact hC s rfl
-  | @error s T i P' hth => simp [Config.state?] at hs'
+  | @error s T i P' _ hth => simp [Config.state?] at hs'
 
 /-- Iterating `bstate_frozen_step` along a chain: a configured, not-full, count-`n₀ ≠ nb`
 entry value for `b` at the head stays frozen at every configuration, given every
@@ -1514,7 +1514,7 @@ theorem bstate_unref_step {b : Barrier} {β : BarrierState} (hfullβ : β.isFull
   | @done s T hdone hnofull =>
     simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
     exact hC s rfl
-  | @error s T i P' hth => simp [Config.state?] at hs'
+  | @error s T i P' _ hth => simp [Config.state?] at hs'
 
 /-- Iterating `bstate_unref_step`: an unreferenced, not-full barrier stays frozen at every
 configuration of a chain whose commands never mention it. -/
@@ -3344,7 +3344,7 @@ theorem bstate_unconfigured_step {b : Barrier} {C C' : Config} (hstep : CTAStep 
     simp only [Config.state?, Option.some.injEq] at hs'
     subst hs'
     exact hC s rfl
-  | @error s T i P' hth => simp [Config.state?] at hs'
+  | @error s T i P' _ hth => simp [Config.state?] at hs'
 
 /-- Iterating `bstate_unconfigured_step` along a chain: an unconfigured `b` at the head stays
 unconfigured at every configuration, given no configuration's program references `b`. -/

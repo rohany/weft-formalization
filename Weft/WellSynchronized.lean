@@ -191,7 +191,7 @@ theorem CTAStep.progOf_drop {C C' : Config} (hstep : CTAStep C C') (t : ThreadId
       · exact ⟨0, by simp [Config.progOf, CTA.wake, h]⟩
   | @done s T hdone _ =>
       exact ⟨(T.prog t).length, by simp [Config.progOf, List.drop_length]⟩
-  | @error s T i P' hstep =>
+  | @error s T i P' _ hstep =>
       exact ⟨0, by simp [Config.progOf]⟩
 
 /-- One CTA step makes each thread's program a suffix of its previous program. -/
@@ -324,7 +324,7 @@ theorem CTAStep.progOf_length_le_succ {C C' : Config} (hstep : CTAStep C C') (t 
         · exact hdone t ht
         · exact T.nil_outside_ids t ht
       simp only [Config.progOf, hnil]; simp
-  | @error s T i P' hth =>
+  | @error s T i P' _ hth =>
       simp only [Config.progOf]; omega
 
 /-- Every command runs in a successful execution: in a complete trace from `C₀` that
@@ -456,7 +456,7 @@ theorem sync_drop_recycles {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
         · exact hdone t ht
         · exact T.nil_outside_ids t ht
       rw [hnil] at hC; simp at hC
-  | @error s T i P' hth =>
+  | @error s T i P' _ hth =>
       exfalso
       simp only [Config.progOf] at hC hC'
       rw [hC] at hC'; simp at hC'
@@ -570,12 +570,10 @@ theorem err_has_unexec_sync {C₀ : Config} {τ : List Config} {T : CTA}
       simp at hhead
     · exact h
   cases hstep with
-  | @error s _ i P' hth =>
+  | @error s _ i P' _ hth =>
     generalize hp : T.prog i = P at hth
     cases hth with
-    | sync_err_full _ _ _ => exact unexec_sync_of_last hτ hlast hC₀mem hp rfl
     | sync_err_count _ _ _ => exact unexec_sync_of_last hτ hlast hC₀mem hp rfl
-    | arrive_err_full _ _ _ => exact unexec_sync_of_last hτ hlast hC₀mem hp rfl
     | arrive_err_count _ _ _ => exact unexec_sync_of_last hτ hlast hC₀mem hp rfl
 
 /-- Well-synchronization rules out an unexecuted synchronization command: it
@@ -769,7 +767,7 @@ theorem blockInv_step {C C' : Config} (hstep : CTAStep C C')
   | @done s T hdone hnofull =>
     simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
     exact hC s rfl
-  | @error s T i P' hth => simp [Config.state?] at hs'
+  | @error s T i P' _ hth => simp [Config.state?] at hs'
 
 /-- `BlockInv` holds at every configuration of a chain whose head satisfies it. -/
 theorem blockInv_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
@@ -876,7 +874,7 @@ theorem enabledInv_step {C C' : Config} (hstep : CTAStep C C')
   | @done s T hdone hnofull =>
     simp only [Config.state?, Option.some.injEq] at hs'; subst hs'
     exact hC s rfl i hi
-  | @error s T j P' hth => simp [Config.state?] at hs'
+  | @error s T j P' _ hth => simp [Config.state?] at hs'
 
 /-- `EnabledInv` holds at every configuration of a chain whose head satisfies it. -/
 theorem enabledInv_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
@@ -1091,7 +1089,7 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
         exact ⟨hB.1.symm, hB.2.1.symm⟩
       · simp only [Function.update_of_ne hbb] at hB; exact hcondn b I A hB
   | @done s T hdone _ => trivial
-  | @error s T i P' hth => trivial
+  | @error s T i P' _ hth => trivial
 
 /-- `WF` propagates along a chain from a well-formed head to every configuration. -/
 theorem WF_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
@@ -1451,7 +1449,7 @@ theorem step_decreases (S : Finset Barrier) {C C' : Config}
     C'.cfgMeasure S < C.cfgMeasure S := by
   cases hstep with
   | @done s T hdone _ => simp only [Config.cfgMeasure]; omega
-  | @error s T i P' hth => simp only [Config.cfgMeasure]; omega
+  | @error s T i P' _ hth => simp only [Config.cfgMeasure]; omega
   | @interleave s s' T i P' hi hbar hth =>
     obtain ⟨hcfg, hmen⟩ := hinv
     generalize hpi : T.prog i = Pi at hth
@@ -1519,7 +1517,7 @@ theorem inv_preserved (S : Finset Barrier) {C C' : Config}
     C'.barriersWithin S := by
   cases hstep with
   | @done s T hdone _ => trivial
-  | @error s T i P' hth => trivial
+  | @error s T i P' _ hth => trivial
   | @interleave s s' T i P' hi hbar hth =>
     obtain ⟨hcfg, hmen⟩ := hinv
     have hmen' : ∀ j, ∀ c ∈ (T.set i hi P').prog j, ∀ b, c.barrier? = some b → b ∈ S := by

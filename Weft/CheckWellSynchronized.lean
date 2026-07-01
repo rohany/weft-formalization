@@ -1154,7 +1154,7 @@ theorem synced_persists {C C' : Config} (hstep : CTAStep C C') {b : Barrier} {t 
   | @done s₀ T hdone hnofull =>
     simp only [Config.state?, Option.some.injEq] at hCs hCs'
     subst hCs; subst hCs'; exact ht
-  | @error s₀ T i P' hth =>
+  | @error s₀ T i P' _ hth =>
     exact absurd hCs' (by simp [Config.state?])
 
 /-- A full barrier is never unconfigured, so a step that leaves `b` unchanged does not
@@ -1198,7 +1198,7 @@ theorem recycle_advances_synced {C C' : Config} (hstep : CTAStep C C') {b : Barr
   | @done s₀ T hdone hnofull =>
     exfalso
     simp [stepRecyclesBarrier, Config.state?, isFull_and_unconfigured_false] at hrec
-  | @error s₀ T i P' hth =>
+  | @error s₀ T i P' _ hth =>
     exfalso
     simp [stepRecyclesBarrier, Config.state?] at hrec
 
@@ -1243,7 +1243,7 @@ theorem synced_before_recycle {C₀ : Config} {τ : List Config} {b : Barrier} {
   | @done _ _ hdone hnofull =>
     exfalso
     simp [stepRecyclesBarrier, Config.state?, isFull_and_unconfigured_false] at hrec
-  | @error _ _ i P' hth =>
+  | @error _ _ i P' _ hth =>
     exfalso
     simp [stepRecyclesBarrier, Config.state?] at hrec
 
@@ -1269,7 +1269,7 @@ theorem hbar_of_joins_synced {C C' : Config} (hstep : CTAStep C C') {b : Barrier
     exfalso
     simp only [Config.state?, Option.some.injEq] at hCs hCs'; subst hCs; subst hCs'
     exact hnotin hin
-  | @error s₀ T i P' hth =>
+  | @error s₀ T i P' _ hth =>
     exact absurd hCs' (by simp [Config.state?])
 
 /-- **A parked thread's `sync` recycles at the next `b`-recycle.** If `t` is parked at its
@@ -1521,7 +1521,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
             by_cases hb''b : b'' = b
             · subst hb''b; rw [hbcfg]; simp [Function.update_self]
             · simp [Function.update_of_ne hb''b]
-          · exact absurd ⟨_, CTAStep.error
+          · exact absurd ⟨_, CTAStep.error hbar
               (by rw [hhead, hcmd]; exact ThreadStep.arrive_err_count hen hbcfg (Ne.symm hn))⟩
               (no_err_of_reach hws hreach)
       | sync b n =>
@@ -1566,7 +1566,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
               · exact Or.inl rfl
               · exact Or.inr (by rw [hbcfg]; exact hj)
             · simp only [Function.update_of_ne hb''b] at hj; exact Or.inr hj
-          · exact absurd ⟨_, CTAStep.error
+          · exact absurd ⟨_, CTAStep.error hbar
               (by rw [hhead, hcmd]; exact ThreadStep.sync_err_count hen hbcfg (Ne.symm hn))⟩
               (no_err_of_reach hws hreach)
     · -- **Case B2**: every `G`-thread is parked — impossible by round-purity / deadlock-freedom.
@@ -1794,7 +1794,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
         | @done s₀ T hdone hnofull =>
           simp only [Config.state?, Option.some.injEq] at hCs hCs'
           subst hCs; subst hCs'; exact hcnt
-        | @error s₀ T i P' hth => exact absurd hCs' (by simp [Config.state?])
+        | @error s₀ T i P' _ hth => exact absurd hCs' (by simp [Config.state?])
       have hcountconst : ∀ d, pc ≤ d → d ≤ dw → ∀ sd Td, tr[d]? = some (Config.run sd Td) →
           (sd.B b'').count = some n₂ := by
         intro d hpcd
@@ -2700,7 +2700,7 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
           (by rw [hheadm];
               exact ThreadStep.sync_block hc2en hbcfg (by simpa using hApos) (by simpa using hltn))
         exact Or.inl ⟨_, hcta, by simp [Function.update_self]⟩
-      · exact Or.inr (CTAStep.error
+      · exact Or.inr (CTAStep.error hbarq
           (by rw [hheadm]; exact ThreadStep.sync_err_count hc2en hbcfg hmm))
   rcases hc2step with ⟨sN, hcstep, hsync⟩ | herr
   · -- `c2` joins `synced b`: complete the trace, then read off a generation clash
@@ -2868,7 +2868,7 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
         by_contra hni; rw [Ta.nil_outside_ids c1.thread hni] at hc1prog
         exact hc1ne hc1prog.symm
       exact hc1ne (hc1prog ▸ hdone c1.thread hc1ids)
-    | @error sa Ta i P' hth =>
+    | @error sa Ta i P' _ hth =>
       exfalso
       have h1 : Ta.prog c1.thread = ((Config.run State.initial T).progOf c1.thread).drop c1.idx :=
         hC1aprog
@@ -3085,7 +3085,7 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
           (by rw [hheadm];
               exact ThreadStep.sync_block hc2en hbcfg (by simpa using hApos) (by simpa using hltn))
         exact Or.inl ⟨_, hcta, by simp [Function.update_self]⟩
-      · exact Or.inr (CTAStep.error
+      · exact Or.inr (CTAStep.error hbarq
           (by rw [hheadm]; exact ThreadStep.sync_err_count hc2en hbcfg hmm))
   rcases hc2step with ⟨sN, hcstep, hsync⟩ | herr
   · -- `c2` joins `synced b`: complete the trace, then read off a generation clash
@@ -3808,7 +3808,7 @@ theorem soundness_lemma_diamond
       | done hdone _ =>
         -- σ₂ = done: `T.IsDone` ⇒ `T.prog i₁ = []`, contradicting σ₁'s read/write head.
         simp [hdone i₁ hi₁] at hP₁
-      | @error _ _ i₂ P'₂ hstep₂ =>
+      | @error _ _ i₂ P'₂ hbar₂ hstep₂ =>
         -- σ₂ = error: σ₁ is state-preserving and leaves thread `i₂` untouched, so the
         -- erroring step replays verbatim from `C'`, giving `C' ⤳ err`. That complete trace
         -- from `C'` ends in `err`, contradicting `hWS` (no WS config has an unexecuted sync:
@@ -3820,7 +3820,7 @@ theorem soundness_lemma_diamond
           exact Function.update_of_ne hne P'₁ T.prog
         have hC'err : CTAStep (Config.run S (T.set i₁ hi₁ P'₁))
             (Config.err (T.set i₁ hi₁ P'₁)) := by
-          refine CTAStep.error (i := i₂) (P' := P'₂) ?_
+          refine CTAStep.error (i := i₂) (P' := P'₂) hbar₂ ?_
           rw [hprog]; exact hstep₂
         have hcomplete : IsCompleteTraceFrom (Config.run S (T.set i₁ hi₁ P'₁))
             [Config.run S (T.set i₁ hi₁ P'₁), Config.err (T.set i₁ hi₁ P'₁)] :=
