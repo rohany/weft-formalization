@@ -1633,4 +1633,577 @@ theorem CTA.WellSynchronized.of_empty {P : CTA} (hP : ∀ t, P.prog t = []) :
   rw [hnone] at hb
   simp at hb
 
+/-! ## Determinacy of recycle counts (per-`(b,n)` arrival potential)
+
+The machinery below proves that, for a program `T`, every successful trace recycles
+each barrier the same total number of times. The tool is a *count-indexed* arrival
+potential `Φ_{b,n}`, refining the per-barrier potential of `Weft/Looping.lean`: rather
+than fixing a single count `nb` for barrier `b`, we track, separately for each count
+value `n`, the registrations that belong to count-`n` generations of `b`. This is what
+lets the argument cover programs whose generations of the *same* barrier use different
+expected counts (a mismatched count would error, so in a *successful* trace count-`n`
+commands can only ever fill count-`n` generations).
+
+`Φ_{b,n}(C) := arrivedAt(b,n)(C) + progCountAt(b,n)(C)` where `arrivedAt` is the
+arrived count when `b` is currently a count-`n` generation (else `0`) and `progCountAt`
+counts the remaining `arrive b n`/`sync b n` commands. Every step preserves `Φ_{b,n}`
+except a *count-`n`* recycle of `b`, which drops it by exactly `n`; in particular a
+count-`m ≠ n` recycle of `b` leaves it unchanged (it wakes count-`m` syncers and clears
+count-`m` arrivals). -/
+
+/-- `c` is one of the two count-`n` registration commands on barrier `b`
+(`arrive b n` or `sync b n`) — the commands that fill a count-`n` generation of `b`. -/
+def Cmd.isBN (b : Barrier) (n : ℕ+) (c : Cmd) : Bool :=
+  decide (c = Cmd.arrive b n ∨ c = Cmd.sync b n)
+
+/-- Remaining `arrive b n`/`sync b n` commands across all threads — the "pending"
+summand of `Φ_{b,n}`; `0` once every thread has returned (`done`). -/
+def Config.progCountAt (b : Barrier) (n : ℕ+) : Config → Nat
+  | .run _ T => ∑ i ∈ T.ids, (T.prog i).countP (Cmd.isBN b n)
+  | .done _  => 0
+  | .err T   => ∑ i ∈ T.ids, (T.prog i).countP (Cmd.isBN b n)
+
+/-- Number of threads currently *arrived* at `b` in a count-`n` generation: the arrived
+count when `b`'s configured count is `n`, and `0` otherwise (unconfigured, a different
+count, or the error state). Since a registration always matches the barrier's configured
+count, this is exactly the count-`n` share of the current partial generation. -/
+def Config.arrivedAt (b : Barrier) (n : ℕ+) : Config → Nat
+  | .run s _ => if (s.B b).count = some n then (s.B b).arrived else 0
+  | .done s  => if (s.B b).count = some n then (s.B b).arrived else 0
+  | .err _   => 0
+
+/-- The **count-`n` arrival potential** of `b`: pending count-`n` arrivals plus remaining
+`arrive b n`/`sync b n` commands. Conserved by every step except a count-`n` recycle of
+`b` (`potentialAt_step`), which drops it by `n` (`potentialAt_recycle_eq`). -/
+def Config.potentialAt (b : Barrier) (n : ℕ+) (C : Config) : Nat :=
+  C.arrivedAt b n + C.progCountAt b n
+
+/-- The step `C ⤳ C'` is a *count-`n`* recycle of `b`: it recycles `b`
+(`stepRecyclesBarrier`) and `b`'s configured count at `C` is `n`. This is the only kind
+of step that lowers `Φ_{b,n}`. -/
+def stepRecyclesBarrierAt (b : Barrier) (n : ℕ+) (C C' : Config) : Bool :=
+  stepRecyclesBarrier b C C' &&
+    (match C.state? with
+     | some s => decide ((s.B b).count = some n)
+     | none   => false)
+
+/-- The number of count-`n` recyclings of `b` among the first `m` steps of `τ`. -/
+def recycleCountAt (b : Barrier) (n : ℕ+) (τ : List Config) (m : Nat) : Nat :=
+  (List.range m).countP fun j =>
+    match τ[j]?, τ[j + 1]? with
+    | some C, some C' => stepRecyclesBarrierAt b n C C'
+    | _, _ => false
+
+@[simp] theorem isBN_read (b : Barrier) (n : ℕ+) (g : Loc) : Cmd.isBN b n (Cmd.read g) = false := by
+  simp [Cmd.isBN]
+
+@[simp] theorem isBN_write (b : Barrier) (n : ℕ+) (g : Loc) :
+    Cmd.isBN b n (Cmd.write g) = false := by
+  simp [Cmd.isBN]
+
+theorem isBN_arrive (b : Barrier) (n : ℕ+) (b' : Barrier) (n' : ℕ+) :
+    Cmd.isBN b n (Cmd.arrive b' n') = decide (b' = b ∧ n' = n) := by
+  simp [Cmd.isBN, Cmd.arrive.injEq]
+
+theorem isBN_sync (b : Barrier) (n : ℕ+) (b' : Barrier) (n' : ℕ+) :
+    Cmd.isBN b n (Cmd.sync b' n') = decide (b' = b ∧ n' = n) := by
+  simp [Cmd.isBN, Cmd.sync.injEq]
+
+/-- Updating one thread's program changes the count-`n`-on-`b` command count by the
+per-thread difference (stated additively to avoid `Nat` subtraction; mirrors
+`numCmds_set`/`acountSum_set`). -/
+theorem countAtSum_set {T : CTA} {i : ThreadId} (hi : i ∈ T.ids) (P' : Prog)
+    (b : Barrier) (n : ℕ+) :
+    (∑ j ∈ T.ids, ((T.set i hi P').prog j).countP (Cmd.isBN b n))
+      + (T.prog i).countP (Cmd.isBN b n)
+    = (∑ j ∈ T.ids, (T.prog j).countP (Cmd.isBN b n))
+      + P'.countP (Cmd.isBN b n) := by
+  have hset : ∀ j, ((T.set i hi P').prog j).countP (Cmd.isBN b n)
+      = Function.update (fun k => (T.prog k).countP (Cmd.isBN b n)) i
+          (P'.countP (Cmd.isBN b n)) j := by
+    intro j
+    by_cases h : j = i
+    · subst h; simp [CTA.set]
+    · simp [CTA.set, Function.update_of_ne h]
+  rw [Finset.sum_congr rfl (fun j _ => hset j), Finset.sum_update_of_mem hi,
+      ← Finset.erase_eq, ← Finset.add_sum_erase T.ids _ hi]
+  omega
+
+/-- **The count-`n` conservation lemma.** Any step that is not a count-`n` recycle of `b`
+(and does not go to the error state) preserves `b`'s count-`n` arrival potential. The new
+case, relative to the per-barrier `barrierPotential_step`, is a count-`m ≠ n` recycle of
+`b`: it wakes count-`m` syncers and clears count-`m` arrivals, so it leaves `Φ_{b,n}`
+untouched. -/
+theorem potentialAt_step {b : Barrier} {n : ℕ+} {C C' : Config} (hstep : CTAStep C C')
+    (hnr : stepRecyclesBarrierAt b n C C' = false) (hne : ∀ T, C' ≠ Config.err T) :
+    C'.potentialAt b n = C.potentialAt b n := by
+  cases hstep with
+  | @interleave s s' T i P' hi hbar hth =>
+    have hsum := countAtSum_set hi P' b n
+    have hbpc : (Config.run s' (T.set i hi P')).progCountAt b n
+        = ∑ j ∈ T.ids, (((T.set i hi P').prog j).countP (Cmd.isBN b n)) := rfl
+    have hbpcR : (Config.run s T).progCountAt b n
+        = ∑ j ∈ T.ids, ((T.prog j).countP (Cmd.isBN b n)) := rfl
+    simp only [Config.potentialAt, Config.arrivedAt]
+    rw [hbpc, hbpcR]
+    generalize hpi : T.prog i = Pi at hth hsum
+    cases hth with
+    | read_noop => simp at hsum; omega
+    | write_noop => simp at hsum; omega
+    | arrive_configure he hb0 =>
+      rename_i b₀ n₀
+      by_cases hbb : b = b₀
+      · subst hbb
+        simp only [Function.update_self, hb0, BarrierState.unconfigured, List.countP_cons,
+          isBN_arrive, decide_eq_true_eq, true_and, Option.some.injEq,
+          ite_self] at hsum ⊢
+        by_cases hnn : n₀ = n
+        · simp only [if_pos hnn] at hsum ⊢; omega
+        · simp only [if_neg hnn] at hsum ⊢; omega
+      · simp only [Function.update_of_ne hbb, List.countP_cons, isBN_arrive,
+          decide_eq_true_eq] at hsum ⊢
+        rw [if_neg (fun h => hbb h.1.symm)] at hsum; omega
+    | arrive_register he hb0 hpos hlt =>
+      rename_i b₀ n₀ I A
+      by_cases hbb : b = b₀
+      · subst hbb
+        simp only [Function.update_self, hb0, List.countP_cons, isBN_arrive,
+          decide_eq_true_eq, true_and, Option.some.injEq] at hsum ⊢
+        by_cases hnn : n₀ = n
+        · simp only [if_pos hnn] at hsum ⊢; omega
+        · simp only [if_neg hnn] at hsum ⊢; omega
+      · simp only [Function.update_of_ne hbb, List.countP_cons, isBN_arrive,
+          decide_eq_true_eq] at hsum ⊢
+        rw [if_neg (fun h => hbb h.1.symm)] at hsum; omega
+    | sync_configure he hb0 =>
+      rename_i b₀ n₀ c
+      by_cases hbb : b = b₀
+      · subst hbb
+        simp only [Function.update_self, hb0, BarrierState.unconfigured, ite_self,
+          Option.some.injEq] at hsum ⊢
+        omega
+      · simp only [Function.update_of_ne hbb] at hsum ⊢; omega
+    | sync_block he hb0 hpos hlt =>
+      rename_i b₀ n₀ c I A
+      by_cases hbb : b = b₀
+      · subst hbb
+        simp only [Function.update_self, hb0] at hsum ⊢; omega
+      · simp only [Function.update_of_ne hbb] at hsum ⊢; omega
+  | @recycle s T b₀ I₀ A₀ n₀ hb hfull hpark =>
+    by_cases hmatch : b = b₀ ∧ n = n₀
+    · exfalso
+      obtain ⟨rfl, rfl⟩ := hmatch
+      have htrue : stepRecyclesBarrierAt b n (Config.run s T)
+          (Config.run ⟨updateMapOn s.E I₀ true, Function.update s.B b BarrierState.unconfigured⟩
+            (T.wake I₀)) = true := by
+        simp only [stepRecyclesBarrierAt, stepRecyclesBarrier, Config.state?, hb,
+          Function.update_self, BarrierState.isFull, hfull, BarrierState.unconfigured,
+          beq_self_eq_true, decide_true, Bool.and_self]
+      rw [htrue] at hnr
+      exact absurd hnr (by decide)
+    · have hfalse : Cmd.isBN b n (Cmd.sync b₀ n₀) = false := by
+        rw [isBN_sync]
+        apply decide_eq_false
+        rintro ⟨rfl, rfl⟩
+        exact hmatch ⟨rfl, rfl⟩
+      have hpc : (Config.run
+            ⟨updateMapOn s.E I₀ true, Function.update s.B b₀ BarrierState.unconfigured⟩
+            (T.wake I₀)).progCountAt b n
+          = (Config.run s T).progCountAt b n := by
+        simp only [Config.progCountAt, CTA.wake]
+        apply Finset.sum_congr rfl
+        intro j _
+        by_cases hj : j ∈ I₀
+        · simp only [if_pos hj]
+          have hh := hpark j hj
+          have hjne : T.prog j ≠ [] := fun hnil => by rw [hnil] at hh; simp at hh
+          obtain ⟨x, tl, hxtl⟩ := List.exists_cons_of_ne_nil hjne
+          rw [hxtl] at hh ⊢
+          rw [List.head?_cons, Option.some.injEq] at hh; subst hh
+          rw [List.tail_cons, List.countP_cons, hfalse]; simp
+        · simp only [if_neg hj]
+      have harr : (Config.run
+            ⟨updateMapOn s.E I₀ true, Function.update s.B b₀ BarrierState.unconfigured⟩
+            (T.wake I₀)).arrivedAt b n
+          = (Config.run s T).arrivedAt b n := by
+        simp only [Config.arrivedAt]
+        by_cases hbb : b = b₀
+        · subst hbb
+          have hnn : ¬ (n₀ = n) := fun h => hmatch ⟨rfl, h.symm⟩
+          simp [Function.update_self, hb, hnn, BarrierState.unconfigured]
+        · simp [Function.update_of_ne hbb]
+      simp only [Config.potentialAt, harr, hpc]
+  | @done s T hdone _ =>
+    simp only [Config.potentialAt, Config.arrivedAt, Config.progCountAt]
+    rw [Finset.sum_eq_zero (fun j hj => by rw [hdone j hj]; simp)]
+  | @error s T i P' hth => exact absurd rfl (hne T)
+
+/-- **The count-`n` recycle drop.** Recycling a *duplicate-free* full barrier `b` whose
+configured count is exactly `n` lowers `b`'s count-`n` arrival potential by exactly `n`:
+the `A₀` count-`n` arrivals are cleared and the `I₀` woken threads each drop their parked
+`sync b n` command, and `|I₀| + A₀ = n`. Mirrors `barrierPotential_recycle_eq`, but only
+count-`n` commands are tracked, and here the woken heads `sync b n` *are* count-`n`. -/
+theorem potentialAt_recycle_eq {s : State} {T : CTA} {b : Barrier}
+    {I₀ : List ThreadId} {A₀ : ℕ} {n : ℕ+}
+    (hb : s.B b = ⟨I₀, A₀, some n⟩) (hfull : I₀.length + A₀ = (n : Nat))
+    (hpark : ∀ i ∈ I₀, (T.prog i).head? = some (Cmd.sync b n)) (hnd : I₀.Nodup) :
+    (Config.run s T).potentialAt b n
+      = (Config.run
+            (⟨updateMapOn s.E I₀ true, Function.update s.B b BarrierState.unconfigured⟩ : State)
+            (T.wake I₀)).potentialAt b n
+        + (n : Nat) := by
+  have hsub : ∀ i ∈ I₀, i ∈ T.ids := by
+    intro i hi
+    by_contra hni
+    have hh := hpark i hi
+    rw [T.nil_outside_ids i hni] at hh; simp at hh
+  have hcard : (T.ids.filter (· ∈ I₀)).card = I₀.length := by
+    have hset : T.ids.filter (· ∈ I₀) = I₀.toFinset := by
+      apply Finset.ext; intro x
+      simp only [Finset.mem_filter, List.mem_toFinset]
+      exact ⟨fun h => h.2, fun h => ⟨hsub x h, h⟩⟩
+    rw [hset, List.toFinset_card_of_nodup hnd]
+  have key : ∀ j ∈ T.ids,
+      (T.prog j).countP (Cmd.isBN b n)
+        = (if j ∈ I₀ then (T.prog j).tail else T.prog j).countP (Cmd.isBN b n)
+          + (if j ∈ I₀ then 1 else 0) := by
+    intro j _
+    by_cases hj : j ∈ I₀
+    · rw [if_pos hj, if_pos hj]
+      have hh := hpark j hj
+      have hjne : T.prog j ≠ [] := fun hnil => by rw [hnil] at hh; simp at hh
+      obtain ⟨x, tl, hxtl⟩ := List.exists_cons_of_ne_nil hjne
+      rw [hxtl] at hh ⊢
+      rw [List.head?_cons, Option.some.injEq] at hh; subst hh
+      rw [List.tail_cons, List.countP_cons]
+      simp [isBN_sync]
+    · rw [if_neg hj, if_neg hj, Nat.add_zero]
+  have hL : (Config.run s T).arrivedAt b n = A₀ := by
+    simp [Config.arrivedAt, hb]
+  have hP : (Config.run
+      (⟨updateMapOn s.E I₀ true, Function.update s.B b BarrierState.unconfigured⟩ : State)
+      (T.wake I₀)).arrivedAt b n = 0 := by
+    simp [Config.arrivedAt, Function.update_self, BarrierState.unconfigured]
+  simp only [Config.potentialAt, hL, hP]
+  simp only [Config.progCountAt, CTA.wake]
+  rw [Finset.sum_congr rfl key, Finset.sum_add_distrib, ← Finset.card_filter, hcard]
+  omega
+
+/-- Head recurrence for `recycleCountAt` over a two-or-more-element chain (mirrors
+`recycleCount_cons_cons`). -/
+theorem recycleCountAt_cons_cons (b : Barrier) (n : ℕ+) (a b₁ : Config) (rest' : List Config) :
+    recycleCountAt b n (a :: b₁ :: rest') ((a :: b₁ :: rest').length - 1)
+      = (if stepRecyclesBarrierAt b n a b₁ = true then 1 else 0)
+        + recycleCountAt b n (b₁ :: rest') ((b₁ :: rest').length - 1) := by
+  simp only [recycleCountAt, List.length_cons, Nat.add_sub_cancel]
+  rw [List.range_succ_eq_map, List.countP_cons, List.countP_map, Nat.add_comm]
+  congr 1
+
+/-- **Per-step count-`n` accounting.** Each step lowers `b`'s count-`n` arrival potential
+by `n` if it is a count-`n` recycle of `b`, and by `0` otherwise (mirrors
+`barrierPotential_step_count`). No fixed-count hypothesis is needed here — the potential is
+already count-filtered — so the recycled count is read off directly from `stepRecyclesBarrierAt`. -/
+theorem potentialAt_step_count {b : Barrier} {n : ℕ+} {C C' : Config}
+    (hstep : CTAStep C C') (hne : ∀ T, C' ≠ Config.err T)
+    (hBI : ∀ s, C.state? = some s → s.BlockInv) :
+    C.potentialAt b n
+      = C'.potentialAt b n + (if stepRecyclesBarrierAt b n C C' = true then (n : Nat) else 0) := by
+  by_cases hrec : stepRecyclesBarrierAt b n C C' = true
+  · rw [if_pos hrec]
+    cases hstep with
+    | @interleave s s' T i P' hi hbar hth =>
+      exfalso
+      have hfalse : (s.B b).isFull = false := by
+        rcases hbar b with h | ⟨I, A, m, h, hlt⟩
+        · rw [h]; rfl
+        · rw [h]; simp only [BarrierState.isFull]; exact beq_false_of_ne (Nat.ne_of_lt hlt)
+      simp [stepRecyclesBarrierAt, stepRecyclesBarrier, Config.state?, hfalse] at hrec
+    | @recycle s T b₀ I₀ A₀ n₀ hb hfull hpark =>
+      by_cases hbb : b = b₀
+      · subst hbb
+        have hnd : I₀.Nodup := by have h := (hBI s rfl).1 b; rwa [hb] at h
+        have hn0 : n₀ = n := by
+          have h2 : decide ((s.B b).count = some n) = true := by
+            have hthis := hrec
+            simp only [stepRecyclesBarrierAt, Config.state?, Bool.and_eq_true] at hthis
+            exact hthis.2
+          rw [hb] at h2
+          simp only [decide_eq_true_eq, Option.some.injEq] at h2
+          exact h2
+        subst hn0
+        exact potentialAt_recycle_eq hb hfull hpark hnd
+      · exfalso
+        simp only [stepRecyclesBarrierAt, stepRecyclesBarrier, Config.state?,
+          Function.update_of_ne hbb, Bool.and_eq_true] at hrec
+        obtain ⟨⟨hf, hu⟩, _⟩ := hrec
+        rw [of_decide_eq_true hu] at hf
+        simp [BarrierState.isFull, BarrierState.unconfigured] at hf
+    | @done s T hdone hnofull =>
+      exfalso
+      simp only [stepRecyclesBarrierAt, stepRecyclesBarrier, Config.state?,
+        Bool.and_eq_true] at hrec
+      obtain ⟨⟨hf, hu⟩, _⟩ := hrec
+      rw [of_decide_eq_true hu] at hf
+      simp [BarrierState.isFull, BarrierState.unconfigured] at hf
+    | @error s T i P' hth => exact absurd rfl (hne T)
+  · rw [Bool.not_eq_true] at hrec
+    rw [if_neg (by rw [hrec]; simp), potentialAt_step hstep hrec hne, Nat.add_zero]
+
+/-- **Count-`n` recycle-counting conservation** (mirrors `barrierPotential_with_recycles`, but
+with *no* fixed-count hypothesis): along an err-free chain whose states satisfy `BlockInv`, the
+head's count-`n` arrival potential exceeds the last's by exactly `n` per count-`n` recycle of
+`b`. -/
+theorem potentialAt_with_recycles {b : Barrier} {n : ℕ+} :
+    ∀ {τ : List Config} {C₀ Cn : Config}, List.IsChain CTAStep τ →
+      τ.head? = some C₀ → τ.getLast? = some Cn →
+      (∀ C ∈ τ, ∀ T, C ≠ Config.err T) →
+      (∀ C ∈ τ, ∀ s, C.state? = some s → s.BlockInv) →
+      C₀.potentialAt b n
+        = Cn.potentialAt b n + (n : Nat) * recycleCountAt b n τ (τ.length - 1) := by
+  intro τ
+  induction τ with
+  | nil => intro C₀ Cn _ hhead _ _ _; simp at hhead
+  | cons a rest ih =>
+    intro C₀ Cn hchain hhead hlast hne hBI
+    rw [List.head?_cons, Option.some.injEq] at hhead; subst hhead
+    cases rest with
+    | nil =>
+      rw [List.getLast?_singleton, Option.some.injEq] at hlast; subst hlast
+      simp [recycleCountAt]
+    | cons b₁ rest' =>
+      rw [List.isChain_cons_cons] at hchain
+      obtain ⟨hstep, hchain'⟩ := hchain
+      have hlast' : (b₁ :: rest').getLast? = some Cn := by rwa [List.getLast?_cons_cons] at hlast
+      have hstepc := potentialAt_step_count (b := b) (n := n) hstep
+        (fun T => hne b₁ (by simp) T) (hBI a (by simp))
+      have ihr := ih hchain' rfl hlast'
+        (fun C hC => hne C (List.mem_cons_of_mem _ hC))
+        (fun C hC => hBI C (List.mem_cons_of_mem _ hC))
+      rw [recycleCountAt_cons_cons, hstepc, ihr, Nat.mul_add]
+      split_ifs <;> omega
+
+/-- No `CTAStep` fires from the error configuration (no rule has `err` on its left). -/
+theorem err_no_step {T' : CTA} {C' : Config} (h : CTAStep (Config.err T') C') : False := by
+  cases h
+
+/-- A chain that ends in `done` contains no error configuration: an `err` cannot be last
+(the last is `done`) and has no successor, so it cannot appear mid-chain either. -/
+theorem no_err_of_getLast_done : ∀ {τ : List Config} {sd : State},
+    List.IsChain CTAStep τ → τ.getLast? = some (Config.done sd) →
+    ∀ C ∈ τ, ∀ T', C ≠ Config.err T' := by
+  intro τ
+  induction τ with
+  | nil => intro sd _ h; simp at h
+  | cons a rest ih =>
+    intro sd hchain hlast C hC T' hCerr
+    cases rest with
+    | nil =>
+      rw [List.mem_singleton] at hC; subst hC
+      rw [List.getLast?_singleton, Option.some.injEq] at hlast
+      rw [hCerr] at hlast; simp at hlast
+    | cons b₁ rest' =>
+      rw [List.isChain_cons_cons] at hchain
+      obtain ⟨hstep_ab, hchain'⟩ := hchain
+      rw [List.getLast?_cons_cons] at hlast
+      rw [List.mem_cons] at hC
+      rcases hC with rfl | hC'
+      · rw [hCerr] at hstep_ab; exact err_no_step hstep_ab
+      · exact ih hchain' hlast C hC' T' hCerr
+
+/-- The final `done` state of a successful trace leaves `b`'s count-`n` potential strictly
+below `n`: the closing `done` step requires every configured barrier to be strictly under-full
+(`hnofull`), so the leftover count-`n` arrivals number fewer than `n`. -/
+theorem done_potentialAt_lt {τ : List Config} {s₀ : State} {T₀ : CTA} {sd : State}
+    (hchain : List.IsChain CTAStep τ) (hhead : τ.head? = some (Config.run s₀ T₀))
+    (hlast : τ.getLast? = some (Config.done sd)) (b : Barrier) (n : ℕ+) :
+    (Config.done sd).potentialAt b n < (n : Nat) := by
+  have hlen2 : 2 ≤ τ.length := by
+    rcases τ with _ | ⟨x, _ | ⟨y, rest⟩⟩
+    · simp at hhead
+    · rw [List.head?_cons, Option.some.injEq] at hhead
+      rw [List.getLast?_singleton, Option.some.injEq] at hlast
+      subst hhead; simp at hlast
+    · simp
+  have hlast' : τ[τ.length - 1]? = some (Config.done sd) := by
+    rw [← List.getLast?_eq_getElem?]; exact hlast
+  obtain ⟨Cprev, hprev⟩ : ∃ C, τ[τ.length - 2]? = some C :=
+    ⟨_, List.getElem?_eq_getElem (by omega)⟩
+  have hstep := chain_step hchain hprev
+    (by rw [show τ.length - 2 + 1 = τ.length - 1 by omega]; exact hlast')
+  have hnofull : ∀ b' I A m, sd.B b' = ⟨I, A, some m⟩ → I.length + A < (m : Nat) := by
+    cases hstep with
+    | done hdone hnofull => exact hnofull
+  simp only [Config.potentialAt, Config.arrivedAt, Config.progCountAt, Nat.add_zero]
+  by_cases hc : (sd.B b).count = some n
+  · rw [if_pos hc]
+    have hbb : sd.B b = ⟨(sd.B b).synced, (sd.B b).arrived, some n⟩ := by rw [← hc]
+    have hlt := hnofull b (sd.B b).synced (sd.B b).arrived n hbb
+    omega
+  · rw [if_neg hc]; exact n.pos
+
+/-- **Per-count determinacy.** Any two successful traces of `T` perform the *same* number of
+count-`n` recyclings of `b`. Both equal `Φ_{b,n}(I, T) / n`: the shared initial potential
+divided by `n`, since each trace splits it as `n · (count-`n` recyclings) + (leftover < n)`
+(`potentialAt_with_recycles` + `done_potentialAt_lt`), and `Nat` division is unique. -/
+theorem recycleCountAt_successful_eq {T : CTA} {τ₁ τ₂ : List Config}
+    (h₁ : IsSuccessfulTraceFrom (Config.run State.initial T) τ₁)
+    (h₂ : IsSuccessfulTraceFrom (Config.run State.initial T) τ₂)
+    (b : Barrier) (n : ℕ+) :
+    recycleCountAt b n τ₁ (τ₁.length - 1) = recycleCountAt b n τ₂ (τ₂.length - 1) := by
+  have hn : 0 < (n : Nat) := n.pos
+  have step : ∀ {τ : List Config}, IsSuccessfulTraceFrom (Config.run State.initial T) τ →
+      recycleCountAt b n τ (τ.length - 1)
+        = (Config.run State.initial T).potentialAt b n / (n : Nat) := by
+    intro τ hτ
+    obtain ⟨⟨hct, hhead⟩, sd, hlast⟩ := hτ
+    have hchain : List.IsChain CTAStep τ := hct.subtrace
+    have hnoerr : ∀ C ∈ τ, ∀ T', C ≠ Config.err T' := no_err_of_getLast_done hchain hlast
+    have hBI : ∀ C ∈ τ, ∀ s, C.state? = some s → s.BlockInv := by
+      refine blockInv_chain hchain hhead ?_
+      intro s hs
+      simp only [Config.state?, Option.some.injEq] at hs
+      subst hs; exact State.BlockInv.initial
+    have hwr := potentialAt_with_recycles (b := b) (n := n) hchain hhead hlast hnoerr hBI
+    have hlt : (Config.done sd).potentialAt b n < (n : Nat) :=
+      done_potentialAt_lt hchain hhead hlast b n
+    rw [hwr, Nat.add_comm, Nat.mul_add_div hn, Nat.div_eq_of_lt hlt, Nat.add_zero]
+  rw [step h₁, step h₂]
+
+/-! ### From per-count recyclings back to the total
+
+The total `recycleCount b` is the sum of the count-`n` recyclings `recycleCountAt b n` over a
+finite set of counts `S` that covers every count actually recycled: at each recycle step the
+barrier is full, hence configured with *one* count, so it contributes to exactly one `n`. -/
+
+/-- A full barrier is configured: its count is `some n` for some `n`. -/
+theorem isFull_count {β : BarrierState} (h : β.isFull = true) : ∃ n : ℕ+, β.count = some n := by
+  cases hc : β.count with
+  | none => rw [BarrierState.isFull, hc] at h; simp at h
+  | some n => exact ⟨n, rfl⟩
+
+/-- A recycle step reads a configured count off the source configuration: `C` has a state `s`
+in which `b` is configured with some `n₀`. -/
+theorem stepRecyclesBarrier_state {b : Barrier} {C C' : Config}
+    (h : stepRecyclesBarrier b C C' = true) :
+    ∃ (s : State) (n₀ : ℕ+), C.state? = some s ∧ (s.B b).count = some n₀ := by
+  simp only [stepRecyclesBarrier] at h
+  cases hs : C.state? with
+  | none => rw [hs] at h; simp at h
+  | some s =>
+    cases hs' : C'.state? with
+    | none => rw [hs, hs'] at h; simp at h
+    | some s' =>
+      rw [hs, hs'] at h
+      simp only [Bool.and_eq_true] at h
+      obtain ⟨n₀, hn₀⟩ := isFull_count h.1
+      exact ⟨s, n₀, rfl, hn₀⟩
+
+/-- The finite set of counts recycled by `b` among the first `m` steps of `τ` — a support for
+the fibering `recycleCount = ∑ recycleCountAt`. -/
+def recycledCounts (b : Barrier) (τ : List Config) (m : Nat) : Finset ℕ+ :=
+  ((List.range m).filterMap (fun j =>
+    match τ[j]?, τ[j + 1]? with
+    | some C, some C' =>
+      if stepRecyclesBarrier b C C' then C.state?.bind (fun s => (s.B b).count) else none
+    | _, _ => none)).toFinset
+
+/-- Every count recycled at a step below `m` lies in `recycledCounts`. -/
+theorem mem_recycledCounts {b : Barrier} {τ : List Config} {m j : Nat} {C C' : Config}
+    {s : State} {n₀ : ℕ+} (hj : j < m) (hC : τ[j]? = some C) (hC' : τ[j + 1]? = some C')
+    (hrec : stepRecyclesBarrier b C C' = true) (hs : C.state? = some s)
+    (hcnt : (s.B b).count = some n₀) :
+    n₀ ∈ recycledCounts b τ m := by
+  simp only [recycledCounts, List.mem_toFinset, List.mem_filterMap, List.mem_range]
+  exact ⟨j, hj, by simp [hC, hC', hrec, hs, hcnt]⟩
+
+/-- Split off the last step of `recycleCount`. -/
+theorem recycleCount_succ (b : Barrier) (τ : List Config) (m : Nat) :
+    recycleCount b τ (m + 1) = recycleCount b τ m
+      + (if (match τ[m]?, τ[m + 1]? with
+            | some C, some C' => stepRecyclesBarrier b C C' | _, _ => false) then 1 else 0) := by
+  simp only [recycleCount, List.range_succ, List.countP_append, List.countP_cons,
+    List.countP_nil, Nat.zero_add]
+
+/-- Split off the last step of `recycleCountAt`. -/
+theorem recycleCountAt_succ (b : Barrier) (n : ℕ+) (τ : List Config) (m : Nat) :
+    recycleCountAt b n τ (m + 1) = recycleCountAt b n τ m
+      + (if (match τ[m]?, τ[m + 1]? with
+            | some C, some C' => stepRecyclesBarrierAt b n C C'
+            | _, _ => false) then 1 else 0) := by
+  simp only [recycleCountAt, List.range_succ, List.countP_append, List.countP_cons,
+    List.countP_nil, Nat.zero_add]
+
+/-- **The fibering.** `recycleCount b` is the sum, over any support `S` covering every recycled
+count, of the count-`n` recyclings `recycleCountAt b n`: each recycle step's full barrier has a
+single configured count, so it is counted by exactly one summand. -/
+theorem recycleCount_eq_sum (b : Barrier) (τ : List Config) (S : Finset ℕ+) :
+    ∀ m, (∀ j C C' s (n₀ : ℕ+), j < m → τ[j]? = some C → τ[j + 1]? = some C' →
+        stepRecyclesBarrier b C C' = true → C.state? = some s → (s.B b).count = some n₀ → n₀ ∈ S) →
+      recycleCount b τ m = ∑ n ∈ S, recycleCountAt b n τ m := by
+  intro m
+  induction m with
+  | zero => intro _; simp [recycleCount, recycleCountAt]
+  | succ m ih =>
+    intro hS
+    have hRHS : (∑ n ∈ S, recycleCountAt b n τ (m + 1))
+        = (∑ n ∈ S, recycleCountAt b n τ m)
+          + ∑ n ∈ S, (if (match τ[m]?, τ[m + 1]? with
+              | some C, some C' => stepRecyclesBarrierAt b n C C'
+              | _, _ => false) then 1 else 0) := by
+      rw [← Finset.sum_add_distrib]
+      exact Finset.sum_congr rfl (fun n _ => recycleCountAt_succ b n τ m)
+    rw [recycleCount_succ, ih (fun j C C' s n₀ hj => hS j C C' s n₀ (by omega)), hRHS]
+    congr 1
+    cases hm : τ[m]? with
+    | none => simp
+    | some C =>
+      cases hm1 : τ[m + 1]? with
+      | none => simp
+      | some C' =>
+        simp only []
+        by_cases hrec : stepRecyclesBarrier b C C' = true
+        · rw [if_pos hrec]
+          obtain ⟨s, n₀, hs, hcnt⟩ := stepRecyclesBarrier_state hrec
+          have hn0S : n₀ ∈ S := hS m C C' s n₀ (by omega) hm hm1 hrec hs hcnt
+          have hterm : ∀ n ∈ S, (if stepRecyclesBarrierAt b n C C' = true then (1 : Nat) else 0)
+              = (if n₀ = n then 1 else 0) := by
+            intro n _
+            simp only [stepRecyclesBarrierAt, hrec, hs, Bool.true_and, hcnt, Option.some.injEq,
+              decide_eq_true_eq]
+          rw [Finset.sum_congr rfl hterm, Finset.sum_ite_eq S n₀ (fun _ => (1 : Nat)), if_pos hn0S]
+        · rw [Bool.not_eq_true] at hrec
+          rw [if_neg (by rw [hrec]; simp)]
+          refine (Finset.sum_eq_zero ?_).symm
+          intro n _
+          simp [stepRecyclesBarrierAt, hrec]
+
+/--
+Determinacy of recycle counts. Given a program `T`, all *successful* traces of `T`
+— complete traces from the initial configuration `(I, T)` that end in `done`
+(`IsSuccessfulTraceFrom`) — recycle every barrier the *same* total number of times.
+
+Concretely, for any barrier `b` and any two traces `τ₁ τ₂` that successfully run
+`(I, T)` to completion, the total number of recyclings of `b` along the whole trace
+(`recycleCount b · (·.length - 1)`, counting the recycle steps over all
+`τ.length - 1` transitions) agrees on `τ₁` and `τ₂`. Intuitively, a run can only
+reach `done` after draining each barrier through whole generations, so the number
+of times `b` recycles is fixed by `T` and independent of the interleaving schedule.
+-/
+theorem CTA.successfulTrace_recycleCount_eq {T : CTA} {τ₁ τ₂ : List Config}
+    (h₁ : IsSuccessfulTraceFrom (Config.run State.initial T) τ₁)
+    (h₂ : IsSuccessfulTraceFrom (Config.run State.initial T) τ₂)
+    (b : Barrier) :
+    recycleCount b τ₁ (τ₁.length - 1) = recycleCount b τ₂ (τ₂.length - 1) := by
+  -- A single support `S` covering the counts recycled by either trace lets us compare the two
+  -- fiberings summand-by-summand, where each summand agrees by `recycleCountAt_successful_eq`.
+  set S : Finset ℕ+ :=
+    recycledCounts b τ₁ (τ₁.length - 1) ∪ recycledCounts b τ₂ (τ₂.length - 1) with hSdef
+  have hcov : ∀ (τ : List Config) (m : Nat), recycledCounts b τ m ⊆ S →
+      recycleCount b τ m = ∑ n ∈ S, recycleCountAt b n τ m := fun τ m hsub =>
+    recycleCount_eq_sum b τ S m (fun j C C' s n₀ hj hC hC' hrec hstate hcnt =>
+      hsub (mem_recycledCounts hj hC hC' hrec hstate hcnt))
+  rw [hcov τ₁ (τ₁.length - 1) (by rw [hSdef]; exact Finset.subset_union_left),
+      hcov τ₂ (τ₂.length - 1) (by rw [hSdef]; exact Finset.subset_union_right)]
+  exact Finset.sum_congr rfl (fun n _ => recycleCountAt_successful_eq h₁ h₂ b n)
+
 end Weft

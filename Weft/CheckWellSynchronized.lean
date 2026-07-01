@@ -2409,6 +2409,84 @@ theorem happensBefore_of_check {T : CTA} {τ : List Config}
   · rw [heq]; exact Relation.ReflTransGen.refl
   · exact (mem_transClosure_imp_transGen _ hmem).to_reflTransGen
 
+/-! ## The determined prefix `P` (machinery for Theorem 1)
+
+The soundness direction `wellSynchronized_of_check` cannot call Lemma 1
+(`soundAndPrecise_happensBefore`), which assumes the very `WellSynchronized` it must
+*conclude*. The way around the circularity is to feed the soundness argument its own
+determinacy as it goes: an edge of `initRelation` is sound as soon as its endpoints are
+known to be *determined* (every complete trace assigns them the same generation as the
+reference trace `τ`), with no global well-synchronization — see `initRelation_edge_sound`,
+which only ever uses `hws` pointwise at an edge's two endpoints.
+
+`Determined` is the pointwise notion; `determinedPrefix` (the object `P`) collects the
+points whose entire `happensBefore`-past is determined. Membership is phrased as "every
+ancestor is determined" precisely so that *path-containment* is definitional
+(`determinedPrefix_ancestors_determined`): a soundness induction along any `initRelation`
+path into a point of `P` sees only determined nodes. `P` is, equivalently, the largest
+`happensBefore`-down-closed set of determined points
+(`determinedPrefix_subset_determined`, `determinedPrefix_downClosed`,
+`determinedPrefix_greatest`). -/
+
+/-- A program point `η` is **determined** by the reference trace `τ` when every complete
+trace from `(I, T)` agrees with `τ` about it: `η` executes, and — when `η` is a barrier op
+— at the very same generation `pointGen T τ η`.
+
+For a barrier op the generation clause is the content (and since the checker's `τ` ends in
+`done`, `pointGen T τ η ≠ 0`, so it already forces "executes"); for a memory op the
+generation clause is vacuous (`0 = 0`) and the executing clause carries the content.
+Keeping both clauses makes `Determined` uniform over *all* program points, which the
+soundness chain needs because program-order edges run through memory ops. -/
+def Determined (T : CTA) (τ : List Config) (η : ProgPoint) : Prop :=
+  ∀ σ, IsCompleteTraceFrom (Config.run State.initial T) σ →
+    (∃ n, IsTimeOf (Config.run State.initial T) σ η n) ∧
+      pointGen T σ η = pointGen T τ η
+
+/-- The **determined prefix** `P` (relative to `τ`): the program points all of whose
+`happensBefore`-ancestors are determined. Equivalently, the largest
+`happensBefore`-down-closed set of determined points. -/
+def determinedPrefix (T : CTA) (τ : List Config) : Set ProgPoint :=
+  { η | η ∈ T.progPoints ∧ ∀ a, happensBefore T τ a η → Determined T τ a }
+
+/-- Every point of `P` is itself determined (`a = η`, via `ReflTransGen.refl`). -/
+theorem determinedPrefix_subset_determined {T : CTA} {τ : List Config} {η : ProgPoint}
+    (h : η ∈ determinedPrefix T τ) : Determined T τ η :=
+  h.2 η Relation.ReflTransGen.refl
+
+/-- **Path-containment, definitionally.** Every `happensBefore`-ancestor of a point of `P`
+is determined — the fact the bounded soundness chain consumes along a path. -/
+theorem determinedPrefix_ancestors_determined {T : CTA} {τ : List Config} {a c : ProgPoint}
+    (hc : c ∈ determinedPrefix T τ) (hac : happensBefore T τ a c) : Determined T τ a :=
+  hc.2 a hac
+
+/-- `P` is down-closed under `initRelation` predecessors: if `b ∈ P` and `a → b` is an
+edge, then `a ∈ P`. -/
+theorem determinedPrefix_downClosed {T : CTA} {τ : List Config} {a b : ProgPoint}
+    (hedge : (a, b) ∈ initRelation T τ) (hb : b ∈ determinedPrefix T τ) :
+    a ∈ determinedPrefix T τ := by
+  refine ⟨(initRelation_cases hedge).1, ?_⟩
+  intro x hxa
+  exact hb.2 x (Relation.ReflTransGen.trans hxa (Relation.ReflTransGen.single hedge))
+
+/-- `P` is the **greatest** `happensBefore`-down-closed set of determined program points:
+any such `Q` is contained in `P`. -/
+theorem determinedPrefix_greatest {T : CTA} {τ : List Config} (Q : Set ProgPoint)
+    (hQpp : ∀ η ∈ Q, η ∈ T.progPoints)
+    (hQdet : ∀ η ∈ Q, Determined T τ η)
+    (hQdc : ∀ a b, (a, b) ∈ initRelation T τ → b ∈ Q → a ∈ Q) :
+    Q ⊆ determinedPrefix T τ := by
+  intro η hη
+  refine ⟨hQpp η hη, ?_⟩
+  intro a haη
+  apply hQdet a
+  -- `Q`, closed under single-step predecessors, is closed under `happensBefore`-predecessors.
+  have key : ∀ x, happensBefore T τ a x → x ∈ Q → a ∈ Q := by
+    intro x hax
+    induction hax with
+    | refl => exact fun h => h
+    | @tail b c _hab hbc ih => exact fun hcQ => ih (hQdc b c hbc hcQ)
+  exact key η haη hη
+
 /-! ## Theorem 1 — soundness of `CheckWellSynchronized`
 
 The paper's **Theorem 1**: a successful run of the check witnesses
