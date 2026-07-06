@@ -4351,7 +4351,33 @@ theorem conforms_of_traceFrom {T : CTA} {τ : List Config}
     (hcheck : (CheckWellSynchronized T τ).1 = true)
     {τ' : List Config} (htr : IsTraceFrom (Config.run State.initial T) τ') :
     Conforms T τ τ' := by
-  sorry
+  revert htr
+  induction τ' using List.reverseRecOn with
+  | nil =>
+    intro htr
+    exact absurd htr.2 (by simp)
+  | append_singleton l c ih =>
+    intro htr
+    obtain ⟨hchain, hhead⟩ := htr
+    by_cases hl : l = []
+    · subst hl
+      simp only [List.nil_append] at hhead ⊢
+      simp only [List.head?_cons, Option.some.injEq] at hhead
+      subst hhead
+      exact conforms_init T τ
+    · have hchain' : List.IsChain CTAStep (l ++ [c]) := hchain
+      rw [List.isChain_append] at hchain'
+      obtain ⟨hchain_l, -, hconn⟩ := hchain'
+      have hhead_l : l.head? = some (Config.run State.initial T) := by
+        rwa [List.head?_append_of_ne_nil _ hl] at hhead
+      have htr_l : IsTraceFrom (Config.run State.initial T) l := ⟨hchain_l, hhead_l⟩
+      obtain ⟨x, hx⟩ : ∃ x, l.getLast? = some x := by
+        cases hgl : l.getLast? with
+        | none => exact absurd (List.getLast?_eq_none_iff.mp hgl) hl
+        | some x => exact ⟨x, rfl⟩
+      have hstep : CTAStep x c :=
+        hconn x (Option.mem_def.mpr hx) c (Option.mem_def.mpr rfl)
+      exact conforms_snoc hτ hcheck htr_l (ih htr_l) hx hstep
 
 /-- **Theorem 7** (paper §5.2.6): a conforming *complete* trace ends in `done`. `err` is
 clause 0. For a deadlock: every unfinished thread is parked (an enabled thread always has
