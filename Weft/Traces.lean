@@ -113,6 +113,14 @@ trace's first configuration. -/
 def IsCompleteTraceFrom (C₀ : Config) (τ : List Config) : Prop :=
   IsCompleteTrace τ ∧ τ.head? = some C₀
 
+/-- A *partial* trace that starts from `C₀` (Definition 1, relativized to a starting
+configuration): a subtrace whose first configuration is `C₀`, with no requirement on how
+it ends. The nonempty prefixes of any (complete or partial) trace from `C₀` are exactly
+the `IsTraceFrom C₀` lists; a forward induction over an execution — such as the
+conformance invariant of Theorem 1's soundness proof — is an induction over these. -/
+def IsTraceFrom (C₀ : Config) (τ : List Config) : Prop :=
+  IsSubtrace τ ∧ τ.head? = some C₀
+
 /-- Thread `i`'s remaining program in a configuration. For a running or errored
 configuration it is `T.prog i`; the `done` configuration has every thread at
 `return`, so its program is `[]`. -/

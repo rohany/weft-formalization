@@ -2409,13 +2409,1975 @@ theorem happensBefore_of_check {T : CTA} {τ : List Config}
   · rw [heq]; exact Relation.ReflTransGen.refl
   · exact (mem_transClosure_imp_transGen _ hmem).to_reflTransGen
 
+/-- **Companion of `happensBefore_of_check` for the strengthened idx-0 check.** From
+`check = true`, no flagged line-18 pair has a first-instruction target: given a barrier op
+`c1` on `b'` and a same-barrier op `c2` of generation `pointGen c1 + 1`, necessarily
+`1 ≤ c2.idx` (a flagged pair with `c2.idx = 0` returns `false` outright). Same unfolding
+as `happensBefore_of_check`, reading the `else false` branch instead. -/
+theorem idx_pos_of_check {T : CTA} {τ : List Config}
+    (hcheck : (CheckWellSynchronized T τ).1 = true)
+    {c1 : ProgPoint} (hc1 : c1 ∈ T.progPoints) {b' : Barrier}
+    (hbar1 : (T.cmdAt c1).bind Cmd.barrier? = some b')
+    {c2 : ProgPoint} (hc2 : c2 ∈ T.progPoints)
+    (hbar2 : (T.cmdAt c2).bind Cmd.barrier? = some b')
+    (hgen : pointGen T τ c2 = pointGen T τ c1 + 1) : 1 ≤ c2.idx := by
+  by_contra hidx
+  rw [fst_checkWellSynchronized] at hcheck
+  have hf1 := List.all_eq_true.mp hcheck c1 hc1
+  simp only [hbar1] at hf1
+  have hf2 := List.all_eq_true.mp hf1 c2 hc2
+  simp only [hbar2] at hf2
+  rw [if_pos ⟨True.intro, hgen⟩, if_neg hidx] at hf2
+  exact absurd hf2 (by simp)
+
+/-! ## Trace conformance — the soundness invariant (weft++ theorems doc §5.2.6)
+
+Machinery for **Theorem 1** (`wellSynchronized_of_check`), following the paper proof in
+§5.2.6 of the weft++ theorems document and the repo plan `soundness-theorem1-plan.md`.
+The paper's suffix induction is replaced by a *forward* induction over an arbitrary
+(possibly incomplete) challenger trace `τ'`, carrying the `Conforms T τ τ'` invariant:
+
+* **clause 0** (`no_err`) — `τ'` has not errored;
+* **clause 1** (`gen_eq`) — every instruction executed in `τ'` has its reference
+  generation: `pointGen T τ' η = pointGen T τ η`;
+* **clause 2** (`state`, via `BarrierConforms`) — each barrier's state is the image of
+  the *current fiber's* progress: the configured count is the fiber parameter, the
+  arrival count counts the fiber's executed `arrive`s, and the parked list is exactly
+  the threads of the fiber's parked `sync`s;
+* **clause 3** (`edge_sound`) — every `initRelation` edge whose target has executed in
+  `τ'` has an executed source, no later. Stated on the *generating* edges and lifted to
+  `happensBefore` paths once (`Conforms.happensBefore_sound`), so that the invariant's
+  per-step maintenance stays local.
+
+The layers, bottom-up: **L0** — fiber structure of the reference trace (`genFiber`,
+parameter agreement, size = capacity, partial round is all-`arrive`s); **L1** — checker
+extraction (`happensBefore_of_check`, `idx_pos_of_check` above); **L2** — the invariant
+and its preservation (`conforms_snoc`, whose registration cases funnel through the
+round-targeting lemma `conforms_reg_round` and the fullness pigeonhole
+`conforms_full_fiber`); **L3** — the endgame (`conforms_complete_done`, the paper's
+Theorem 7, via the minimal-τ-time descent) and the assembly (Theorem 8 = Theorem 1). -/
+
+/-- The expected-count parameter of a synchronization command (`arrive b n`/`sync b n`
+carry `n`); `none` for the memory commands. -/
+def Cmd.count? : Cmd → Option ℕ+
+  | .arrive _ n => some n
+  | .sync _ n => some n
+  | .read _ => none
+  | .write _ => none
+
+/-- The **generation fiber** `F_g(b)` of the reference trace: the barrier operations on
+`b` to which `τ` assigns generation `g` (`pointGen`). The rounds of `b` in any conforming
+challenger trace consume exactly these, one fiber per recycle. -/
+def genFiber (T : CTA) (τ : List Config) (b : Barrier) (g : Nat) : List ProgPoint :=
+  T.progPoints.filter fun η =>
+    decide ((T.cmdAt η).bind Cmd.barrier? = some b) && decide (pointGen T τ η = g)
+
+/-- Fiber membership, unfolded. -/
+theorem mem_genFiber {T : CTA} {τ : List Config} {b : Barrier} {g : Nat} {η : ProgPoint} :
+    η ∈ genFiber T τ b g ↔
+      η ∈ T.progPoints ∧ (T.cmdAt η).bind Cmd.barrier? = some b ∧ pointGen T τ η = g := by
+  simp [genFiber, List.mem_filter]
+
+/-! ### Layer-0 helpers — locating recycles and decoding the steps behind them -/
+
+/-- `pointGen` read off at a known execution time. -/
+theorem pointGen_eq_of_time {T : CTA} {τ : List Config} {η : ProgPoint} {b : Barrier}
+    (hbar : (T.cmdAt η).bind Cmd.barrier? = some b) {m : Nat}
+    (hm : IsTimeOf (Config.run State.initial T) τ η m) :
+    pointGen T τ η = recycleCount b τ (m - 1) + 1 := by
+  simp only [pointGen, hbar, pointTime_eq_of_isTimeOf hm]
+
+/-- Configuration `j` of a chain is reachable from the chain's start — bridges trace
+indices to the `WF_of_reaches` machinery. -/
+theorem reaches_of_chain_getElem {τ : List Config} (hchain : List.IsChain CTAStep τ)
+    {C₀ : Config} (h0 : τ[0]? = some C₀) :
+    ∀ (j : Nat) (C : Config), τ[j]? = some C → Relation.ReflTransGen CTAStep C₀ C := by
+  intro j
+  induction j with
+  | zero =>
+    intro C hC
+    rw [h0] at hC
+    obtain rfl := Option.some.inj hC
+    exact Relation.ReflTransGen.refl
+  | succ k ih =>
+    intro C hC
+    have hlt : k + 1 < τ.length := (List.getElem?_eq_some_iff.mp hC).1
+    have hklt : k < τ.length := by omega
+    have hCk : τ[k]? = some τ[k] := List.getElem?_eq_getElem hklt
+    exact (ih _ hCk).tail (chain_step hchain hCk hC)
+
+/-- Each step adds at most one recycle of `b`. -/
+theorem recycleCount_le_succ (b : Barrier) (τ : List Config) (j : Nat) :
+    recycleCount b τ (j + 1) ≤ recycleCount b τ j + 1 := by
+  unfold recycleCount
+  rw [List.range_succ, List.countP_append]
+  exact Nat.add_le_add_left (List.countP_le_length.trans (by simp)) _
+
+/-- Locate the `g`-th recycle of `b`: if at least `g ≥ 1` recycles occur within the
+first `M` steps, some step `p < M` is the `g`-th — the count is `g - 1` before it and
+`g` after. (The `g`-th recycle step is unique: any other index with count `g - 1`
+before and `g` after would put `g` recycles strictly before it.) -/
+theorem recycleCount_hits (b : Barrier) (τ : List Config) {g M : Nat} (hg : 1 ≤ g)
+    (hM : g ≤ recycleCount b τ M) :
+    ∃ p, p < M ∧ recycleCount b τ p = g - 1 ∧ recycleCount b τ (p + 1) = g := by
+  induction M with
+  | zero =>
+    exfalso
+    have h0 : recycleCount b τ 0 = 0 := by unfold recycleCount; simp
+    omega
+  | succ k ih =>
+    by_cases hk : g ≤ recycleCount b τ k
+    · obtain ⟨p, hp, h1, h2⟩ := ih hk
+      exact ⟨p, by omega, h1, h2⟩
+    · have hle := recycleCount_le_succ b τ k
+      exact ⟨k, by omega, by omega, by omega⟩
+
+/-- Extract the recycling step at a `recycleCount` increase. -/
+theorem recycle_step_of_count_lt {b : Barrier} {τ : List Config} {p : Nat}
+    (h : recycleCount b τ p < recycleCount b τ (p + 1)) :
+    ∃ C C', τ[p]? = some C ∧ τ[p + 1]? = some C' ∧ stepRecyclesBarrier b C C' = true := by
+  obtain ⟨C, hC⟩ : ∃ C, τ[p]? = some C := by
+    rcases hex : τ[p]? with _ | C
+    · exfalso
+      have heq : recycleCount b τ (p + 1) = recycleCount b τ p := by
+        unfold recycleCount
+        rw [List.range_succ, List.countP_append, List.countP_cons, List.countP_nil]
+        simp [hex]
+      omega
+    · exact ⟨C, rfl⟩
+  obtain ⟨C', hC'⟩ : ∃ C', τ[p + 1]? = some C' := by
+    rcases hex : τ[p + 1]? with _ | C'
+    · exfalso
+      have heq : recycleCount b τ (p + 1) = recycleCount b τ p := by
+        unfold recycleCount
+        rw [List.range_succ, List.countP_append, List.countP_cons, List.countP_nil]
+        simp [hC, hex]
+      omega
+    · exact ⟨C', rfl⟩
+  refine ⟨C, C', hC, hC', ?_⟩
+  by_contra hf
+  rw [Bool.not_eq_true] at hf
+  have := recycleCount_succ_of_not_recycle b hC hC' hf
+  omega
+
+/-- **Decode a recycling step.** The `CTAStep` behind `stepRecyclesBarrier b` is
+necessarily `CTAStep.recycle` *of `b`*: `interleave`'s guard keeps every barrier
+under-full, `done` keeps the state (a full barrier is not unconfigured), `error` has no
+target state, and a recycle of another barrier leaves `b` untouched. Exposes the full
+pre-step barrier state — full, with every parked thread's head at the matching
+`sync b n` — and the exact post-step configuration. -/
+theorem stepRecyclesBarrier_elim {C C' : Config} (hstep : CTAStep C C') {b : Barrier}
+    (hrec : stepRecyclesBarrier b C C' = true) :
+    ∃ s Tc I A n, C = Config.run s Tc ∧ s.B b = ⟨I, A, some n⟩ ∧
+      I.length + A = (n : ℕ) ∧ (∀ i ∈ I, (Tc.prog i).head? = some (Cmd.sync b n)) ∧
+      C' = Config.run { E := updateMapOn s.E I true,
+                        B := Function.update s.B b BarrierState.unconfigured }
+             (Tc.wake I) := by
+  cases hstep with
+  | @interleave s s' Tc i P' hi hbar hth =>
+    exfalso
+    have hnf : (s.B b).isFull = false := by
+      rcases hbar b with hu | ⟨I, A, n, hcfg, hlt⟩
+      · rw [hu]; rfl
+      · rw [hcfg]; simp only [BarrierState.isFull]
+        exact beq_eq_false_iff_ne.mpr (Nat.ne_of_lt hlt)
+    simp [stepRecyclesBarrier, Config.state?, hnf] at hrec
+  | @recycle s Tc b' I A n hb hfull hpark =>
+    by_cases hbb : b' = b
+    · subst hbb
+      exact ⟨s, Tc, I, A, n, rfl, hb, hfull, hpark, rfl⟩
+    · exfalso
+      have hupd : (Function.update s.B b' BarrierState.unconfigured) b = s.B b :=
+        Function.update_of_ne (Ne.symm hbb) _ _
+      simp only [stepRecyclesBarrier, Config.state?, Bool.and_eq_true, hupd,
+        decide_eq_true_eq] at hrec
+      obtain ⟨hfl, hunc⟩ := hrec
+      rw [hunc] at hfl
+      simp [BarrierState.isFull, BarrierState.unconfigured] at hfl
+  | done hdone hnofull =>
+    exfalso
+    simp only [stepRecyclesBarrier, Config.state?, Bool.and_eq_true,
+      decide_eq_true_eq] at hrec
+    obtain ⟨hfl, hunc⟩ := hrec
+    rw [hunc] at hfl
+    simp [BarrierState.isFull, BarrierState.unconfigured] at hfl
+  | error hbar hth =>
+    exfalso
+    simp [stepRecyclesBarrier, Config.state?] at hrec
+
+/-- **Lift a head-dropping step to a static program point.** If at step `j → j+1` thread
+`i`'s remaining program goes from `c :: rest` to `rest`, then the static point
+`⟨i, |T.prog i| - |C.progOf i|⟩` executes at time `j + 1`, and its static command is
+`c`. -/
+theorem exec_step_time {T : CTA} {τ : List Config}
+    (hτ : IsCompleteTraceFrom (Config.run State.initial T) τ)
+    {j : Nat} {C C' : Config} (hCj : τ[j]? = some C) (hCj1 : τ[j + 1]? = some C')
+    {i : ThreadId} {c : Cmd} {rest : Prog}
+    (hC : C.progOf i = c :: rest) (hC' : C'.progOf i = rest) :
+    IsTimeOf (Config.run State.initial T) τ
+        ⟨i, (T.prog i).length - (C.progOf i).length⟩ (j + 1) ∧
+      T.cmdAt ⟨i, (T.prog i).length - (C.progOf i).length⟩ = some c := by
+  have hchain := hτ.1.subtrace
+  have h0 : τ[0]? = some (Config.run State.initial T) := by
+    have hgen : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen]; exact hτ.2
+  have hsuf : C.progOf i <:+ (Config.run State.initial T).progOf i :=
+    progOf_suffix_index_le hchain i h0 (Nat.zero_le j) hCj
+  have hlen : (C.progOf i).length ≤ (T.prog i).length := suffix_length_le hsuf
+  have hpos : 0 < (C.progOf i).length := by rw [hC]; simp
+  have hdropk : C.progOf i = (T.prog i).drop ((T.prog i).length - (C.progOf i).length) :=
+    List.IsSuffix.eq_drop hsuf
+  have hkL : (T.prog i).length - (C.progOf i).length < (T.prog i).length := by omega
+  have hdropk1 : C'.progOf i =
+      (T.prog i).drop ((T.prog i).length - (C.progOf i).length + 1) := by
+    rw [hC', ← List.tail_drop, ← hdropk, hC, List.tail_cons]
+  exact ⟨⟨hτ, hkL, j, C, C', rfl, hCj, hCj1, hdropk, hdropk1⟩, cmd_at_last hsuf hC⟩
+
+/-- Classify a step's effect on `b`'s arrival count: unchanged, an `arrive b _` execution
+(head dropped), or a recycle of `b`. -/
+theorem arrived_step {C C' : Config} (hstep : CTAStep C C') {b : Barrier}
+    {s s' : State} (hs : C.state? = some s) (hs' : C'.state? = some s') :
+    (s'.B b).arrived = (s.B b).arrived ∨
+    (∃ (i : ThreadId) (n' : ℕ+) (rest : Prog),
+      C.progOf i = Cmd.arrive b n' :: rest ∧ C'.progOf i = rest) ∨
+    stepRecyclesBarrier b C C' = true := by
+  cases hstep with
+  | @interleave s₀ sn Tc t P' ht hbar hth =>
+    simp only [Config.state?, Option.some.injEq] at hs hs'
+    subst hs; subst hs'
+    obtain ⟨Pi, hPi⟩ : ∃ P, Tc.prog t = P := ⟨_, rfl⟩
+    rw [hPi] at hth
+    cases hth with
+    | read_noop => exact Or.inl rfl
+    | write_noop => exact Or.inl rfl
+    | @arrive_configure _ _ ba na _ he hb =>
+      by_cases hbb : b = ba
+      · subst hbb
+        refine Or.inr (Or.inl ⟨t, na, P', hPi, ?_⟩)
+        simp [Config.progOf, CTA.set, Function.update_self]
+      · exact Or.inl (by simp only [Function.update_of_ne hbb])
+    | @arrive_register _ _ ba na _ I A he hb hpos hlt =>
+      by_cases hbb : b = ba
+      · subst hbb
+        refine Or.inr (Or.inl ⟨t, na, P', hPi, ?_⟩)
+        simp [Config.progOf, CTA.set, Function.update_self]
+      · exact Or.inl (by simp only [Function.update_of_ne hbb])
+    | @sync_configure _ _ ba na _ he hb =>
+      by_cases hbb : b = ba
+      · subst hbb
+        exact Or.inl (by
+          simp [Function.update_self, hb, BarrierState.unconfigured])
+      · exact Or.inl (by simp only [Function.update_of_ne hbb])
+    | @sync_block _ _ ba na _ I A he hb hpos hlt =>
+      by_cases hbb : b = ba
+      · subst hbb
+        exact Or.inl (by simp [Function.update_self, hb])
+      · exact Or.inl (by simp only [Function.update_of_ne hbb])
+  | @recycle s₀ Tc ba I A na hb hfull hpark =>
+    simp only [Config.state?, Option.some.injEq] at hs hs'
+    subst hs; subst hs'
+    by_cases hbb : ba = b
+    · subst hbb
+      refine Or.inr (Or.inr ?_)
+      simp [stepRecyclesBarrier, Config.state?, hb, BarrierState.isFull, hfull,
+        Function.update_self]
+    · exact Or.inl (by simp only [Function.update_of_ne (Ne.symm hbb)])
+  | done hdone hnofull =>
+    simp only [Config.state?, Option.some.injEq] at hs hs'
+    subst hs; subst hs'
+    exact Or.inl rfl
+  | error hbar hth =>
+    simp [Config.state?] at hs'
+
+/-- **Decode an `arrive` execution.** A step that drops a thread's `arrive b n'` head is
+an `interleave` running that `arrive`; the rule premise ties `n'` to the barrier — it
+either configures `b` or registers into a count-`n'` state — and afterwards `b` is
+configured with count `n'` and one more arrival. -/
+theorem arrive_exec_decode {C C' : Config} (hstep : CTAStep C C') {i : ThreadId}
+    {b : Barrier} {n' : ℕ+} {rest : Prog}
+    (hC : C.progOf i = Cmd.arrive b n' :: rest) (hC' : C'.progOf i = rest) :
+    ∃ s s', C.state? = some s ∧ C'.state? = some s' ∧
+      (s.B b = BarrierState.unconfigured ∨ (s.B b).count = some n') ∧
+      (s'.B b).count = some n' ∧ (s'.B b).arrived = (s.B b).arrived + 1 := by
+  cases hstep with
+  | @interleave s₀ sn Tc t P' ht hbar hth =>
+    by_cases hti : t = i
+    · subst hti
+      obtain ⟨Pi, hPi⟩ : ∃ P, Tc.prog t = P := ⟨_, rfl⟩
+      rw [hPi] at hth
+      have hC0 : Pi = Cmd.arrive b n' :: rest := by rw [← hPi]; exact hC
+      subst hC0
+      cases hth with
+      | arrive_configure he hb =>
+        refine ⟨s₀, _, rfl, rfl, Or.inl hb, ?_, ?_⟩
+        · simp [Function.update_self]
+        · rw [hb]; simp [Function.update_self, BarrierState.unconfigured]
+      | @arrive_register _ _ _ _ _ I A he hb hpos hlt =>
+        refine ⟨s₀, _, rfl, rfl, Or.inr (by rw [hb]), ?_, ?_⟩
+        · simp [Function.update_self]
+        · rw [hb]; simp [Function.update_self]
+    · exfalso
+      have hCc : Tc.prog i = Cmd.arrive b n' :: rest := hC
+      have hsame : (Tc.set t ht P').prog i = Tc.prog i := by
+        simp [CTA.set, Function.update_of_ne (Ne.symm hti)]
+      have hC'' : Tc.prog i = rest := by rw [← hsame]; exact hC'
+      rw [hC''] at hCc
+      have hlen := congrArg List.length hCc
+      simp at hlen
+  | @recycle s₀ Tc ba I A na hb hfull hpark =>
+    exfalso
+    have hCc : Tc.prog i = Cmd.arrive b n' :: rest := hC
+    by_cases hi : i ∈ I
+    · have hhd := hpark i hi
+      rw [hCc] at hhd
+      simp at hhd
+    · have hsame : (Tc.wake I).prog i = Tc.prog i := by simp [CTA.wake, if_neg hi]
+      have hCw : (Tc.wake I).prog i = rest := hC'
+      rw [hsame, hCc] at hCw
+      have hlen := congrArg List.length hCw
+      simp at hlen
+  | @done s₀ Tc hdone hnofull =>
+    exfalso
+    have hCc : Tc.prog i = Cmd.arrive b n' :: rest := hC
+    have hnil : Tc.prog i = [] := by
+      by_cases hi : i ∈ Tc.ids
+      · exact hdone i hi
+      · exact Tc.nil_outside_ids i hi
+    rw [hnil] at hCc
+    simp at hCc
+  | @error s₀ Tc t P' hbar hth =>
+    exfalso
+    have hCc : Tc.prog i = Cmd.arrive b n' :: rest := hC
+    have hC'' : Tc.prog i = rest := hC'
+    rw [hC''] at hCc
+    have hlen := congrArg List.length hCc
+    simp at hlen
+
+/-- A step preserves a configured count unless it recycles the barrier. -/
+theorem count_step {C C' : Config} (hstep : CTAStep C C') {b : Barrier} {n : ℕ+}
+    {s s' : State} (hs : C.state? = some s) (hs' : C'.state? = some s')
+    (hn : (s.B b).count = some n) (hnorec : stepRecyclesBarrier b C C' = false) :
+    (s'.B b).count = some n := by
+  cases hstep with
+  | @interleave s₀ sn Tc t P' ht hbar hth =>
+    simp only [Config.state?, Option.some.injEq] at hs hs'
+    subst hs; subst hs'
+    obtain ⟨Pi, hPi⟩ : ∃ P, Tc.prog t = P := ⟨_, rfl⟩
+    rw [hPi] at hth
+    cases hth with
+    | read_noop => exact hn
+    | write_noop => exact hn
+    | @arrive_configure _ _ ba na _ he hb =>
+      by_cases hbb : b = ba
+      · subst hbb; rw [hb] at hn; simp [BarrierState.unconfigured] at hn
+      · simpa only [Function.update_of_ne hbb] using hn
+    | @arrive_register _ _ ba na _ I A he hb hpos hlt =>
+      by_cases hbb : b = ba
+      · subst hbb
+        rw [hb] at hn
+        simp only [Function.update_self]
+        simpa using hn
+      · simpa only [Function.update_of_ne hbb] using hn
+    | @sync_configure _ _ ba na _ he hb =>
+      by_cases hbb : b = ba
+      · subst hbb; rw [hb] at hn; simp [BarrierState.unconfigured] at hn
+      · simpa only [Function.update_of_ne hbb] using hn
+    | @sync_block _ _ ba na _ I A he hb hpos hlt =>
+      by_cases hbb : b = ba
+      · subst hbb
+        rw [hb] at hn
+        simp only [Function.update_self]
+        simpa using hn
+      · simpa only [Function.update_of_ne hbb] using hn
+  | @recycle s₀ Tc ba I A na hb hfull hpark =>
+    simp only [Config.state?, Option.some.injEq] at hs hs'
+    subst hs; subst hs'
+    by_cases hbb : ba = b
+    · subst hbb
+      exfalso
+      simp [stepRecyclesBarrier, Config.state?, hb, BarrierState.isFull, hfull,
+        Function.update_self] at hnorec
+    · simpa only [Function.update_of_ne (Ne.symm hbb)] using hn
+  | done hdone hnofull =>
+    simp only [Config.state?, Option.some.injEq] at hs hs'
+    subst hs; subst hs'
+    exact hn
+  | error hbar hth =>
+    simp [Config.state?] at hs'
+
+/-- **Count persistence.** Over a recycle-free stretch of the trace (equal
+`recycleCount` at both ends), a configured count survives. -/
+theorem count_persists {τ : List Config} (hchain : List.IsChain CTAStep τ) {b : Barrier}
+    {n : ℕ+} :
+    ∀ (k j : Nat), j ≤ k → recycleCount b τ j = recycleCount b τ k →
+    ∀ {C : Config} {s : State}, τ[j]? = some C → C.state? = some s →
+      (s.B b).count = some n →
+    ∀ {C' : Config} {s' : State}, τ[k]? = some C' → C'.state? = some s' →
+      (s'.B b).count = some n := by
+  intro k
+  induction k with
+  | zero =>
+    intro j hjk _ C s hC hs hn C' s' hC' hs'
+    obtain rfl : j = 0 := by omega
+    rw [hC] at hC'
+    obtain rfl := Option.some.inj hC'
+    rw [hs] at hs'
+    obtain rfl := Option.some.inj hs'
+    exact hn
+  | succ k ih =>
+    intro j hjk hrc C s hC hs hn C' s' hC' hs'
+    by_cases hje : j = k + 1
+    · subst hje
+      rw [hC] at hC'
+      obtain rfl := Option.some.inj hC'
+      rw [hs] at hs'
+      obtain rfl := Option.some.inj hs'
+      exact hn
+    · have hjk' : j ≤ k := by omega
+      have hklt : k < τ.length := by
+        have := (List.getElem?_eq_some_iff.mp hC').1
+        omega
+      have hCk : τ[k]? = some τ[k] := List.getElem?_eq_getElem hklt
+      have hstepk := chain_step hchain hCk hC'
+      obtain ⟨sk, hsk⟩ : ∃ sk, (τ[k]).state? = some sk := by
+        rcases hkc : τ[k] with ⟨s₁, T₁⟩ | s₁ | T₁
+        · exact ⟨s₁, rfl⟩
+        · rw [hkc] at hstepk; cases hstepk
+        · rw [hkc] at hstepk; cases hstepk
+      have hm1 := recycleCount_mono b τ hjk'
+      have hm2 := recycleCount_mono b τ (show k ≤ k + 1 by omega)
+      have hrcjk : recycleCount b τ j = recycleCount b τ k := by omega
+      have hnorec : stepRecyclesBarrier b τ[k] C' = false := by
+        by_contra hrec
+        rw [Bool.not_eq_false] at hrec
+        have := recycleCount_succ_of_recycle b τ hCk hC' hrec
+        omega
+      exact count_step hstepk hsk hs' (ih j hjk' hrcjk hC hs hn hCk hsk) hnorec
+
+/-- Discrete search: a `ℕ`-valued function that grows over an interval increases at some
+step inside it. -/
+theorem exists_step_increase (f : Nat → Nat) :
+    ∀ (hi lo : Nat), lo ≤ hi → f lo < f hi →
+      ∃ j, lo ≤ j ∧ j < hi ∧ f j < f (j + 1) := by
+  intro hi
+  induction hi with
+  | zero =>
+    intro lo hle hlt
+    obtain rfl : lo = 0 := Nat.le_zero.mp hle
+    exact absurd hlt (lt_irrefl _)
+  | succ k ih =>
+    intro lo hle hlt
+    by_cases hlo : lo ≤ k
+    · by_cases hk : f k < f (k + 1)
+      · exact ⟨k, hlo, Nat.lt_succ_self k, hk⟩
+      · obtain ⟨j, h1, h2, h3⟩ := ih lo hlo (by omega)
+        exact ⟨j, h1, by omega, h3⟩
+    · obtain rfl : lo = k + 1 := by omega
+      exact absurd hlt (lt_irrefl _)
+
+/-- `progPoints` enumerates each program point exactly once. -/
+theorem progPoints_nodup (T : CTA) : T.progPoints.Nodup := by
+  unfold CTA.progPoints
+  rw [List.nodup_flatMap]
+  constructor
+  · intro i _
+    exact List.nodup_range.map fun a b hab => by simpa using congrArg ProgPoint.idx hab
+  · refine (Finset.sort_nodup T.ids (· ≤ ·)).imp ?_
+    intro i i' hne x hx hx'
+    simp only [List.mem_map, List.mem_range] at hx hx'
+    obtain ⟨k, -, rfl⟩ := hx
+    obtain ⟨k', -, hkk⟩ := hx'
+    exact hne (by simpa using congrArg ProgPoint.thread hkk.symm)
+
+/-- Fibers inherit `Nodup` from `progPoints`. -/
+theorem genFiber_nodup (T : CTA) (τ : List Config) (b : Barrier) (g : Nat) :
+    (genFiber T τ b g).Nodup :=
+  (progPoints_nodup T).filter _
+
+/-- Counting after enlarging a predicate at exactly one list element. -/
+theorem countP_succ_of_unique {α : Type*} {l : List α} (hnd : l.Nodup)
+    {p q : α → Bool} {a₀ : α} (ha₀ : a₀ ∈ l) (hqa : q a₀ = true) (hpa : p a₀ = false)
+    (hpq : ∀ x ∈ l, x ≠ a₀ → q x = p x) :
+    l.countP q = l.countP p + 1 := by
+  induction l with
+  | nil => simp at ha₀
+  | cons a t ih =>
+    obtain ⟨hna, hndt⟩ := List.nodup_cons.mp hnd
+    rcases List.mem_cons.mp ha₀ with rfl | hmem
+    · have htail : t.countP q = t.countP p :=
+        List.countP_congr fun x hx => by
+          rw [hpq x (List.mem_cons_of_mem _ hx) (fun h => hna (h ▸ hx))]
+      simp [htail, hqa, hpa]
+    · have hne : a ≠ a₀ := fun h => hna (h ▸ hmem)
+      have hqp := hpq a (List.mem_cons_self ..) hne
+      have iht := ih hndt hmem fun x hx hxne => hpq x (List.mem_cons_of_mem _ hx) hxne
+      simp only [List.countP_cons, iht, hqp]
+      omega
+
+/-- A computed `pointTime` is a genuine `IsTimeOf` (converse of
+`pointTime_eq_of_isTimeOf`). -/
+theorem isTimeOf_of_pointTime {T : CTA} {τ : List Config}
+    (hτ : IsCompleteTraceFrom (Config.run State.initial T) τ)
+    {η : ProgPoint} {m : Nat} (hpt : pointTime T τ η = some m) :
+    IsTimeOf (Config.run State.initial T) τ η m := by
+  have hchain := hτ.1.subtrace
+  have h0 : τ[0]? = some (Config.run State.initial T) := by
+    have hgen : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen]; exact hτ.2
+  have hC₀ : (Config.run State.initial T).progOf η.thread = T.prog η.thread := rfl
+  by_cases hidx : η.idx < (T.prog η.thread).length
+  · simp only [pointTime] at hpt
+    rw [if_pos hidx] at hpt
+    rw [List.findSome?_eq_some_iff] at hpt
+    obtain ⟨l₁, a, l₂, -, hfa, -⟩ := hpt
+    split at hfa
+    · rename_i C C' hCa hCa1
+      split at hfa
+      · rename_i hcond
+        simp only [Bool.and_eq_true, beq_iff_eq] at hcond
+        obtain ⟨hl1, hl2⟩ := hcond
+        rw [Option.some.injEq] at hfa
+        subst hfa
+        refine ⟨hτ, hidx, a, C, C', rfl, hCa, hCa1, ?_, ?_⟩
+        · have heq := List.IsSuffix.eq_drop
+            (progOf_suffix_index_le hchain η.thread h0 (Nat.zero_le a) hCa)
+          rw [hl1, hC₀] at heq
+          rwa [show (T.prog η.thread).length - ((T.prog η.thread).length - η.idx) = η.idx
+            from by omega] at heq
+        · have heq := List.IsSuffix.eq_drop
+            (progOf_suffix_index_le hchain η.thread h0 (Nat.zero_le (a + 1)) hCa1)
+          rw [hl2, hC₀] at heq
+          rwa [show (T.prog η.thread).length -
+              ((T.prog η.thread).length - η.idx - 1) = η.idx + 1
+            from by omega] at heq
+      · simp at hfa
+    · simp at hfa
+  · simp only [pointTime] at hpt
+    rw [if_neg hidx] at hpt
+    exact absurd hpt (by simp)
+
+/-- `pointGen` read off a computed `pointTime` (works on partial traces). -/
+theorem pointGen_eq_of_pointTime {T : CTA} {τ' : List Config} {η : ProgPoint}
+    {b : Barrier} (hbar : (T.cmdAt η).bind Cmd.barrier? = some b) {m : Nat}
+    (hpt : pointTime T τ' η = some m) :
+    pointGen T τ' η = recycleCount b τ' (m - 1) + 1 := by
+  simp only [pointGen, hbar, hpt]
+
+/-- Unpack a computed `pointTime` on a *partial* trace into the executing step's drop
+facts. (`IsTimeOf` requires a complete trace; this is the raw content, available on any
+chain from the initial configuration.) -/
+theorem pointTime_spec {T : CTA} {τ' : List Config}
+    (hchain : List.IsChain CTAStep τ')
+    (h0 : τ'.head? = some (Config.run State.initial T))
+    {η : ProgPoint} {m : Nat} (hpt : pointTime T τ' η = some m) :
+    1 ≤ m ∧ m < τ'.length ∧ η.idx < (T.prog η.thread).length ∧
+    ∃ C C', τ'[m - 1]? = some C ∧ τ'[m]? = some C' ∧
+      C.progOf η.thread = (T.prog η.thread).drop η.idx ∧
+      C'.progOf η.thread = (T.prog η.thread).drop (η.idx + 1) := by
+  have h0' : τ'[0]? = some (Config.run State.initial T) := by
+    have hgen : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen]; exact h0
+  have hC₀ : (Config.run State.initial T).progOf η.thread = T.prog η.thread := rfl
+  by_cases hidx : η.idx < (T.prog η.thread).length
+  · simp only [pointTime] at hpt
+    rw [if_pos hidx] at hpt
+    rw [List.findSome?_eq_some_iff] at hpt
+    obtain ⟨l₁, a, l₂, -, hfa, -⟩ := hpt
+    split at hfa
+    · rename_i C C' hCa hCa1
+      split at hfa
+      · rename_i hcond
+        simp only [Bool.and_eq_true, beq_iff_eq] at hcond
+        obtain ⟨hl1, hl2⟩ := hcond
+        rw [Option.some.injEq] at hfa
+        subst hfa
+        have hmlt : a + 1 < τ'.length := (List.getElem?_eq_some_iff.mp hCa1).1
+        refine ⟨by omega, hmlt, hidx, C, C',
+          by rw [show a + 1 - 1 = a by omega]; exact hCa, hCa1, ?_, ?_⟩
+        · have heq := List.IsSuffix.eq_drop
+            (progOf_suffix_index_le hchain η.thread h0' (Nat.zero_le a) hCa)
+          rw [hl1, hC₀] at heq
+          rwa [show (T.prog η.thread).length - ((T.prog η.thread).length - η.idx) = η.idx
+            from by omega] at heq
+        · have heq := List.IsSuffix.eq_drop
+            (progOf_suffix_index_le hchain η.thread h0' (Nat.zero_le (a + 1)) hCa1)
+          rw [hl2, hC₀] at heq
+          rwa [show (T.prog η.thread).length -
+              ((T.prog η.thread).length - η.idx - 1) = η.idx + 1
+            from by omega] at heq
+      · simp at hfa
+    · simp at hfa
+  · simp only [pointTime] at hpt
+    rw [if_neg hidx] at hpt
+    exact absurd hpt (by simp)
+
+/-- A `sync`'s computed time on a partial trace is a recycle of its barrier
+(`sync_time_recycles` without the completeness packaging). -/
+theorem pointTime_sync_recycles {T : CTA} {τ' : List Config}
+    (hchain : List.IsChain CTAStep τ')
+    (h0 : τ'.head? = some (Config.run State.initial T))
+    {η : ProgPoint} {m : Nat} (hpt : pointTime T τ' η = some m)
+    {bb : Barrier} {nn : ℕ+} (hcm : T.cmdAt η = some (.sync bb nn)) :
+    ∃ C C', τ'[m - 1]? = some C ∧ τ'[m]? = some C' ∧
+      stepRecyclesBarrier bb C C' = true := by
+  obtain ⟨hm1, hmlt, hidx, C, C', hC, hC', hCdrop, hC'drop⟩ := pointTime_spec hchain h0 hpt
+  obtain ⟨hlt0, hget0⟩ := List.getElem?_eq_some_iff.mp hcm
+  have hcons : C.progOf η.thread =
+      Cmd.sync bb nn :: (T.prog η.thread).drop (η.idx + 1) := by
+    rw [hCdrop, List.drop_eq_getElem_cons hidx, hget0]
+  have hCC' : τ'[m - 1 + 1]? = some C' := by
+    rw [show m - 1 + 1 = m by omega]; exact hC'
+  have hstep := chain_step hchain hC hCC'
+  exact ⟨C, C', hC, hC', sync_drop_recycles hstep hcons hC'drop⟩
+
+/-- **A passed instruction has executed** (partial-trace variant of
+`exists_time_of_ends_done`): if the last configuration's remaining program for thread
+`i` has length at most `|T.prog i| - (k + 1)`, the pointer moved past instruction `k`,
+so point `⟨i, k⟩` has a computed time. Intermediate-value argument on program lengths. -/
+theorem exists_pointTime_of_passed {T : CTA} {τ' : List Config}
+    (hchain : List.IsChain CTAStep τ')
+    (h0 : τ'.head? = some (Config.run State.initial T))
+    {C : Config} (hlast : τ'.getLast? = some C) {i : ThreadId} {k : Nat}
+    (hk : k < (T.prog i).length)
+    (hpassed : (C.progOf i).length + (k + 1) ≤ (T.prog i).length) :
+    ∃ m, pointTime T τ' ⟨i, k⟩ = some m := by
+  have h0' : τ'[0]? = some (Config.run State.initial T) := by
+    have hgen : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen]; exact h0
+  have hlastidx : τ'[τ'.length - 1]? = some C := by
+    rw [← List.getLast?_eq_getElem?]; exact hlast
+  have hlen1 : 1 ≤ τ'.length := by
+    cases τ' with
+    | nil => simp at h0
+    | cons a l => simp
+  have hsuffix : ∀ {j} {D : Config}, τ'[j]? = some D →
+      D.progOf i <:+ (Config.run State.initial T).progOf i :=
+    fun {j D} hD => progOf_suffix_index_le hchain i h0' (Nat.zero_le j) hD
+  have hQlast : ((τ'[τ'.length - 1]?).map (fun D => (D.progOf i).length)).getD 0
+      < (T.prog i).length - k := by
+    rw [hlastidx]
+    change (C.progOf i).length < (T.prog i).length - k
+    omega
+  have hex : ∃ j, ((τ'[j]?).map (fun (D : Config) => (D.progOf i).length)).getD 0
+      < (T.prog i).length - k := ⟨τ'.length - 1, hQlast⟩
+  have hQj0 := Nat.find_spec hex
+  have hj0le : Nat.find hex ≤ τ'.length - 1 := Nat.find_le hQlast
+  have hQ0 : ¬ ((τ'[0]?).map (fun D => (D.progOf i).length)).getD 0
+      < (T.prog i).length - k := by
+    rw [h0']
+    change ¬ (T.prog i).length < (T.prog i).length - k
+    omega
+  have hj0pos : 0 < Nat.find hex := by
+    rcases Nat.eq_zero_or_pos (Nat.find hex) with h | h
+    · rw [h] at hQj0; exact absurd hQj0 hQ0
+    · exact h
+  have hminj := Nat.find_min hex (show Nat.find hex - 1 < Nat.find hex by omega)
+  have hj0lt : Nat.find hex < τ'.length := by omega
+  obtain ⟨D, hD⟩ : ∃ D, τ'[Nat.find hex - 1]? = some D :=
+    ⟨_, List.getElem?_eq_getElem (by omega)⟩
+  obtain ⟨D', hD'⟩ : ∃ D', τ'[Nat.find hex]? = some D' :=
+    ⟨_, List.getElem?_eq_getElem hj0lt⟩
+  have hDD' : τ'[Nat.find hex - 1 + 1]? = some D' := by
+    rw [show Nat.find hex - 1 + 1 = Nat.find hex by omega]; exact hD'
+  have hub : (D.progOf i).length ≤ (D'.progOf i).length + 1 :=
+    (chain_step hchain hD hDD').progOf_length_le_succ i
+  have e1 : ((τ'[Nat.find hex - 1]?).map (fun D => (D.progOf i).length)).getD 0
+      = (D.progOf i).length := by rw [hD]; rfl
+  have e2 : ((τ'[Nat.find hex]?).map (fun D => (D.progOf i).length)).getD 0
+      = (D'.progOf i).length := by rw [hD']; rfl
+  rw [e1] at hminj
+  rw [e2] at hQj0
+  have hlenD : (D.progOf i).length = (T.prog i).length - k := by omega
+  have hlenD' : (D'.progOf i).length = (T.prog i).length - k - 1 := by omega
+  have hne : pointTime T τ' ⟨i, k⟩ ≠ none := by
+    intro hnone
+    simp only [pointTime] at hnone
+    rw [if_pos hk] at hnone
+    rw [List.findSome?_eq_none_iff] at hnone
+    have hjmem : Nat.find hex - 1 ∈ List.range (τ'.length - 1) :=
+      List.mem_range.mpr (by omega)
+    have hmatch := hnone _ hjmem
+    simp only [hD, hDD', hlenD, hlenD'] at hmatch
+    simp at hmatch
+  obtain ⟨m, hm⟩ := Option.ne_none_iff_exists'.mp hne
+  exact ⟨m, hm⟩
+
+/-- Two `arrive`-head drops at the same step happen on the same thread: only a single
+`interleave` thread advances past an `arrive` (recycles drop only parked `sync`s). -/
+theorem arrive_drop_thread_unique {C C' : Config} (hstep : CTAStep C C')
+    {i₁ i₂ : ThreadId} {b₁ b₂ : Barrier} {n₁ n₂ : ℕ+} {r₁ r₂ : Prog}
+    (h1 : C.progOf i₁ = Cmd.arrive b₁ n₁ :: r₁) (h1' : C'.progOf i₁ = r₁)
+    (h2 : C.progOf i₂ = Cmd.arrive b₂ n₂ :: r₂) (h2' : C'.progOf i₂ = r₂) :
+    i₁ = i₂ := by
+  cases hstep with
+  | @interleave s₀ sn Tc t P' ht hbar hth =>
+    by_cases hti : i₁ = t
+    · by_cases hti2 : i₂ = t
+      · rw [hti, hti2]
+      · exfalso
+        have hsame : (Tc.set t ht P').prog i₂ = Tc.prog i₂ := by
+          simp [CTA.set, Function.update_of_ne hti2]
+        have hc : Tc.prog i₂ = Cmd.arrive b₂ n₂ :: r₂ := h2
+        have hc' : Tc.prog i₂ = r₂ := by rw [← hsame]; exact h2'
+        rw [hc'] at hc
+        have hlen := congrArg List.length hc
+        simp at hlen
+    · exfalso
+      have hsame : (Tc.set t ht P').prog i₁ = Tc.prog i₁ := by
+        simp [CTA.set, Function.update_of_ne hti]
+      have hc : Tc.prog i₁ = Cmd.arrive b₁ n₁ :: r₁ := h1
+      have hc' : Tc.prog i₁ = r₁ := by rw [← hsame]; exact h1'
+      rw [hc'] at hc
+      have hlen := congrArg List.length hc
+      simp at hlen
+  | @recycle s₀ Tc ba I A na hb hfull hpark =>
+    exfalso
+    have hc : Tc.prog i₁ = Cmd.arrive b₁ n₁ :: r₁ := h1
+    by_cases hi : i₁ ∈ I
+    · have hhd := hpark i₁ hi
+      rw [hc] at hhd
+      simp at hhd
+    · have hsame : (Tc.wake I).prog i₁ = Tc.prog i₁ := by simp [CTA.wake, if_neg hi]
+      have hc' : (Tc.wake I).prog i₁ = r₁ := h1'
+      rw [hsame, hc] at hc'
+      have hlen := congrArg List.length hc'
+      simp at hlen
+  | @done s₀ Tc hdone hnofull =>
+    exfalso
+    have hc : Tc.prog i₁ = Cmd.arrive b₁ n₁ :: r₁ := h1
+    have hnil : Tc.prog i₁ = [] := by
+      by_cases hi : i₁ ∈ Tc.ids
+      · exact hdone i₁ hi
+      · exact Tc.nil_outside_ids i₁ hi
+    rw [hnil] at hc
+    simp at hc
+  | @error s₀ Tc t P' hbar hth =>
+    exfalso
+    have hc : Tc.prog i₁ = Cmd.arrive b₁ n₁ :: r₁ := h1
+    have hc' : Tc.prog i₁ = r₁ := h1'
+    rw [hc'] at hc
+    have hlen := congrArg List.length hc
+    simp at hlen
+
+/-- **L0d — the partial round is all-`arrive`s.** The fiber of the round after the last
+completed one (ops the reference trace ran in a round that never recycled) contains no
+`sync`: a `sync`'s execution step *is* a recycle of its barrier, which would push the
+recycle count past the total. -/
+theorem genFiber_partial_no_sync {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    {b : Barrier} {η : ProgPoint}
+    (hη : η ∈ genFiber T τ b (recycleCount b τ (τ.length - 1) + 1)) :
+    ∀ n : ℕ+, T.cmdAt η ≠ some (.sync b n) := by
+  intro n hcmd
+  obtain ⟨hmem, hbar, hgen⟩ := mem_genFiber.mp hη
+  obtain ⟨sd, hdone⟩ := hτ.2
+  have hidx : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hmem).2
+  obtain ⟨m, hm⟩ := exists_time_of_ends_done hτ.1 hdone hidx
+  have hpg := pointGen_eq_of_time hbar hm
+  have hm1 : 1 ≤ m := by
+    obtain ⟨-, -, j, -, -, hj, -, -, -, -⟩ := hm
+    omega
+  have hcmd' : η.cmd (Config.run State.initial T) = some (Cmd.sync b n) := hcmd
+  obtain ⟨C, C', hC, hC', hrec⟩ := sync_time_recycles hm hcmd'
+  have hC'' : τ[m - 1 + 1]? = some C' := by
+    rw [show m - 1 + 1 = m by omega]; exact hC'
+  have hsucc := recycleCount_succ_of_recycle b τ hC hC'' hrec
+  have hmlt : m < τ.length := (List.getElem?_eq_some_iff.mp hC').1
+  have hmono : recycleCount b τ (m - 1 + 1) ≤ recycleCount b τ (τ.length - 1) :=
+    recycleCount_mono b τ (by omega)
+  omega
+
+/-- An `arrive` member of a fiber leaves `b` configured with *its own parameter* right
+after its execution step: at index `m` (its time), the count is `some na`, and the
+recycle count strictly before it is `g - 1`. The seed of every parameter-agreement
+argument (persist the count forward to the round's recycle, or to the trace end). -/
+theorem genFiber_arrive_post_count {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    {b : Barrier} {g : Nat} {η : ProgPoint} (hη : η ∈ genFiber T τ b g)
+    {na : ℕ+} (hcm : T.cmdAt η = some (.arrive b na)) :
+    ∃ (m : Nat) (C' : Config) (s' : State),
+      1 ≤ m ∧ m < τ.length ∧ pointTime T τ η = some m ∧ τ[m]? = some C' ∧
+      C'.state? = some s' ∧
+      (s'.B b).count = some na ∧ recycleCount b τ (m - 1) = g - 1 ∧ 1 ≤ g := by
+  obtain ⟨hmem, hbar, hgen⟩ := mem_genFiber.mp hη
+  obtain ⟨sd, hdone⟩ := hτ.2
+  have hidx : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hmem).2
+  obtain ⟨m, hm⟩ := exists_time_of_ends_done hτ.1 hdone hidx
+  have hpg := pointGen_eq_of_time hbar hm
+  have hptm := pointTime_eq_of_isTimeOf hm
+  obtain ⟨-, -, j, D, D', hjm, hD, hD', hDdrop, hD'drop⟩ := hm
+  subst hjm
+  simp only [Nat.add_sub_cancel] at hpg
+  have hcm' : ((Config.run State.initial T).progOf η.thread)[η.idx]? =
+      some (Cmd.arrive b na) := hcm
+  obtain ⟨hlt0, hget0⟩ := List.getElem?_eq_some_iff.mp hcm'
+  have hDcons : D.progOf η.thread =
+      Cmd.arrive b na :: ((Config.run State.initial T).progOf η.thread).drop (η.idx + 1) := by
+    rw [hDdrop, List.drop_eq_getElem_cons hlt0, hget0]
+  have hD'rest : D'.progOf η.thread =
+      ((Config.run State.initial T).progOf η.thread).drop (η.idx + 1) := hD'drop
+  have hstepD := chain_step hτ.1.1.subtrace hD hD'
+  obtain ⟨s₁, s₂, hs₁, hs₂, hpre, hpost, hinc⟩ := arrive_exec_decode hstepD hDcons hD'rest
+  have hjlen : j + 1 < τ.length := (List.getElem?_eq_some_iff.mp hD').1
+  refine ⟨j + 1, D', s₂, by omega, hjlen, hptm, hD', hs₂, hpost, ?_, by omega⟩
+  simp only [Nat.add_sub_cancel]
+  omega
+
+/-- **The round data of a completed generation.** For `1 ≤ g ≤` the total recycles of
+`b`, locate the `g`-th recycle: at step `p` the barrier holds a full round
+`⟨I, A, some n⟩` whose parked threads sit at `sync b n` heads, the recycle wakes them —
+and, the fiber-parameter fact, every member of `F_g(b)` carries the count `n`
+(`sync`s read it off `hpark`; `arrive`s configure/match it at their own step, and it
+persists through the recycle-free window to `p`). -/
+theorem genFiber_round_data {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    {b : Barrier} {g : Nat} (hg : 1 ≤ g)
+    (hcomplete : g ≤ recycleCount b τ (τ.length - 1)) :
+    ∃ (p : Nat) (s : State) (Tc : CTA) (I : List ThreadId) (A : Nat) (n : ℕ+),
+      recycleCount b τ p = g - 1 ∧ recycleCount b τ (p + 1) = g ∧
+      τ[p]? = some (Config.run s Tc) ∧ s.B b = ⟨I, A, some n⟩ ∧
+      I.length + A = (n : ℕ) ∧
+      (∀ i ∈ I, (Tc.prog i).head? = some (Cmd.sync b n)) ∧
+      τ[p + 1]? = some (Config.run
+        { E := updateMapOn s.E I true,
+          B := Function.update s.B b BarrierState.unconfigured } (Tc.wake I)) ∧
+      (∀ η ∈ genFiber T τ b g, (T.cmdAt η).bind Cmd.count? = some n) ∧
+      (∀ η ∈ genFiber T τ b g, ∀ nn : ℕ+, T.cmdAt η = some (.sync b nn) →
+        η.thread ∈ I ∧ Tc.prog η.thread = (T.prog η.thread).drop η.idx) ∧
+      (∀ i ∈ I, ∃ η ∈ genFiber T τ b g, η.thread = i ∧
+        ∃ nn : ℕ+, T.cmdAt η = some (.sync b nn)) := by
+  obtain ⟨p, hpM, hrc1, hrc2⟩ := recycleCount_hits b τ hg hcomplete
+  obtain ⟨C, C', hC, hC', hrecb⟩ := recycle_step_of_count_lt (b := b) (τ := τ) (p := p)
+    (by omega)
+  have hstep := chain_step hτ.1.1.subtrace hC hC'
+  obtain ⟨s, Tc, I, A, n, hCeq, hbst, hfull, hpark, hC'eq⟩ :=
+    stepRecyclesBarrier_elim hstep hrecb
+  subst hCeq; subst hC'eq
+  -- sync members are parked in `I`, control at the member
+  have hsync_data : ∀ η ∈ genFiber T τ b g, ∀ nn : ℕ+, T.cmdAt η = some (.sync b nn) →
+      η.thread ∈ I ∧ Tc.prog η.thread = (T.prog η.thread).drop η.idx := by
+    intro η hη nn hcmd
+    obtain ⟨hmem, hbar, hgen⟩ := mem_genFiber.mp hη
+    obtain ⟨sd, hdone⟩ := hτ.2
+    have hidx : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hmem).2
+    obtain ⟨m, hm⟩ := exists_time_of_ends_done hτ.1 hdone hidx
+    have hpg := pointGen_eq_of_time hbar hm
+    obtain ⟨E, E', hE, hE', hrecE⟩ := sync_time_recycles hm hcmd
+    have hm1 : 1 ≤ m := by
+      obtain ⟨-, -, j', -, -, hj', -, -, -, -⟩ := hm
+      omega
+    have hEsucc : recycleCount b τ (m - 1 + 1) = recycleCount b τ (m - 1) + 1 := by
+      refine recycleCount_succ_of_recycle b τ hE ?_ hrecE
+      rw [show m - 1 + 1 = m by omega]; exact hE'
+    have hup : m - 1 = p := by
+      rcases Nat.lt_trichotomy (m - 1) p with hlt | heq | hgt
+      · exfalso
+        have := recycleCount_mono b τ (show m - 1 + 1 ≤ p by omega)
+        omega
+      · exact heq
+      · exfalso
+        have := recycleCount_mono b τ (show p + 1 ≤ m - 1 by omega)
+        omega
+    obtain ⟨-, -, j', D, D', hj'm, hD, hD', hDdrop, hD'drop⟩ := hm
+    have hj'p : j' = p := by omega
+    subst hj'p
+    have hDeq : D = Config.run s Tc := by
+      rw [hD] at hC
+      exact Option.some.inj hC
+    subst hDeq
+    have hD'eq : D' = Config.run
+        { E := updateMapOn s.E I true,
+          B := Function.update s.B b BarrierState.unconfigured } (Tc.wake I) := by
+      rw [hD'] at hC'
+      exact Option.some.inj hC'
+    subst hD'eq
+    have htI : η.thread ∈ I := by
+      by_contra htn
+      have hsame : (Tc.wake I).prog η.thread = Tc.prog η.thread := by
+        simp [CTA.wake, if_neg htn]
+      have h1 : Tc.prog η.thread =
+          ((Config.run State.initial T).progOf η.thread).drop η.idx := hDdrop
+      have h2 : (Tc.wake I).prog η.thread =
+          ((Config.run State.initial T).progOf η.thread).drop (η.idx + 1) := hD'drop
+      rw [hsame, h1] at h2
+      have hlen := congrArg List.length h2
+      simp only [List.length_drop] at hlen
+      have hidx0 : η.idx < ((Config.run State.initial T).progOf η.thread).length := hidx
+      omega
+    exact ⟨htI, hDdrop⟩
+  -- every parked thread contributes a sync member
+  have hsurj : ∀ i ∈ I, ∃ η ∈ genFiber T τ b g, η.thread = i ∧
+      ∃ nn : ℕ+, T.cmdAt η = some (.sync b nn) := by
+    intro i hi
+    have hhead := hpark i hi
+    obtain ⟨rest, hrest⟩ : ∃ rest, Tc.prog i = Cmd.sync b n :: rest := by
+      cases hTt : Tc.prog i with
+      | nil => rw [hTt] at hhead; simp at hhead
+      | cons a l =>
+        rw [hTt] at hhead
+        simp only [List.head?_cons, Option.some.injEq] at hhead
+        exact ⟨l, by rw [hhead]⟩
+    have hCprog : (Config.run s Tc).progOf i = Cmd.sync b n :: rest := hrest
+    have hC'prog : (Config.run
+        { E := updateMapOn s.E I true,
+          B := Function.update s.B b BarrierState.unconfigured }
+        (Tc.wake I)).progOf i = rest := by
+      simp only [Config.progOf, CTA.wake, if_pos hi, hrest, List.tail_cons]
+    obtain ⟨htime, hcmd⟩ := exec_step_time hτ.1 hC hC' hCprog hC'prog
+    refine ⟨_, mem_genFiber.mpr ⟨mem_progPoints_of_cmdAt T hcmd, ?_, ?_⟩, rfl, n, hcmd⟩
+    · rw [hcmd]; rfl
+    · rw [pointGen_eq_of_time (by rw [hcmd]; rfl) htime]
+      simp only [Nat.add_sub_cancel]
+      omega
+  refine ⟨p, s, Tc, I, A, n, hrc1, hrc2, hC, hbst, hfull, hpark, hC', ?_,
+    hsync_data, hsurj⟩
+  intro η hη
+  obtain ⟨hmem, hbar, hgen⟩ := mem_genFiber.mp hη
+  cases hcmd : T.cmdAt η with
+  | none => rw [hcmd] at hbar; exact absurd hbar (by simp)
+  | some cmd =>
+    cases cmd with
+    | read g₀ => rw [hcmd] at hbar; simp [Cmd.barrier?] at hbar
+    | write g₀ => rw [hcmd] at hbar; simp [Cmd.barrier?] at hbar
+    | arrive bb na =>
+      have hbb : b = bb := by
+        rw [hcmd] at hbar
+        simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hbar
+        exact hbar.symm
+      subst hbb
+      obtain ⟨m, D', s₂, hm1, hmlen, -, hD', hs₂, hpost, hrcm, -⟩ :=
+        genFiber_arrive_post_count hτ hη hcmd
+      -- `m ≠ p + 1`: the post-arrive state is configured, the post-recycle one is not
+      have hmp : m ≠ p + 1 := by
+        intro hmeq
+        subst hmeq
+        rw [hD'] at hC'
+        obtain rfl := Option.some.inj hC'
+        simp only [Config.state?, Option.some.injEq] at hs₂
+        subst hs₂
+        simp [Function.update_self, BarrierState.unconfigured] at hpost
+      -- `m ≤ p`: a later registration would sit past the `g`-th recycle
+      have hmle : m ≤ p := by
+        by_contra hcon
+        have hple : p + 1 ≤ m - 1 := by omega
+        have := recycleCount_mono b τ hple
+        omega
+      -- the window `[m, p]` is recycle-free: persist the count to the recycle
+      have hrcmp : recycleCount b τ m = recycleCount b τ p := by
+        have h1 := recycleCount_mono b τ (show m - 1 ≤ m by omega)
+        have h2 := recycleCount_mono b τ hmle
+        omega
+      have hcount := count_persists hτ.1.1.subtrace p m hmle hrcmp hD' hs₂ hpost hC rfl
+      rw [hbst] at hcount
+      simpa [Cmd.count?] using hcount.symm
+    | sync bb na =>
+      have hbb : b = bb := by
+        rw [hcmd] at hbar
+        simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hbar
+        exact hbar.symm
+      subst hbb
+      obtain ⟨htI, hpt⟩ := hsync_data η hη na hcmd
+      have hidx : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hmem).2
+      have hhd := hpark η.thread htI
+      rw [hpt, List.drop_eq_getElem_cons hidx, List.head?_cons] at hhd
+      have hcm2 : (T.prog η.thread)[η.idx]? = some (Cmd.sync b na) := hcmd
+      obtain ⟨hlt2, hget⟩ := List.getElem?_eq_some_iff.mp hcm2
+      rw [hget] at hhd
+      simp only [Option.some.injEq, Cmd.sync.injEq] at hhd
+      simp [Cmd.count?, hhd.2]
+
+/-- **L0b — fiber parameter agreement.** Any two members of a fiber of the successful
+reference trace carry the same count parameter: all of `F_g(b)` registered into `τ`'s
+round `g` of `b`, whose configured count every registration matched without error.
+Completed rounds read the common count off `genFiber_round_data`; the partial round is
+all-`arrive`s (L0d), each of whose parameters persists to the final configuration. -/
+theorem genFiber_count_eq {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    {b : Barrier} {g : Nat} (hg : 1 ≤ g) {η₁ η₂ : ProgPoint}
+    (h₁ : η₁ ∈ genFiber T τ b g) (h₂ : η₂ ∈ genFiber T τ b g) :
+    (T.cmdAt η₁).bind Cmd.count? = (T.cmdAt η₂).bind Cmd.count? := by
+  by_cases hcomp : g ≤ recycleCount b τ (τ.length - 1)
+  · obtain ⟨p, s, Tc, I, A, n, -, -, -, -, -, -, -, hall, -, -⟩ :=
+      genFiber_round_data hτ hg hcomp
+    rw [hall η₁ h₁, hall η₂ h₂]
+  · obtain ⟨sd, hdone⟩ := hτ.2
+    have hR : g = recycleCount b τ (τ.length - 1) + 1 := by
+      obtain ⟨hmem, hbar, hgen⟩ := mem_genFiber.mp h₁
+      have hidx : η₁.idx < (T.prog η₁.thread).length :=
+        ((mem_progPoints_iff T η₁).mp hmem).2
+      obtain ⟨m, hm⟩ := exists_time_of_ends_done hτ.1 hdone hidx
+      have hpg := pointGen_eq_of_time hbar hm
+      have hmlt : m < τ.length := by
+        obtain ⟨-, -, j, C₁, C₂, hj, -, hCj1, -, -⟩ := hm
+        have := (List.getElem?_eq_some_iff.mp hCj1).1
+        omega
+      have := recycleCount_mono b τ (show m - 1 ≤ τ.length - 1 by omega)
+      omega
+    have hkey : ∀ η' ∈ genFiber T τ b g, ∃ na : ℕ+,
+        (T.cmdAt η').bind Cmd.count? = some na ∧ (sd.B b).count = some na := by
+      intro η' hη'
+      obtain ⟨hmem', hbar', -⟩ := mem_genFiber.mp hη'
+      cases hcmd : T.cmdAt η' with
+      | none => rw [hcmd] at hbar'; exact absurd hbar' (by simp)
+      | some cmd =>
+        cases cmd with
+        | read g₀ => rw [hcmd] at hbar'; simp [Cmd.barrier?] at hbar'
+        | write g₀ => rw [hcmd] at hbar'; simp [Cmd.barrier?] at hbar'
+        | sync bb na =>
+          exfalso
+          have hbb : b = bb := by
+            rw [hcmd] at hbar'
+            simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hbar'
+            exact hbar'.symm
+          subst hbb
+          exact genFiber_partial_no_sync hτ (hR ▸ hη') na hcmd
+        | arrive bb na =>
+          have hbb : b = bb := by
+            rw [hcmd] at hbar'
+            simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hbar'
+            exact hbar'.symm
+          subst hbb
+          obtain ⟨m, D', s₂, hm1, hmlen, -, hD', hs₂, hpost, hrcm, -⟩ :=
+            genFiber_arrive_post_count hτ hη' hcmd
+          have hlast : τ[τ.length - 1]? = some (Config.done sd) := by
+            rw [← List.getLast?_eq_getElem?]; exact hdone
+          have hrcend : recycleCount b τ m = recycleCount b τ (τ.length - 1) := by
+            have hmn1 := recycleCount_mono b τ (show m - 1 ≤ m by omega)
+            have hmn2 := recycleCount_mono b τ (show m ≤ τ.length - 1 by omega)
+            omega
+          have hcount := count_persists hτ.1.1.subtrace (τ.length - 1) m
+            (by omega) hrcend hD' hs₂ hpost hlast rfl
+          exact ⟨na, by simp [Cmd.count?], hcount⟩
+    obtain ⟨n₁, hc₁, he₁⟩ := hkey η₁ h₁
+    obtain ⟨n₂, hc₂, he₂⟩ := hkey η₂ h₂
+    rw [hc₁, hc₂, ← he₁, he₂]
+
+/-- **L0 — lower fibers are inhabited.** If some op has generation `g + 1` on `b` in the
+reference trace, then `b` recycled at least `g ≥ 1` times before it, and the `g`-th
+recycle consumed at least one registration — an op of generation `g`. Supplies the
+checker pair's source `c1` in the "early" contradiction. -/
+theorem genFiber_nonempty_of_succ {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    {b : Barrier} {g : Nat} (hg : 1 ≤ g) {η : ProgPoint}
+    (hη : η ∈ genFiber T τ b (g + 1)) :
+    ∃ η', η' ∈ genFiber T τ b g := by
+  obtain ⟨hmem, hbar, hgen⟩ := mem_genFiber.mp hη
+  obtain ⟨sd, hdone⟩ := hτ.2
+  have hidx : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hmem).2
+  obtain ⟨m, hm⟩ := exists_time_of_ends_done hτ.1 hdone hidx
+  have hpg := pointGen_eq_of_time hbar hm
+  -- locate the `g`-th recycle of `b` (η's generation `g + 1` puts `g` recycles before it)
+  obtain ⟨p, hpm, hrc1, hrc2⟩ :=
+    recycleCount_hits b τ hg (show g ≤ recycleCount b τ (m - 1) by omega)
+  obtain ⟨C, C', hC, hC', hrecb⟩ := recycle_step_of_count_lt (b := b) (τ := τ) (p := p)
+    (by omega)
+  have hstep := chain_step hτ.1.1.subtrace hC hC'
+  obtain ⟨s, Tc, I, A, n, hCeq, hbst, hfull, hpark, hC'eq⟩ :=
+    stepRecyclesBarrier_elim hstep hrecb
+  subst hCeq; subst hC'eq
+  rcases hI : I with _ | ⟨t, I'⟩
+  · -- the round was all-`arrive`s: trace one arrival back through the window
+    subst hI
+    have hA : A = (n : ℕ) := by simpa using hfull
+    -- a window start `w ≤ p` with zero arrivals and recycle count `g - 1`
+    obtain ⟨w, hwp, hw0, hwrc⟩ :
+        ∃ w, w ≤ p ∧
+          (∃ Cw sw, τ[w]? = some Cw ∧ Cw.state? = some sw ∧ (sw.B b).arrived = 0) ∧
+          recycleCount b τ w = g - 1 := by
+      rcases Nat.eq_or_lt_of_le hg with hg1 | hg2
+      · refine ⟨0, by omega, ⟨Config.run State.initial T, State.initial, ?_, rfl, rfl⟩, ?_⟩
+        · have hgen0 : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+          rw [hgen0]; exact hτ.1.2
+        · have h0 : recycleCount b τ 0 = 0 := by unfold recycleCount; simp
+          omega
+      · obtain ⟨q, hqp, hq1, hq2⟩ := recycleCount_hits b τ
+          (show 1 ≤ g - 1 by omega) (show g - 1 ≤ recycleCount b τ p by omega)
+        obtain ⟨D, D', hD, hD', hrecD⟩ := recycle_step_of_count_lt (b := b) (τ := τ)
+          (p := q) (by omega)
+        have hstepD := chain_step hτ.1.1.subtrace hD hD'
+        obtain ⟨sD, TD, ID, AD, nD, hDeq, -, -, -, hD'eq⟩ :=
+          stepRecyclesBarrier_elim hstepD hrecD
+        subst hD'eq
+        refine ⟨q + 1, by omega, ⟨_, _, hD', rfl, ?_⟩, by omega⟩
+        simp [Function.update_self, BarrierState.unconfigured]
+    obtain ⟨Cw, sw, hCw, hsw, hw0'⟩ := hw0
+    -- the arrival counter, as a function of the trace index
+    set f : Nat → Nat := fun l =>
+      (((τ[l]?).bind Config.state?).map fun st => (st.B b).arrived).getD 0 with hf
+    have hfw : f w = 0 := by simp [hf, hCw, hsw, hw0']
+    have hfp : f p = (n : ℕ) := by
+      simp [hf, hC, Config.state?, hbst, hA]
+    obtain ⟨j, hjw, hjp, hjlt⟩ := exists_step_increase f p w hwp
+      (by have := n.pos; omega)
+    have hjlen : j + 1 < τ.length := by
+      have := (List.getElem?_eq_some_iff.mp hC).1
+      omega
+    have hCj : τ[j]? = some τ[j] := List.getElem?_eq_getElem (by omega)
+    have hCj1 : τ[j + 1]? = some τ[j + 1] := List.getElem?_eq_getElem (by omega)
+    have hstepj := chain_step hτ.1.1.subtrace hCj hCj1
+    obtain ⟨sj, hsj⟩ : ∃ sj, (τ[j]).state? = some sj := by
+      rcases hj : τ[j] with ⟨s₁, T₁⟩ | s₁ | T₁
+      · exact ⟨s₁, rfl⟩
+      · rw [hj] at hstepj; cases hstepj
+      · rw [hj] at hstepj; cases hstepj
+    obtain ⟨sj1, hsj1⟩ : ∃ sj1, (τ[j + 1]).state? = some sj1 := by
+      rcases hj1 : τ[j + 1] with ⟨s₁, T₁⟩ | s₁ | T₁
+      · exact ⟨s₁, rfl⟩
+      · exact ⟨s₁, rfl⟩
+      · exfalso
+        have hzero : f (j + 1) = 0 := by simp [hf, hCj1, hj1, Config.state?]
+        omega
+    have hlt' : (sj.B b).arrived < (sj1.B b).arrived := by
+      have h1 : f j = (sj.B b).arrived := by simp [hf, hCj, hsj]
+      have h2 : f (j + 1) = (sj1.B b).arrived := by simp [hf, hCj1, hsj1]
+      omega
+    rcases arrived_step (b := b) hstepj hsj hsj1 with heq | ⟨i, n', rest, hCi, hC'i⟩ | hrecj
+    · exfalso; omega
+    · -- the arrival's static point has generation `g`
+      obtain ⟨htime, hcmd⟩ := exec_step_time hτ.1 hCj hCj1 hCi hC'i
+      refine ⟨_, mem_genFiber.mpr ⟨mem_progPoints_of_cmdAt T hcmd, ?_, ?_⟩⟩
+      · rw [hcmd]; rfl
+      · rw [pointGen_eq_of_time (by rw [hcmd]; rfl) htime]
+        simp only [Nat.add_sub_cancel]
+        have hm1 := recycleCount_mono b τ hjw
+        have hm2 := recycleCount_mono b τ (Nat.le_of_lt hjp)
+        omega
+    · -- a recycle of `b` strictly inside the window is impossible
+      exfalso
+      have hsucc := recycleCount_succ_of_recycle b τ hCj hCj1 hrecj
+      have hm1 := recycleCount_mono b τ hjw
+      have hm2 := recycleCount_mono b τ (show j + 1 ≤ p by omega)
+      omega
+  · -- a parked sync: woken at this recycle, generation `g`
+    subst hI
+    have hhead := hpark t (List.mem_cons_self ..)
+    obtain ⟨rest, hrest⟩ : ∃ rest, Tc.prog t = Cmd.sync b n :: rest := by
+      cases hTt : Tc.prog t with
+      | nil => rw [hTt] at hhead; simp at hhead
+      | cons a l =>
+        rw [hTt] at hhead
+        simp only [List.head?_cons, Option.some.injEq] at hhead
+        exact ⟨l, by rw [hhead]⟩
+    have hCprog : (Config.run s Tc).progOf t = Cmd.sync b n :: rest := hrest
+    have hC'prog : (Config.run
+        { E := updateMapOn s.E (t :: I') true,
+          B := Function.update s.B b BarrierState.unconfigured }
+        (Tc.wake (t :: I'))).progOf t = rest := by
+      simp only [Config.progOf, CTA.wake, if_pos (List.mem_cons_self ..), hrest,
+        List.tail_cons]
+    obtain ⟨htime, hcmd⟩ := exec_step_time hτ.1 hC hC' hCprog hC'prog
+    refine ⟨_, mem_genFiber.mpr ⟨mem_progPoints_of_cmdAt T hcmd, ?_, ?_⟩⟩
+    · rw [hcmd]; rfl
+    · rw [pointGen_eq_of_time (by rw [hcmd]; rfl) htime]
+      simp only [Nat.add_sub_cancel]
+      omega
+
+/-- `arrive`-command classifier (top-level, so its `match` auxiliary is shared between
+the census lemma and its consumers). -/
+def isArriveCmd (T : CTA) (η : ProgPoint) : Bool :=
+  match T.cmdAt η with | some (.arrive _ _) => true | _ => false
+
+/-- `sync`-command classifier; see `isArriveCmd`. -/
+def isSyncCmd (T : CTA) (η : ProgPoint) : Bool :=
+  match T.cmdAt η with | some (.sync _ _) => true | _ => false
+
+/-- The census predicate: an `arrive` member already executed by step `j`. -/
+def arriveBy (T : CTA) (τ : List Config) (j : Nat) (η : ProgPoint) : Bool :=
+  isArriveCmd T η &&
+    (match pointTime T τ η with | some m => decide (m ≤ j) | none => false)
+
+/-- **The window census.** From the start `w` of `b`'s round `g` (arrival counter zero,
+`g - 1` recycles done, every fiber time still ahead) to any index `j` still inside the
+round, `b`'s arrival counter equals the number of fiber `arrive`s executed by `j`: each
+counter increment is an `arrive` execution whose static point is a fresh fiber member,
+and nothing else moves the counter (recycles of `b` lie outside the window). -/
+theorem arrived_census {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    {b : Barrier} {g : Nat} (hg : 1 ≤ g)
+    {w : Nat} {Cw : Config} {sw : State} (hCw : τ[w]? = some Cw)
+    (hsw : Cw.state? = some sw) (hw0 : (sw.B b).arrived = 0)
+    (hwrc : recycleCount b τ w = g - 1)
+    (hlate : ∀ η ∈ genFiber T τ b g, ∀ m, pointTime T τ η = some m → w < m) :
+    ∀ (j : Nat), w ≤ j → recycleCount b τ j = g - 1 →
+    ∀ (Cj : Config) (sj : State), τ[j]? = some Cj → Cj.state? = some sj →
+    (sj.B b).arrived = (genFiber T τ b g).countP (arriveBy T τ j) := by
+  intro j hwj
+  induction j, hwj using Nat.le_induction with
+  | base =>
+    intro _ Cj sj hCj hsj
+    rw [hCw] at hCj
+    obtain rfl := Option.some.inj hCj
+    rw [hsw] at hsj
+    obtain rfl := Option.some.inj hsj
+    rw [hw0]
+    symm
+    rw [List.countP_eq_zero]
+    intro η hη
+    simp only [arriveBy, Bool.and_eq_true, not_and]
+    intro _
+    cases hpt : pointTime T τ η with
+    | none => simp
+    | some m =>
+      have := hlate η hη m hpt
+      simp only [decide_eq_true_eq]
+      omega
+  | succ j hwj ih =>
+    intro hrcj1 Cj1 sj1 hCj1 hsj1
+    have hjlt : j < τ.length := by
+      have := (List.getElem?_eq_some_iff.mp hCj1).1
+      omega
+    obtain ⟨Dj, hCj⟩ : ∃ Dj, τ[j]? = some Dj :=
+      ⟨τ[j]'hjlt, List.getElem?_eq_getElem hjlt⟩
+    have hstepj := chain_step hτ.1.1.subtrace hCj hCj1
+    obtain ⟨sj, hsj⟩ : ∃ sj, (Dj).state? = some sj := by
+      rcases hjc : Dj with ⟨s₁, T₁⟩ | s₁ | T₁
+      · exact ⟨s₁, rfl⟩
+      · rw [hjc] at hstepj; cases hstepj
+      · rw [hjc] at hstepj; cases hstepj
+    have hrcj : recycleCount b τ j = g - 1 := by
+      have h1 := recycleCount_mono b τ hwj
+      have h2 := recycleCount_mono b τ (show j ≤ j + 1 by omega)
+      omega
+    have hprev := ih hrcj Dj sj hCj hsj
+    -- executing a fiber `arrive b` at this very step bumps the counter
+    have hexec_inc : ∀ η ∈ genFiber T τ b g, ∀ nn : ℕ+,
+        T.cmdAt η = some (.arrive b nn) → pointTime T τ η = some (j + 1) →
+        (sj1.B b).arrived = (sj.B b).arrived + 1 := by
+      intro η hη nn hcm hpt
+      have htime := isTimeOf_of_pointTime hτ.1 hpt
+      obtain ⟨-, hidxlt, j₀, D, D', hj₀, hD, hD', hDdrop, hD'drop⟩ := htime
+      have hj₀j : j₀ = j := by omega
+      subst hj₀j
+      have hDeq : Dj = D := by
+        have h := hD
+        rw [hCj] at h
+        exact Option.some.inj h
+      subst hDeq
+      have hD'eq : D' = Cj1 := by
+        have h := hD'
+        rw [hCj1] at h
+        exact (Option.some.inj h).symm
+      subst hD'eq
+      have hcm' : ((Config.run State.initial T).progOf η.thread)[η.idx]? =
+          some (Cmd.arrive b nn) := hcm
+      obtain ⟨hlt0, hget0⟩ := List.getElem?_eq_some_iff.mp hcm'
+      have hDcons : (Dj).progOf η.thread = Cmd.arrive b nn ::
+          ((Config.run State.initial T).progOf η.thread).drop (η.idx + 1) := by
+        rw [hDdrop, List.drop_eq_getElem_cons hlt0, hget0]
+      obtain ⟨s₁', s₂', hs₁', hs₂', -, -, hinc⟩ :=
+        arrive_exec_decode hstepj hDcons hD'drop
+      rw [hsj] at hs₁'
+      obtain rfl := Option.some.inj hs₁'
+      rw [hsj1] at hs₂'
+      obtain rfl := Option.some.inj hs₂'
+      exact hinc
+    rcases arrived_step (b := b) hstepj hsj hsj1 with
+      heq | ⟨i, n', rest, hCi, hC'i⟩ | hrecj
+    · -- counter unchanged: no fiber `arrive` executed at `j + 1`
+      rw [heq, hprev]
+      refine List.countP_congr fun η hη => ?_
+      simp only [arriveBy, isArriveCmd]
+      cases hcm : T.cmdAt η with
+      | none => simp
+      | some cmd =>
+        cases cmd with
+        | read g₀ => simp
+        | write g₀ => simp
+        | sync bb nn => simp
+        | arrive bb nn =>
+          simp only [Bool.true_and]
+          cases hpt : pointTime T τ η with
+          | none => simp
+          | some m =>
+            simp only [decide_eq_true_eq]
+            constructor
+            · intro hmj
+              omega
+            · intro hmj1
+              rcases Nat.lt_or_ge m (j + 1) with hlt | hge
+              · omega
+              · exfalso
+                have hmeq : m = j + 1 := by omega
+                subst hmeq
+                have hbb : bb = b := by
+                  obtain ⟨-, hbar, -⟩ := mem_genFiber.mp hη
+                  rw [hcm] at hbar
+                  simpa [Cmd.barrier?] using hbar
+                subst hbb
+                have := hexec_inc η hη nn hcm hpt
+                omega
+    · -- the counter grew: exactly one fresh census member, the executed `arrive`
+      obtain ⟨htimeN, hcmdN⟩ := exec_step_time hτ.1 hCj hCj1 hCi hC'i
+      obtain ⟨s₁', s₂', hs₁', hs₂', -, -, hinc⟩ := arrive_exec_decode hstepj hCi hC'i
+      rw [hsj] at hs₁'
+      obtain rfl := Option.some.inj hs₁'
+      rw [hsj1] at hs₂'
+      obtain rfl := Option.some.inj hs₂'
+      have hηmem : (⟨i, (T.prog i).length - ((Dj).progOf i).length⟩ : ProgPoint) ∈
+          genFiber T τ b g := by
+        refine mem_genFiber.mpr ⟨mem_progPoints_of_cmdAt T hcmdN, ?_, ?_⟩
+        · rw [hcmdN]; rfl
+        · rw [pointGen_eq_of_time (by rw [hcmdN]; rfl) htimeN]
+          simp only [Nat.add_sub_cancel]
+          omega
+      have hptN : pointTime T τ ⟨i, (T.prog i).length - ((Dj).progOf i).length⟩ =
+          some (j + 1) := pointTime_eq_of_isTimeOf htimeN
+      rw [hinc, hprev]
+      symm
+      refine countP_succ_of_unique (genFiber_nodup T τ b g) hηmem ?_ ?_ ?_
+      · simp only [arriveBy, isArriveCmd, hcmdN, hptN, Bool.and_eq_true,
+          decide_eq_true_eq]
+        exact ⟨trivial, le_refl _⟩
+      · simp only [arriveBy, isArriveCmd, hcmdN, hptN]
+        simp
+      · intro x hx hxne
+        simp only [arriveBy, isArriveCmd]
+        cases hcm : T.cmdAt x with
+        | none => rfl
+        | some cmd =>
+          cases cmd with
+          | read g₀ => rfl
+          | write g₀ => rfl
+          | sync bb nn => rfl
+          | arrive bb nn =>
+            cases hpt : pointTime T τ x with
+            | none => rfl
+            | some m =>
+              rcases Nat.lt_or_ge m (j + 1) with hlt | hge
+              · have h1 : decide (m ≤ j + 1) = true := by
+                  simp only [decide_eq_true_eq]; omega
+                have h2 : decide (m ≤ j) = true := by
+                  simp only [decide_eq_true_eq]; omega
+                simp only [h1, h2]
+              · rcases Nat.lt_or_ge (j + 1) m with hlt2 | hge2
+                · have h1 : decide (m ≤ j + 1) = false := by
+                    simp only [decide_eq_false_iff_not]; omega
+                  have h2 : decide (m ≤ j) = false := by
+                    simp only [decide_eq_false_iff_not]; omega
+                  simp only [h1, h2]
+                · exfalso
+                  have hmeq : m = j + 1 := by omega
+                  subst hmeq
+                  have htimeX := isTimeOf_of_pointTime hτ.1 hpt
+                  obtain ⟨-, hidxX, j₀, D, D', hj₀, hD, hD', hXdrop, hX'drop⟩ := htimeX
+                  have hj₀j : j₀ = j := by omega
+                  subst hj₀j
+                  have hDeq : Dj = D := by
+                    have h := hD
+                    rw [hCj] at h
+                    exact Option.some.inj h
+                  subst hDeq
+                  have hD'eq : D' = Cj1 := by
+                    have h := hD'
+                    rw [hCj1] at h
+                    exact (Option.some.inj h).symm
+                  subst hD'eq
+                  have hcm' : ((Config.run State.initial T).progOf x.thread)[x.idx]? =
+                      some (Cmd.arrive bb nn) := hcm
+                  obtain ⟨hlt0, hget0⟩ := List.getElem?_eq_some_iff.mp hcm'
+                  have hXcons : (Dj).progOf x.thread = Cmd.arrive bb nn ::
+                      ((Config.run State.initial T).progOf x.thread).drop (x.idx + 1) := by
+                    rw [hXdrop, List.drop_eq_getElem_cons hlt0, hget0]
+                  have hthread : x.thread = i :=
+                    arrive_drop_thread_unique hstepj hXcons hX'drop hCi hC'i
+                  have hidxeq : x.idx = (T.prog i).length - ((Dj).progOf i).length := by
+                    have hXdrop' : (Dj).progOf i =
+                        ((Config.run State.initial T).progOf i).drop x.idx := by
+                      rw [← hthread]; exact hXdrop
+                    have hlenX := congrArg List.length hXdrop'
+                    have hidxX' : x.idx <
+                        ((Config.run State.initial T).progOf i).length := by
+                      rw [← hthread]; exact hidxX
+                    have hTlen : ((Config.run State.initial T).progOf i).length =
+                        (T.prog i).length := rfl
+                    simp only [List.length_drop] at hlenX
+                    omega
+                  exact hxne (by
+                    have hxeta : x = ⟨x.thread, x.idx⟩ := rfl
+                    rw [hxeta, hthread, hidxeq])
+    · exfalso
+      have := recycleCount_succ_of_recycle b τ hCj hCj1 hrecj
+      omega
+
+/-- **L0c — fiber size = round capacity.** If `b`'s round `g` completes in the reference
+trace (`g ≤` its total recycles), the fiber `F_g(b)` has exactly `n` members, `n` the
+(common, L0b) parameter of its members: the round consumed exactly `n` registrations,
+each a distinct program point, and every fiber member was among them. The pigeonhole
+that powers both the "late" contradiction and the fullness lemma. -/
+theorem genFiber_length {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    {b : Barrier} {g : Nat} (hg : 1 ≤ g)
+    (hcomplete : g ≤ recycleCount b τ (τ.length - 1))
+    {η : ProgPoint} (hη : η ∈ genFiber T τ b g) {n : ℕ+}
+    (hn : (T.cmdAt η).bind Cmd.count? = some n) :
+    (genFiber T τ b g).length = (n : Nat) := by
+  obtain ⟨p, s, Tc, I, A, n₀, hrc1, hrc2, hCp, hbst, hfull, hpark, hCp1, hall,
+    hsyncD, hsurj⟩ := genFiber_round_data hτ hg hcomplete
+  -- the given member pins `n` to the round count
+  have hnn : n = n₀ := by
+    have h := hall η hη
+    rw [hn] at h
+    exact Option.some.inj h
+  subst hnn
+  -- decoding `sync` members off the fiber
+  have hdecode_sync : ∀ x ∈ genFiber T τ b g, isSyncCmd T x = true →
+      ∃ nx : ℕ+, T.cmdAt x = some (.sync b nx) := by
+    intro x hxF hxs
+    obtain ⟨-, hbar', -⟩ := mem_genFiber.mp hxF
+    simp only [isSyncCmd] at hxs
+    cases hcm : T.cmdAt x with
+    | none => rw [hcm] at hxs; simp at hxs
+    | some cmd =>
+      cases cmd with
+      | read g₀ => rw [hcm] at hxs; simp at hxs
+      | write g₀ => rw [hcm] at hxs; simp at hxs
+      | arrive bb nn => rw [hcm] at hxs; simp at hxs
+      | sync bb nn =>
+        have hbb : b = bb := by
+          rw [hcm] at hbar'
+          simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hbar'
+          exact hbar'.symm
+        subst hbb
+        exact ⟨nn, rfl⟩
+  -- window start `w`: zero arrivals, `g - 1` recycles, all member times ahead
+  obtain ⟨w, hwp, Cw, sw, hCw, hsw, hw0, hwrc, hwlow⟩ :
+      ∃ w, w ≤ p ∧ ∃ (Cw : Config) (sw : State),
+        τ[w]? = some Cw ∧ Cw.state? = some sw ∧ (sw.B b).arrived = 0 ∧
+        recycleCount b τ w = g - 1 ∧
+        (w = 0 ∨ (2 ≤ g ∧ recycleCount b τ (w - 1) = g - 2)) := by
+    rcases Nat.eq_or_lt_of_le hg with hg1 | hg2
+    · refine ⟨0, by omega, Config.run State.initial T, State.initial, ?_, rfl, rfl,
+        ?_, Or.inl rfl⟩
+      · have hgen0 : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+        rw [hgen0]; exact hτ.1.2
+      · have h0 : recycleCount b τ 0 = 0 := by unfold recycleCount; simp
+        omega
+    · obtain ⟨q, hqp, hq1, hq2⟩ := recycleCount_hits b τ
+        (show 1 ≤ g - 1 by omega) (show g - 1 ≤ recycleCount b τ p by omega)
+      obtain ⟨D, D', hD, hD', hrecD⟩ := recycle_step_of_count_lt (b := b) (τ := τ)
+        (p := q) (by omega)
+      have hstepD := chain_step hτ.1.1.subtrace hD hD'
+      obtain ⟨sD, TD, ID, AD, nD, hDeq, -, -, -, hD'eq⟩ :=
+        stepRecyclesBarrier_elim hstepD hrecD
+      subst hD'eq
+      refine ⟨q + 1, by omega, _, _, hD', rfl, ?_, by omega,
+        Or.inr ⟨by omega, ?_⟩⟩
+      · simp [Function.update_self, BarrierState.unconfigured]
+      · simp only [Nat.add_sub_cancel]
+        omega
+  -- fiber times lie strictly beyond `w`
+  have hlate : ∀ η' ∈ genFiber T τ b g, ∀ m, pointTime T τ η' = some m → w < m := by
+    intro η' hη' m hpt
+    have htime := isTimeOf_of_pointTime hτ.1 hpt
+    obtain ⟨-, hbar', hgen'⟩ := mem_genFiber.mp hη'
+    have hpg := pointGen_eq_of_time hbar' htime
+    have hm1 : 1 ≤ m := by
+      obtain ⟨-, -, j₀, -, -, hj₀, -, -, -, -⟩ := htime
+      omega
+    by_contra hcon
+    rcases hwlow with rfl | ⟨hg2, hw2⟩
+    · omega
+    · have hmono : recycleCount b τ (m - 1) ≤ recycleCount b τ (w - 1) :=
+        recycleCount_mono b τ (by omega)
+      omega
+  -- the census at the recycle instant: `A` counts the executed fiber `arrive`s
+  have hcensus := arrived_census hτ hg hCw hsw hw0 hwrc hlate p hwp hrc1
+    (Config.run s Tc) s hCp rfl
+  have hA : A = (genFiber T τ b g).countP (arriveBy T τ p) := by
+    rw [hbst] at hcensus
+    simpa using hcensus
+  -- every fiber `arrive` has executed by `p`
+  have harr : (genFiber T τ b g).countP (arriveBy T τ p) =
+      (genFiber T τ b g).countP (isArriveCmd T) := by
+    refine List.countP_congr fun η' hη' => ?_
+    simp only [arriveBy, Bool.and_eq_true]
+    constructor
+    · rintro ⟨h1, -⟩
+      exact h1
+    · intro h1
+      refine ⟨h1, ?_⟩
+      obtain ⟨bb, nn, hcm⟩ : ∃ (bb : Barrier) (nn : ℕ+),
+          T.cmdAt η' = some (.arrive bb nn) := by
+        simp only [isArriveCmd] at h1
+        cases hcm : T.cmdAt η' with
+        | none => rw [hcm] at h1; simp at h1
+        | some cmd =>
+          cases cmd with
+          | read g₀ => rw [hcm] at h1; simp at h1
+          | write g₀ => rw [hcm] at h1; simp at h1
+          | sync bb nn => rw [hcm] at h1; simp at h1
+          | arrive bb nn => exact ⟨bb, nn, rfl⟩
+      have hbb : b = bb := by
+        obtain ⟨-, hbar', -⟩ := mem_genFiber.mp hη'
+        rw [hcm] at hbar'
+        simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hbar'
+        exact hbar'.symm
+      subst hbb
+      obtain ⟨m₀, D', s₂, hm₀1, hm₀len, hptm₀, hD', hs₂, hpost, hrcm₀, -⟩ :=
+        genFiber_arrive_post_count hτ hη' hcm
+      rw [hptm₀]
+      -- `m₀ ≠ p + 1`: post-arrive is configured, post-recycle is not
+      have hmp : m₀ ≠ p + 1 := by
+        intro hmeq
+        subst hmeq
+        rw [hD'] at hCp1
+        obtain rfl := Option.some.inj hCp1
+        simp only [Config.state?, Option.some.injEq] at hs₂
+        subst hs₂
+        simp [Function.update_self, BarrierState.unconfigured] at hpost
+      have hm₀le : m₀ ≤ p := by
+        by_contra hcon
+        have hple : p + 1 ≤ m₀ - 1 := by omega
+        have := recycleCount_mono b τ hple
+        omega
+      simp only [decide_eq_true_eq]
+      omega
+  -- the `sync` members are exactly the parked threads
+  have hsync_len : (genFiber T τ b g).countP (isSyncCmd T) = I.length := by
+    have hndF : ((genFiber T τ b g).filter (isSyncCmd T)).Nodup :=
+      (genFiber_nodup T τ b g).filter _
+    have hreach : Relation.ReflTransGen CTAStep (Config.run State.initial T)
+        (Config.run s Tc) := by
+      refine reaches_of_chain_getElem hτ.1.1.subtrace ?_ p _ hCp
+      have hgen0 : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+      rw [hgen0]; exact hτ.1.2
+    have hwf := WF_of_reaches hreach
+    have hndI : I.Nodup := by
+      have h := hwf.2.2.1 b
+      rw [hbst] at h
+      exact h
+    rw [List.countP_eq_length_filter]
+    rw [← List.toFinset_card_of_nodup hndF, ← List.toFinset_card_of_nodup hndI]
+    refine Finset.card_bij (fun η' _ => η'.thread) ?_ ?_ ?_
+    · intro η' hη'
+      simp only [List.mem_toFinset, List.mem_filter] at hη'
+      obtain ⟨hmemF, hsync⟩ := hη'
+      obtain ⟨nx, hcm⟩ := hdecode_sync η' hmemF hsync
+      exact List.mem_toFinset.mpr ((hsyncD η' hmemF nx hcm).1)
+    · intro x hx y hy hxy
+      simp only [List.mem_toFinset, List.mem_filter] at hx hy
+      obtain ⟨hxF, hxs⟩ := hx
+      obtain ⟨hyF, hys⟩ := hy
+      obtain ⟨nx, hcmx⟩ := hdecode_sync x hxF hxs
+      obtain ⟨ny, hcmy⟩ := hdecode_sync y hyF hys
+      obtain ⟨-, hptx⟩ := hsyncD x hxF nx hcmx
+      obtain ⟨-, hpty⟩ := hsyncD y hyF ny hcmy
+      have hxi : x.idx < (T.prog x.thread).length :=
+        ((mem_progPoints_iff T x).mp (mem_genFiber.mp hxF).1).2
+      have hyi : y.idx < (T.prog y.thread).length :=
+        ((mem_progPoints_iff T y).mp (mem_genFiber.mp hyF).1).2
+      rw [hxy] at hptx hxi
+      have hdd := hptx.symm.trans hpty
+      have hlen := congrArg List.length hdd
+      simp only [List.length_drop] at hlen
+      have hxid : x.idx = y.idx := by omega
+      have hxeta : x = ⟨x.thread, x.idx⟩ := rfl
+      have hyeta : y = ⟨y.thread, y.idx⟩ := rfl
+      rw [hxeta, hyeta, hxy, hxid]
+    · intro i hi
+      obtain ⟨η', hη'F, hth, nn, hcm⟩ := hsurj i (List.mem_toFinset.mp hi)
+      refine ⟨η', ?_, hth⟩
+      simp only [List.mem_toFinset, List.mem_filter]
+      refine ⟨hη'F, ?_⟩
+      simp [isSyncCmd, hcm]
+  -- partition the fiber into `sync`s and `arrive`s
+  have hpartition : (genFiber T τ b g).length =
+      (genFiber T τ b g).countP (isSyncCmd T) +
+      (genFiber T τ b g).countP (isArriveCmd T) := by
+    rw [List.length_eq_countP_add_countP (isSyncCmd T)]
+    congr 1
+    refine List.countP_congr fun η' hη' => ?_
+    obtain ⟨-, hbar', -⟩ := mem_genFiber.mp hη'
+    cases hcm : T.cmdAt η' with
+    | none => rw [hcm] at hbar'; exact absurd hbar' (by simp)
+    | some cmd =>
+      cases cmd with
+      | read g₀ => rw [hcm] at hbar'; simp [Cmd.barrier?] at hbar'
+      | write g₀ => rw [hcm] at hbar'; simp [Cmd.barrier?] at hbar'
+      | sync bb nn => simp [isSyncCmd, isArriveCmd, hcm]
+      | arrive bb nn => simp [isSyncCmd, isArriveCmd, hcm]
+  rw [hpartition, hsync_len, ← harr, ← hA]
+  exact hfull
+
+/-- Thread `η.thread`'s control sits exactly *at* instruction `η` in configuration `C`:
+its remaining program is the suffix of its initial program starting at `η.idx`
+(length-based, matching the repo's program-position idiom). For a registered `sync` this
+is where the pointer stays parked until the recycle. -/
+def pointerAt (T : CTA) (η : ProgPoint) (C : Config) : Prop :=
+  (C.progOf η.thread).length = (T.prog η.thread).length - η.idx
+
+/-- **Clause 2 of `Conforms`** (paper §5.2.6, the state clause), for one barrier `b`: in
+the last configuration `C` (state `s`) of the challenger trace `τ'`, with `r` recycles of
+`b` so far and `F := genFiber T τ b (r+1)` the current fiber,
+
+* `count` — if `b` is configured, its count is the parameter of every member of `F`;
+* `arrived` — the arrival count is the number of `arrive`s of `F` already executed;
+* `synced` — the parked list holds exactly the threads of `F`'s `sync`s whose control is
+  parked at them *and which are disabled*: `pointerAt` alone cannot distinguish an
+  enabled thread that has merely reached a `sync` (e.g. an idx-0 `sync` in the initial
+  configuration) from one that has registered and parked — the enabled bit does;
+* `unconfigured` — a `⊥` count means the pristine unconfigured state.
+
+(The paper phrases this as dominance against `S_g`, the reference state before round
+`g`'s recycle; the fiber-image form is equivalent — dominance tightens to equality at the
+recycle — and avoids indexing states of `τ`.) -/
+def BarrierConforms (T : CTA) (τ τ' : List Config) (C : Config) (s : State) (b : Barrier) :
+    Prop :=
+  (∀ n : ℕ+, (s.B b).count = some n →
+    ∀ η ∈ genFiber T τ b (recycleCount b τ' (τ'.length - 1) + 1),
+      (T.cmdAt η).bind Cmd.count? = some n) ∧
+  ((s.B b).arrived =
+    ((genFiber T τ b (recycleCount b τ' (τ'.length - 1) + 1)).filter fun η =>
+      isArriveCmd T η && (pointTime T τ' η).isSome).length) ∧
+  (∀ i, i ∈ (s.B b).synced ↔
+    ∃ η ∈ genFiber T τ b (recycleCount b τ' (τ'.length - 1) + 1),
+      η.thread = i ∧ (∃ n : ℕ+, T.cmdAt η = some (.sync b n)) ∧ pointerAt T η C ∧
+        s.E i = false) ∧
+  ((s.B b).count = none → s.B b = BarrierState.unconfigured)
+
+/-- **The conformance invariant** `Conforms(τ, τ')` (paper §5.2.6): the challenger trace
+`τ'` agrees with the successful reference trace `τ`. Clause 0: `τ'` has not errored.
+Clause 1: executed instructions carry their reference generations. Clause 2: each
+barrier's state is the image of its current fiber's progress (`BarrierConforms`).
+Clause 3: `initRelation` edges with an executed target have an executed source, no later
+— stated on generating edges; `Conforms.happensBefore_sound` lifts it to paths. -/
+structure Conforms (T : CTA) (τ τ' : List Config) : Prop where
+  /-- Clause 0: the challenger trace has not reached the error configuration. -/
+  no_err : ∀ T'', τ'.getLast? ≠ some (Config.err T'')
+  /-- Clause 1: generation agreement for every executed instruction. -/
+  gen_eq : ∀ η ∈ T.progPoints, ∀ m, pointTime T τ' η = some m →
+    pointGen T τ' η = pointGen T τ η
+  /-- Clause 2: each barrier's state is the image of its current fiber's progress. -/
+  state : ∀ C, τ'.getLast? = some C → ∀ s, C.state? = some s →
+    ∀ b, BarrierConforms T τ τ' C s b
+  /-- Clause 3: generating-edge soundness inside `τ'`. The conclusion asserts the
+  *existence* of the source's time — the counting argument forces execution, not merely
+  an ordering. -/
+  edge_sound : ∀ x y, (x, y) ∈ initRelation T τ →
+    ∀ m, pointTime T τ' y = some m → ∃ m' ≤ m, pointTime T τ' x = some m'
+  /-- Clause 4: **closed rounds are complete** — once `b` has recycled `g` times in
+  `τ'`, every member of the reference fiber `F_g(b)` has executed. Maintained at each
+  recycle by the clause-2 census (the closing round was full, so it had consumed the
+  entire fiber); consumed by the "late" direction of `conforms_reg_round`. -/
+  rounds_complete : ∀ (b : Barrier) (g : Nat), 1 ≤ g →
+    g ≤ recycleCount b τ' (τ'.length - 1) →
+    ∀ η ∈ genFiber T τ b g, ∃ m, pointTime T τ' η = some m
+
+/-- **The closure lift** (clause 3 for `happensBefore` paths): walking an `R`-path
+backward from an executed endpoint pulls every node on it — in particular the source —
+into the executed part of `τ'`, no later. The one place a path decomposition happens;
+each `conforms_snoc` case only ever re-establishes clause 3 on generating edges. -/
+theorem Conforms.happensBefore_sound {T : CTA} {τ τ' : List Config}
+    (h : Conforms T τ τ') {x y : ProgPoint} (hxy : happensBefore T τ x y) :
+    ∀ m, pointTime T τ' y = some m → ∃ m' ≤ m, pointTime T τ' x = some m' := by
+  induction hxy with
+  | refl => exact fun m hy => ⟨m, le_rfl, hy⟩
+  | tail _hab hbc ih =>
+    intro m hy
+    obtain ⟨mb, hmb_le, hmb⟩ := h.edge_sound _ _ hbc _ hy
+    obtain ⟨mx, hmx_le, hmx⟩ := ih _ hmb
+    exact ⟨mx, hmx_le.trans hmb_le, hmx⟩
+
+/-- **Base case of Theorem 6**: the singleton initial trace conforms — nothing has
+executed (`pointTime` on a one-element trace is `none`), no recycles have happened, and
+every barrier is unconfigured. -/
+theorem conforms_init (T : CTA) (τ : List Config) :
+    Conforms T τ [Config.run State.initial T] := by
+  have hpt : ∀ η, pointTime T [Config.run State.initial T] η = none := by
+    intro η; simp [pointTime]
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · -- clause 0: the singleton's last configuration is `run`, not `err`
+    intro T'' h
+    simp only [List.getLast?_singleton, Option.some.injEq] at h
+    exact absurd h (by simp)
+  · -- clause 1: vacuous — nothing has a time yet
+    intro η _ m hm
+    rw [hpt η] at hm
+    exact absurd hm (by simp)
+  · -- clause 2: the initial state is pristine and the fiber has no progress
+    intro C hC s hs b
+    simp only [List.getLast?_singleton, Option.some.injEq] at hC
+    subst hC
+    simp only [Config.state?, Option.some.injEq] at hs
+    subst hs
+    refine ⟨?_, ?_, ?_, fun _ => rfl⟩
+    · -- `count`: unconfigured, so the premise `count = some n` is absurd
+      intro n hn
+      exact absurd hn (by simp [State.initial, BarrierState.unconfigured])
+    · -- `arrived`: 0 = the length of an empty filter (no op has a time)
+      simp only [hpt, Option.isSome_none, Bool.and_false, List.filter_false, List.length_nil]
+      rfl
+    · -- `synced`: `[]` on the left; on the right every thread is still enabled
+      intro i
+      simp only [State.initial, BarrierState.unconfigured, List.not_mem_nil, false_iff]
+      rintro ⟨η, -, rfl, -, -, hE⟩
+      simp at hE
+  · -- clause 3: vacuous — no target has a time yet
+    intro x y _ m hm
+    rw [hpt y] at hm
+    exact absurd hm (by simp)
+  · -- clause 4: vacuous — nothing has recycled yet
+    intro b g hg1 hgle η hη
+    exfalso
+    have h0 : recycleCount b [Config.run State.initial T]
+        ([Config.run State.initial T].length - 1) = 0 := by
+      unfold recycleCount; simp
+    omega
+
+/-- **The round-targeting lemma** — the `k = g` core of Theorem 6's induction step: in a
+conforming trace whose last configuration satisfies the all-barriers-under-full guard, a
+thread whose control sits at a barrier op `η` on `b` can only be facing round
+`pointGen T τ η` (the open round index `k := r + 1` equals `η`'s reference generation
+`g`). The guard is essential: without it the open round can sit *transiently full* —
+an all-`arrive` round `g - 1` fully registered but not yet recycled — with `k = g - 1`.
+
+* `k > g` ("late") is impossible: round `g` closed, so clause 4 (`rounds_complete`) says
+  `η` itself executed — but then its pointer moved past `η`, contradicting `pointerAt`.
+* `k < g` ("early") is impossible: `g ≥ 2`, the checker supplies `η.idx ≥ 1`
+  (`idx_pos_of_check`) and, for every `c1 ∈ F_{g-1}`, a path `c1 ⤳ pred(η)`
+  (`happensBefore_of_check`); `pred(η)` executed (the pointer passed it), so the closure
+  lift forces each `c1` executed at τ'-generation `g - 1` (clause 1). A `sync` among
+  them would have recycled `b` to depth `g - 1 > r` already; so `F_{g-1}` is
+  all-`arrive`s, `r = g - 2`, and clause 2's census makes the open round hold all
+  `n_{g-1} = |F_{g-1}|` of them — full, contradicting the guard.
+
+Feeds every registration case of `conforms_snoc` and refutes the mismatch-error cases
+(whose under-fullness is exactly the `CTAStep.error` guard). -/
+theorem conforms_reg_round {T : CTA} {τ τ' : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hcheck : (CheckWellSynchronized T τ).1 = true)
+    (htr : IsTraceFrom (Config.run State.initial T) τ')
+    (hconf : Conforms T τ τ')
+    {s : State} {Tc : CTA} (hlast : τ'.getLast? = some (Config.run s Tc))
+    (hguard : ∀ b', s.B b' = BarrierState.unconfigured ∨
+      ∃ I A n, s.B b' = ⟨I, A, some n⟩ ∧ I.length + A < (n : ℕ))
+    {η : ProgPoint} (hmem : η ∈ T.progPoints) {b : Barrier}
+    (hbar : (T.cmdAt η).bind Cmd.barrier? = some b)
+    (hat : pointerAt T η (Config.run s Tc)) :
+    pointGen T τ η = recycleCount b τ' (τ'.length - 1) + 1 := by
+  obtain ⟨sd, hdone⟩ := hτ.2
+  have hidxL : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hmem).2
+  obtain ⟨mτ, hmτ⟩ := exists_time_of_ends_done hτ.1 hdone hidxL
+  have hgτ := pointGen_eq_of_time hbar hmτ
+  have hmτlt : mτ < τ.length := by
+    obtain ⟨-, -, j₀, -, C₂, hj₀, -, hC₂, -, -⟩ := hmτ
+    have := (List.getElem?_eq_some_iff.mp hC₂).1
+    omega
+  have hchain' := htr.1
+  have h0' := htr.2
+  have hlastidx : τ'[τ'.length - 1]? = some (Config.run s Tc) := by
+    rw [← List.getLast?_eq_getElem?]; exact hlast
+  have hat' : (Tc.prog η.thread).length = (T.prog η.thread).length - η.idx := hat
+  have hηfib : η ∈ genFiber T τ b (pointGen T τ η) :=
+    mem_genFiber.mpr ⟨hmem, hbar, rfl⟩
+  set g := pointGen T τ η with hgdef
+  set r := recycleCount b τ' (τ'.length - 1) with hrdef
+  rcases Nat.lt_trichotomy g (r + 1) with hlt | heq | hgt
+  · -- LATE: `g ≤ r` — the closed round consumed `η`, but its pointer is still at `η`
+    exfalso
+    have hg1 : 1 ≤ g := by omega
+    obtain ⟨m, hpt⟩ := hconf.rounds_complete b g hg1 (by omega) η hηfib
+    obtain ⟨hm1, hmlt, -, C₁, C₂, hC₁, hC₂, -, hdrop2⟩ := pointTime_spec hchain' h0' hpt
+    have hsuf := progOf_suffix_index_le hchain' η.thread hC₂
+      (show m ≤ τ'.length - 1 by omega) hlastidx
+    have hle := suffix_length_le hsuf
+    rw [hdrop2] at hle
+    simp only [List.length_drop] at hle
+    have hcast : ((Config.run s Tc).progOf η.thread).length =
+        (Tc.prog η.thread).length := rfl
+    omega
+  · exact heq
+  · -- EARLY: `r + 1 < g`
+    exfalso
+    have hg2 : 2 ≤ g := by omega
+    obtain ⟨c0, hc0⟩ := genFiber_nonempty_of_succ hτ (show 1 ≤ g - 1 by omega)
+      (show η ∈ genFiber T τ b (g - 1 + 1) from by
+        rw [show g - 1 + 1 = g by omega]; exact hηfib)
+    obtain ⟨hc0mem, hc0bar, hc0gen⟩ := mem_genFiber.mp hc0
+    have hidx1 : 1 ≤ η.idx := idx_pos_of_check hcheck hc0mem hc0bar hmem hbar (by omega)
+    -- `pred(η)` has executed in `τ'` (the pointer moved past it)
+    obtain ⟨m3, hptc3⟩ : ∃ m3, pointTime T τ' ⟨η.thread, η.idx - 1⟩ = some m3 := by
+      refine exists_pointTime_of_passed hchain' h0' hlast (by omega) ?_
+      change (Tc.prog η.thread).length + (η.idx - 1 + 1) ≤ (T.prog η.thread).length
+      omega
+    -- every `F_{g-1}` member executed in `τ'`, at τ'-generation `g - 1`
+    have hall : ∀ c1 ∈ genFiber T τ b (g - 1), ∃ m1, m1 ≤ m3 ∧
+        pointTime T τ' c1 = some m1 ∧ recycleCount b τ' (m1 - 1) = g - 2 := by
+      intro c1 hc1
+      obtain ⟨hc1mem, hc1bar, hc1gen⟩ := mem_genFiber.mp hc1
+      have hpath := happensBefore_of_check hcheck hc1mem hc1bar hmem hbar (by omega) hidx1
+      obtain ⟨m1, hm1le, hm1⟩ := hconf.happensBefore_sound hpath m3 hptc3
+      refine ⟨m1, hm1le, hm1, ?_⟩
+      have hgen1 : pointGen T τ' c1 = pointGen T τ c1 := hconf.gen_eq c1 hc1mem m1 hm1
+      have hunf := pointGen_eq_of_pointTime hc1bar hm1
+      omega
+    -- a `sync` in `F_{g-1}` would already have recycled `b` to depth `g - 1 > r`
+    have hnosync : ∀ c1 ∈ genFiber T τ b (g - 1), ∀ nn : ℕ+,
+        T.cmdAt c1 ≠ some (.sync b nn) := by
+      intro c1 hc1 nn hcm
+      obtain ⟨m1, hm1le, hm1, hrc1⟩ := hall c1 hc1
+      obtain ⟨C₁, C₂, hC₁, hC₂, hrec⟩ := pointTime_sync_recycles hchain' h0' hm1 hcm
+      obtain ⟨hm1a, hm1lt, -⟩ := pointTime_spec hchain' h0' hm1
+      have hCC' : τ'[m1 - 1 + 1]? = some C₂ := by
+        rw [show m1 - 1 + 1 = m1 by omega]; exact hC₂
+      have hsucc := recycleCount_succ_of_recycle b τ' hC₁ hCC' hrec
+      have hmono := recycleCount_mono b τ' (show m1 - 1 + 1 ≤ τ'.length - 1 by omega)
+      omega
+    -- so the open round is exactly `g - 1` …
+    have hrg : r = g - 2 := by
+      obtain ⟨m1, -, hm1, hrc1⟩ := hall c0 hc0
+      have hm1lt : m1 < τ'.length := (pointTime_spec hchain' h0' hm1).2.1
+      have hmono := recycleCount_mono b τ' (show m1 - 1 ≤ τ'.length - 1 by omega)
+      omega
+    -- … and clause 2's census says it already holds the entire fiber
+    have hfilter : (genFiber T τ b (g - 1)).filter (fun η' =>
+        isArriveCmd T η' && (pointTime T τ' η').isSome) = genFiber T τ b (g - 1) := by
+      rw [List.filter_eq_self]
+      intro c1 hc1
+      obtain ⟨hc1mem, hc1bar, -⟩ := mem_genFiber.mp hc1
+      obtain ⟨m1, -, hm1, -⟩ := hall c1 hc1
+      cases hcm : T.cmdAt c1 with
+      | none => rw [hcm] at hc1bar; exact absurd hc1bar (by simp)
+      | some cmd =>
+        cases cmd with
+        | read g₀ => rw [hcm] at hc1bar; simp [Cmd.barrier?] at hc1bar
+        | write g₀ => rw [hcm] at hc1bar; simp [Cmd.barrier?] at hc1bar
+        | sync bb nn =>
+          exfalso
+          have hbb : b = bb := by
+            rw [hcm] at hc1bar
+            simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hc1bar
+            exact hc1bar.symm
+          subst hbb
+          exact hnosync c1 hc1 nn hcm
+        | arrive bb nn =>
+          simp [isArriveCmd, hcm, hm1]
+    -- `c0` is an `arrive` with some parameter, pinning the fiber's size
+    obtain ⟨nn₀, hcm₀⟩ : ∃ nn₀ : ℕ+, T.cmdAt c0 = some (.arrive b nn₀) := by
+      cases hcm : T.cmdAt c0 with
+      | none => rw [hcm] at hc0bar; exact absurd hc0bar (by simp)
+      | some cmd =>
+        cases cmd with
+        | read g₀ => rw [hcm] at hc0bar; simp [Cmd.barrier?] at hc0bar
+        | write g₀ => rw [hcm] at hc0bar; simp [Cmd.barrier?] at hc0bar
+        | sync bb nn =>
+          exfalso
+          have hbb : b = bb := by
+            rw [hcm] at hc0bar
+            simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hc0bar
+            exact hc0bar.symm
+          subst hbb
+          exact hnosync c0 hc0 nn hcm
+        | arrive bb nn =>
+          have hbb : b = bb := by
+            rw [hcm] at hc0bar
+            simp only [Option.bind_some, Cmd.barrier?, Option.some.injEq] at hc0bar
+            exact hc0bar.symm
+          subst hbb
+          exact ⟨nn, rfl⟩
+    have hτcomplete : g - 1 ≤ recycleCount b τ (τ.length - 1) := by
+      have hmono := recycleCount_mono b τ (show mτ - 1 ≤ τ.length - 1 by omega)
+      omega
+    have hlen := genFiber_length hτ (show 1 ≤ g - 1 by omega) hτcomplete hc0
+      (show (T.cmdAt c0).bind Cmd.count? = some nn₀ from by rw [hcm₀]; rfl)
+    -- clause 2 at the last configuration
+    obtain ⟨hcount, harr, -, -⟩ := hconf.state _ hlast s rfl b
+    have hfib_idx : r + 1 = g - 1 := by omega
+    rw [hfib_idx] at harr hcount
+    rw [hfilter, hlen] at harr
+    -- the guard at `b` is violated: the open round is full
+    rcases hguard b with hbu | ⟨I', A', n', hbeq, hltn⟩
+    · rw [hbu] at harr
+      have hpos := nn₀.pos
+      simp [BarrierState.unconfigured] at harr
+      omega
+    · have hn' : (T.cmdAt c0).bind Cmd.count? = some n' :=
+        hcount n' (by rw [hbeq]) c0 hc0
+      rw [hcm₀] at hn'
+      simp only [Option.bind_some, Cmd.count?, Option.some.injEq] at hn'
+      rw [hbeq] at harr
+      have harr' : A' = (nn₀ : ℕ) := harr
+      have hn'' : (nn₀ : ℕ) = (n' : ℕ) := by rw [hn']
+      omega
+
+/-- **The fullness pigeonhole**: in a conforming trace, a full barrier's current round
+already holds its *entire* fiber — every member is executed (`arrive`s) or parked
+(`sync`s). Powers the recycle case of `conforms_snoc` (the woken syncs are exactly the
+fiber's syncs, and the fiber's arrives all executed — discharging the arrive→sync and
+sync↔sync edges of clause 3) and the "early/all-arrives" corner of `conforms_reg_round`. -/
+theorem conforms_full_fiber {T : CTA} {τ τ' : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (htr : IsTraceFrom (Config.run State.initial T) τ')
+    (hconf : Conforms T τ τ')
+    {C : Config} (hlast : τ'.getLast? = some C) {s : State} (hs : C.state? = some s)
+    {b : Barrier} (hfull : (s.B b).isFull = true) :
+    ∀ η ∈ genFiber T τ b (recycleCount b τ' (τ'.length - 1) + 1),
+      (pointTime T τ' η).isSome = true ∨ (η.thread ∈ (s.B b).synced ∧ pointerAt T η C) := by
+  sorry
+
+/-- **Theorem 6, induction step** (paper §5.2.6): extending a conforming trace by one CTA
+step preserves conformance. Case analysis on `hstep`:
+
+* `interleave`/`read_noop`,`write_noop` — no barrier effect; clause 3's new target
+  receives only its program-order edge.
+* `interleave`/registration (`arrive_configure`, `arrive_register`, `sync_configure`,
+  `sync_block`) — `conforms_reg_round` pins the round to the op's reference generation;
+  clauses 1/2 update mechanically; an `arrive`'s only incoming generating edge is
+  program order.
+* `recycle` — the round was full, so `conforms_full_fiber` identifies the woken syncs
+  with the fiber's syncs and the counted arrives with the fiber's arrives; the completing
+  syncs get their times (= this step), satisfying their program-order, `arrive→sync`,
+  and (mutually, at equal time) `sync↔sync` edges; the barrier resets, and the *next*
+  fiber has no executed members yet (clause 1), re-establishing clause 2.
+* `done` — state and times unchanged.
+* `error` — impossible: the guard supplies all-barriers-under-full, `conforms_reg_round`
+  pins the erroring op's round to its reference generation, and clause 2's `count` says
+  the configured count is that fiber's parameter — matching the op's own (L0b), so
+  neither `*_err_count` premise can hold. -/
+theorem conforms_snoc {T : CTA} {τ τ' : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hcheck : (CheckWellSynchronized T τ).1 = true)
+    (htr : IsTraceFrom (Config.run State.initial T) τ')
+    (hconf : Conforms T τ τ')
+    {C C' : Config} (hlast : τ'.getLast? = some C) (hstep : CTAStep C C') :
+    Conforms T τ (τ' ++ [C']) := by
+  sorry
+
+/-- **Theorem 6** (paper §5.2.6): if the reference trace is successful and the check
+passes, *every* partial trace of `T` conforms to the reference. Reverse-list induction
+from `conforms_init` via `conforms_snoc`. -/
+theorem conforms_of_traceFrom {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hcheck : (CheckWellSynchronized T τ).1 = true)
+    {τ' : List Config} (htr : IsTraceFrom (Config.run State.initial T) τ') :
+    Conforms T τ τ' := by
+  sorry
+
+/-- **Theorem 7** (paper §5.2.6): a conforming *complete* trace ends in `done`. `err` is
+clause 0. For a deadlock: every unfinished thread is parked (an enabled thread always has
+a step under the recycle-priority semantics), so take the parked sync `u` of **minimal
+τ-time**: its open round (= `pointGen T τ u` by conformance) is missing a fiber member
+`d` (clause 2 + L0c), whose thread is parked at a sync `e` strictly before `d` — and
+`t_τ(e) < t_τ(d) ≤ t_τ(u)` breaks minimality. (The extremal pick is essential: the
+analysis of an arbitrary parked sync yields only a locally-consistent pointer to another
+parked sync — see the plan's §4½ visualization.) -/
+theorem conforms_complete_done {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    {σ : List Config} (hσ : IsCompleteTraceFrom (Config.run State.initial T) σ)
+    (hconf : Conforms T τ σ) :
+    ∃ s, σ.getLast? = some (Config.done s) := by
+  sorry
+
 /-! ## Theorem 1 — soundness of `CheckWellSynchronized`
 
 The paper's **Theorem 1**: a successful run of the check witnesses
-well-synchronization. The paper proves it by induction on the suffixes of the
-`done`-reaching execution — *not* via Lemma 1, which would be circular (only
-well-synchronized configurations are known to have a sound `R`, yet here `R` is what
-we use to conclude well-synchronization). Stated here as a stub. -/
+well-synchronization. Assembled (the paper's Theorem 8) from Theorem 6
+(`conforms_of_traceFrom`) and Theorem 7 (`conforms_complete_done`): every complete
+challenger trace conforms and ends `done`, so every barrier op executes in it with its
+reference generation — the common, nonzero witness `Config.WellSynchronized` asks for.
+*Not* via Lemma 1, which would be circular (only well-synchronized configurations are
+known to have a sound `R`); clause 3 of `Conforms` is the non-circular, time-indexed
+replacement. -/
 
 /-- **Theorem 1.** If `τ` is a complete trace from `(I, T)` ending in `done`
 (`τ ≡ (I, T) ⤳* (F, done)`) and `CheckWellSynchronized T τ` returns `true`, then `T`
@@ -2427,7 +4389,35 @@ theorem wellSynchronized_of_check {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hcheck : (CheckWellSynchronized T τ).1 = true) :
     T.WellSynchronized := by
-  sorry
+  refine ⟨⟨State.initial, T, rfl⟩, ?_⟩
+  intro τ₁ τ₂ hτ₁ hτ₂ η hbar
+  obtain ⟨b, hbarb⟩ := hbar
+  have hbar' : (T.cmdAt η).bind Cmd.barrier? = some b := hbarb
+  have hmem : η ∈ T.progPoints := by
+    cases hc : T.cmdAt η with
+    | none => rw [hc] at hbar'; simp at hbar'
+    | some c => exact mem_progPoints_of_cmdAt T hc
+  have hidx : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hmem).2
+  -- the common generation is the reference trace's, nonzero since `η` executes in `τ`
+  obtain ⟨sd, hτdone⟩ := hτ.2
+  obtain ⟨mτ, hmτ⟩ := exists_time_of_ends_done hτ.1 hτdone hidx
+  have hgτ : pointGen T τ η = recycleCount b τ (mτ - 1) + 1 := by
+    simp only [pointGen, hbar', pointTime_eq_of_isTimeOf hmτ]
+  -- both challenger traces conform (Theorem 6) and end `done` (Theorem 7)
+  have hc₁ : Conforms T τ τ₁ := conforms_of_traceFrom hτ hcheck ⟨hτ₁.1.subtrace, hτ₁.2⟩
+  have hc₂ : Conforms T τ τ₂ := conforms_of_traceFrom hτ hcheck ⟨hτ₂.1.subtrace, hτ₂.2⟩
+  obtain ⟨s₁, hd₁⟩ := conforms_complete_done hτ hτ₁ hc₁
+  obtain ⟨s₂, hd₂⟩ := conforms_complete_done hτ hτ₂ hc₂
+  -- `η` executes in each, and clause 1 transports the reference generation
+  obtain ⟨m₁, hm₁⟩ := exists_time_of_ends_done hτ₁ hd₁ hidx
+  obtain ⟨m₂, hm₂⟩ := exists_time_of_ends_done hτ₂ hd₂ hidx
+  have hg₁ : pointGen T τ₁ η = pointGen T τ η :=
+    hc₁.gen_eq η hmem m₁ (pointTime_eq_of_isTimeOf hm₁)
+  have hg₂ : pointGen T τ₂ η = pointGen T τ η :=
+    hc₂.gen_eq η hmem m₂ (pointTime_eq_of_isTimeOf hm₂)
+  refine ⟨pointGen T τ η, by omega, ?_, ?_⟩
+  · have h := isGenOf_pointGen hbar' hm₁; rwa [hg₁] at h
+  · have h := isGenOf_pointGen hbar' hm₂; rwa [hg₂] at h
 
 /-! ## Theorem 2 — completeness of `CheckWellSynchronized`
 
@@ -3720,251 +5710,5 @@ theorem interleaveGuard_full_absurd {S : State} {b : Barrier} {I : List ThreadId
     obtain ⟨rfl, rfl, rfl⟩ := hb'
     omega
 
-/-- *(Stated, not yet proved.)* **Local confluence with generation agreement for a
-well-synchronized continuation.** From a configuration `(S, T)`, suppose:
-
-* `σ₁` is a step `(S, T) → C'` (`hσ₁`), the continuation `C'` is well-synchronized
-  (`hWS`) and has a successful trace `τ` (`hτ`);
-* a second first step `σ₂`, namely `(S, T) → C''` (`hσ₂`) — *not* required to differ
-  from `σ₁` (so `C''` may equal `C'`).
-
-Then the two divergences reconverge — there are CTA-step *paths* `C' ⤳* Cd` and
-`C'' ⤳* Cd` into a common configuration `Cd`, given as config lists `C' :: p'` and
-`C'' :: p''` (each an `IsSubtrace` ending at `Cd`) — and the recovered generations agree:
-for every complete trace `τ'` from `Cd` and every barrier instruction `η` of `(S, T)`, the
-two reconverged traces — route through `C'` then follow `τ'`, vs. route through `C''` then
-follow `τ'` — assign `η` a *common, nonzero* generation. The `(C' :: p').dropLast ++ τ'`
-splice drops the shared `Cd` (contributed by `τ'`) so the glued list is a genuine trace.
-The conclusion is phrased with `IsGenOf` in the shape of the `Config.WellSynchronized` body
-(`∃ g, g ≠ 0 ∧ IsGenOf … ∧ IsGenOf …`), so it is a drop-in when discharging
-well-synchronization of `(S, T)`.
-
-Multi-step legs (vs. a one-step `σ₃ : C' → Cd`) are forced: when `σ₁` *completes* a barrier
-(e.g. `arrive b n` with `n = 1`, or any `arrive`/`sync` that fills its barrier), the
-post-`σ₁` state has a full barrier, so the `interleave` guard blocks every replay of `σ₂`
-and no single-step `Cd` exists; the join then routes through a `recycle` leg. A single step
-is the special case `p' = [Cd]` (then `(C' :: p').dropLast ++ τ' = C' :: τ'`), and `p' = []`
-the degenerate `C' = Cd` leg.
-
-(`σ₂` need not differ from `σ₁`: if `C'' = C'` the two reconverged traces coincide and the
-claim is immediate. A natural witness for the common generation `g` is `pointGen T … η`,
-related to `IsGenOf` by `isGenOf_pointGen`.)
-
-Rohan notes: This is a (multi-step) diamond / local-confluence property that may be useful
-for proving the soundness of the well-sync algorithm.
--/
-theorem soundness_lemma_diamond
-    {S : State} {T : CTA} {C' C'' : Config}
-    (hσ₁ : CTAStep (Config.run S T) C')
-    {τ : List Config} (hτ : IsSuccessfulTraceFrom C' τ)
-    (hWS : C'.WellSynchronized)
-    -- TODO (rohany): Can we get rid of this premise?
-    -- (hcheck : (CheckWellSynchronized T (Config.run S T :: τ)).1 = true)
-    (hσ₂ : CTAStep (Config.run S T) C'') :
-    ∃ (Cd : Config) (p' p'' : List Config),
-      IsSubtrace (C' :: p') ∧ (C' :: p').getLast? = some Cd ∧
-      IsSubtrace (C'' :: p'') ∧ (C'' :: p'').getLast? = some Cd ∧
-      ∀ τ', IsCompleteTraceFrom Cd τ' →
-        ∀ η : ProgPoint, (∃ b, (η.cmd (Config.run S T)).bind Cmd.barrier? = some b) →
-          ∃ g, g ≠ 0 ∧
-            IsGenOf (Config.run S T)
-              (Config.run S T :: (C' :: p').dropLast ++ τ') η g ∧
-            IsGenOf (Config.run S T)
-              (Config.run S T :: (C'' :: p'').dropLast ++ τ') η g := by
-  -- Case on both first steps. A `CTAStep` is `interleave` (a thread takes a `ThreadStep`),
-  -- `recycle`, `done`, or `error`; on `interleave` we further case the `ThreadStep` rule
-  -- (only the six non-error rules produce a `run` target, after generalizing the
-  -- stepping thread's opaque program `T.prog i`). State-preserving no-op steps
-  -- (`read`/`write`) commute with everything and change no generation, so they are
-  -- discharged uniformly without a sub-split. `done`/`error` of σ₁ are impossible
-  -- (`C'` is well-synchronized, hence `run`); `done` of σ₂ is impossible too.
-  --
-  -- σ₂-error note: σ₂ = `error` (`C''` an `err` config) is left open. It *should*
-  -- contradict `hWS`: an erroring competing step from `(S, T)` would let the sibling
-  -- `C'` reach `err`/deadlock too, which a WS config forbids
-  -- (`Config.WellSynchronized.completeTrace_ends_done`). The missing piece is that the
-  -- error/deadlock *persists to `C'`* across σ₁'s step (plus `C'.WF`) — not available yet.
-  cases hσ₁ with
-  | @interleave _ _ _ i₁ P'₁ hi₁ _ hstep₁ =>
-    generalize hP₁ : T.prog i₁ = P₁ at hstep₁
-    cases hstep₁ with
-    | read_noop | write_noop =>
-      -- σ₁ is a state-preserving no-op (`read`/`write`): `C' = run S (T.set i₁ _ P'₁)`,
-      -- thread `i₁` advanced past its non-barrier head, state `(E, B)` untouched. Case σ₂.
-      -- For σ₂ ∈ {interleave, recycle} reconverge at `Cd` = "σ₂ applied to `C'`": σ₃ replays
-      -- σ₂ from `C'` (legal — same state `S`, σ₂'s thread/barrier untouched by the no-op),
-      -- σ₄ replays the no-op from `C''` (legal — reads/writes have no premises). The two
-      -- conclusion traces then differ only at index 1; since the no-op recycles nothing and
-      -- never executes a barrier (`η.idx ≥ 1` on `i₁`), the generations agree, and `WS(C')`
-      -- (`Cd` is a descendant of `C'`) makes them nonzero.
-      cases hσ₂ with
-      | @interleave _ _ _ i₂ _ _hi₂ _hbar₂ _hstep₂ =>
-        -- commute (σ₃ = σ₂ from `C'`, σ₄ = no-op from `C''`) then generation agreement
-        sorry
-      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
-        -- σ₂ = recycle needs barrier `b₂` *full*, but σ₁ = interleave's guard requires every
-        -- barrier under-full — impossible.
-        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
-      | done hdone _ =>
-        -- σ₂ = done: `T.IsDone` ⇒ `T.prog i₁ = []`, contradicting σ₁'s read/write head.
-        simp [hdone i₁ hi₁] at hP₁
-      | @error _ _ i₂ P'₂ hbar₂ hstep₂ =>
-        -- σ₂ = error: σ₁ is state-preserving and leaves thread `i₂` untouched, so the
-        -- erroring step replays verbatim from `C'`, giving `C' ⤳ err`. That complete trace
-        -- from `C'` ends in `err`, contradicting `hWS` (no WS config has an unexecuted sync:
-        -- `err_has_unexec_sync` + `wellSync_no_unexec_sync`).
-        exfalso
-        have hne : i₂ ≠ i₁ := by rintro rfl; rw [hP₁] at hstep₂; cases hstep₂
-        have hprog : (T.set i₁ hi₁ P'₁).prog i₂ = T.prog i₂ := by
-          change Function.update T.prog i₁ P'₁ i₂ = T.prog i₂
-          exact Function.update_of_ne hne P'₁ T.prog
-        have hC'err : CTAStep (Config.run S (T.set i₁ hi₁ P'₁))
-            (Config.err (T.set i₁ hi₁ P'₁)) := by
-          refine CTAStep.error (i := i₂) (P' := P'₂) hbar₂ ?_
-          rw [hprog]; exact hstep₂
-        have hcomplete : IsCompleteTraceFrom (Config.run S (T.set i₁ hi₁ P'₁))
-            [Config.run S (T.set i₁ hi₁ P'₁), Config.err (T.set i₁ hi₁ P'₁)] :=
-          ⟨⟨List.isChain_pair.mpr hC'err, Config.err (T.set i₁ hi₁ P'₁), by simp,
-            Or.inr (Or.inl ⟨T.set i₁ hi₁ P'₁, rfl⟩)⟩, by simp⟩
-        obtain ⟨η, hηbar, hηno⟩ :=
-          err_has_unexec_sync hcomplete ⟨S, T.set i₁ hi₁ P'₁, rfl⟩ rfl
-        exact wellSync_no_unexec_sync hWS hcomplete hηbar hηno
-    | arrive_configure _ _ =>
-      cases hσ₂ with
-      | @interleave _ _ _ i₂ _ _ _ hstep₂ =>
-        generalize _hP₂ : T.prog i₂ = P₂ at hstep₂
-        cases hstep₂ with
-        | read_noop | write_noop =>
-          -- σ₁ arrive/configure, σ₂ read/write no-op (state-preserving; trivial, symmetric)
-          sorry
-        | arrive_configure _ _ =>
-          -- σ₁ arrive/configure, σ₂ arrive/configure
-          sorry
-        | arrive_register _ _ _ _ =>
-          -- σ₁ arrive/configure, σ₂ arrive/register
-          sorry
-        | sync_configure _ _ =>
-          -- σ₁ arrive/configure, σ₂ sync/configure
-          sorry
-        | sync_block _ _ _ _ =>
-          -- σ₁ arrive/configure, σ₂ sync/block
-          sorry
-      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
-        -- σ₂ = recycle needs a full barrier, contradicting σ₁ = interleave's guard.
-        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
-      | done hdone _ =>
-        -- σ₁ arrive/configure, σ₂ done: `T.IsDone` forces `T.prog i₁ = []`, but σ₁ stepped `i₁`
-        simp [hdone i₁ hi₁] at hP₁
-      | error _ =>
-        -- σ₁ arrive/configure, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
-        sorry
-    | arrive_register _ _ _ _ =>
-      cases hσ₂ with
-      | @interleave _ _ _ i₂ _ _ _ hstep₂ =>
-        generalize _hP₂ : T.prog i₂ = P₂ at hstep₂
-        cases hstep₂ with
-        | read_noop | write_noop =>
-          -- σ₁ arrive/register, σ₂ read/write no-op (state-preserving; trivial, symmetric)
-          sorry
-        | arrive_configure _ _ =>
-          -- σ₁ arrive/register, σ₂ arrive/configure
-          sorry
-        | arrive_register _ _ _ _ =>
-          -- σ₁ arrive/register, σ₂ arrive/register
-          sorry
-        | sync_configure _ _ =>
-          -- σ₁ arrive/register, σ₂ sync/configure
-          sorry
-        | sync_block _ _ _ _ =>
-          -- σ₁ arrive/register, σ₂ sync/block
-          sorry
-      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
-        -- σ₂ = recycle needs a full barrier, contradicting σ₁ = interleave's guard.
-        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
-      | done hdone _ =>
-        -- σ₁ arrive/register, σ₂ done: `T.IsDone` forces `T.prog i₁ = []`, but σ₁ stepped `i₁`
-        simp [hdone i₁ hi₁] at hP₁
-      | error _ =>
-        -- σ₁ arrive/register, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
-        sorry
-    | sync_configure _ _ =>
-      cases hσ₂ with
-      | @interleave _ _ _ i₂ _ _ _ hstep₂ =>
-        generalize _hP₂ : T.prog i₂ = P₂ at hstep₂
-        cases hstep₂ with
-        | read_noop | write_noop =>
-          -- σ₁ sync/configure, σ₂ read/write no-op (state-preserving; trivial, symmetric)
-          sorry
-        | arrive_configure _ _ =>
-          -- σ₁ sync/configure, σ₂ arrive/configure
-          sorry
-        | arrive_register _ _ _ _ =>
-          -- σ₁ sync/configure, σ₂ arrive/register
-          sorry
-        | sync_configure _ _ =>
-          -- σ₁ sync/configure, σ₂ sync/configure
-          sorry
-        | sync_block _ _ _ _ =>
-          -- σ₁ sync/configure, σ₂ sync/block
-          sorry
-      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
-        -- σ₂ = recycle needs a full barrier, contradicting σ₁ = interleave's guard.
-        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
-      | done hdone _ =>
-        -- σ₁ sync/configure, σ₂ done: `T.IsDone` forces `T.prog i₁ = []`, but σ₁ stepped `i₁`
-        simp [hdone i₁ hi₁] at hP₁
-      | error _ =>
-        -- σ₁ sync/configure, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
-        sorry
-    | sync_block _ _ _ _ =>
-      cases hσ₂ with
-      | @interleave _ _ _ i₂ _ _ _ hstep₂ =>
-        generalize _hP₂ : T.prog i₂ = P₂ at hstep₂
-        cases hstep₂ with
-        | read_noop | write_noop =>
-          -- σ₁ sync/block, σ₂ read/write no-op (state-preserving; trivial, symmetric)
-          sorry
-        | arrive_configure _ _ =>
-          -- σ₁ sync/block, σ₂ arrive/configure
-          sorry
-        | arrive_register _ _ _ _ =>
-          -- σ₁ sync/block, σ₂ arrive/register
-          sorry
-        | sync_configure _ _ =>
-          -- σ₁ sync/block, σ₂ sync/configure
-          sorry
-        | sync_block _ _ _ _ =>
-          -- σ₁ sync/block, σ₂ sync/block
-          sorry
-      | @recycle _ _ b₂ I₂ A₂ n₂ hb₂ hfull₂ _ =>
-        -- σ₂ = recycle needs a full barrier, contradicting σ₁ = interleave's guard.
-        exact (interleaveGuard_full_absurd hb₂ hfull₂ (by assumption)).elim
-      | done hdone _ =>
-        -- σ₁ sync/block, σ₂ done: `T.IsDone` forces `T.prog i₁ = []`, but σ₁ stepped `i₁`
-        simp [hdone i₁ hi₁] at hP₁
-      | error _ =>
-        -- σ₁ sync/block, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
-        sorry
-  | recycle hb₁ hfull₁ _ =>
-    cases hσ₂ with
-    | @interleave _ _ _ _ _ _ hbar₂ _ =>
-      -- σ₂ = interleave's guard requires every barrier under-full, but σ₁ = recycle
-      -- leaves barrier `b₁` full — impossible.
-      exact (interleaveGuard_full_absurd hb₁ hfull₁ hbar₂).elim
-    | recycle _ _ _ =>
-      -- σ₁ recycle, σ₂ recycle
-      sorry
-    | done _ hnofull =>
-      -- σ₁ recycle, σ₂ done: `done` needs no full barrier, but σ₁ recycled a full one
-      exact absurd hfull₁ (by have := hnofull _ _ _ _ hb₁; omega)
-    | error _ =>
-      -- σ₁ recycle, σ₂ error: open — should contradict `hWS` (see σ₂-error note above).
-      sorry
-  | done _ _ =>
-    -- σ₁ = done: `C'` is `done`, but `hWS` forces it to be a `run` configuration — impossible.
-    exact absurd hWS.1 (by rintro ⟨_, _, h⟩; exact absurd h (by simp))
-  | error _ =>
-    -- σ₁ = error: `C'` is `err`, but `hWS` forces it to be a `run` configuration — impossible.
-    exact absurd hWS.1 (by rintro ⟨_, _, h⟩; exact absurd h (by simp))
 
 end Weft
