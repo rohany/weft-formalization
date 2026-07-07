@@ -4,6 +4,8 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Rohan Yadav
 -/
 import WeftCommon.Traces
+import Mathlib.Data.Finset.Sort
+import Mathlib.Data.Finset.Union
 
 /-!
 # Well-synchronization (Definitions 6–7, §4.1), language-independently
@@ -63,5 +65,22 @@ def WellSynchronized {γ : Type} (R : Config State Cmd → Config State Cmd → 
   ∀ τ₁ τ₂, IsCompleteTraceFrom R C₀ τ₁ → IsCompleteTraceFrom R C₀ τ₂ →
     ∀ η : ProgPoint, (∃ b, (η.cmd C₀).bind barrier? = some b) →
       ∃ g : γ, GenOf C₀ τ₁ η (some g) ∧ GenOf C₀ τ₂ η (some g)
+
+/-! ## Transitive closure of a finite edge relation
+
+The checking algorithms (Figure 4 line 17, Algorithm 2 line 17) close their
+finite edge relation `R` under transitivity; the construction is generic. -/
+
+/-- One saturation round: add a composed edge `(e.1, f.2)` whenever `e ∈ S` and
+`f ∈ R` meet at `e.2 = f.1`. -/
+def transClosureStep {α : Type*} [DecidableEq α] (R S : Finset (α × α)) : Finset (α × α) :=
+  S ∪ S.biUnion fun e => (R.filter fun f => e.2 = f.1).image fun f => (e.1, f.2)
+
+/-- The transitive closure of a relation given as a finite set of edges `R`:
+repeatedly add a composed edge `(e.1, f.2)` whenever `e ∈ S` and `f ∈ R` meet at
+`e.2 = f.1`. Saturating for `R.card` rounds suffices, since a simple path uses at
+most `|R|` edges. -/
+def transClosure {α : Type*} [DecidableEq α] (R : Finset (α × α)) : Finset (α × α) :=
+  (transClosureStep R)^[R.card] R
 
 end WeftCommon

@@ -9,6 +9,7 @@ import WeftMBarriers.Semantics
 import WeftMBarriers.Traces
 import WeftMBarriers.WellFormedness
 import WeftMBarriers.WellSynchronized
+import WeftMBarriers.CheckWellSynchronized
 
 /-!
 # Weft++ with shared-memory barriers — public interface

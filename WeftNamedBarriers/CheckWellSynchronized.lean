@@ -122,17 +122,7 @@ def pointGen (T : CTA) (τ : List Config) (η : ProgPoint) : Nat :=
 The relation `R` is a `Finset (ProgPoint × ProgPoint)` of edges; `transClosure R`
 is its transitive closure, again a finite set of pairs. -/
 
-/-- One saturation round: add a composed edge `(e.1, f.2)` whenever `e ∈ S` and
-`f ∈ R` meet at `e.2 = f.1`. -/
-def transClosureStep {α : Type*} [DecidableEq α] (R S : Finset (α × α)) : Finset (α × α) :=
-  S ∪ S.biUnion fun e => (R.filter fun f => e.2 = f.1).image fun f => (e.1, f.2)
-
-/-- The transitive closure of a relation given as a finite set of edges `R`:
-repeatedly add a composed edge `(e.1, f.2)` whenever `e ∈ S` and `f ∈ R` meet at
-`e.2 = f.1`. Saturating for `R.card` rounds suffices, since a simple path uses at
-most `|R|` edges. -/
-def transClosure {α : Type*} [DecidableEq α] (R : Finset (α × α)) : Finset (α × α) :=
-  (transClosureStep R)^[R.card] R
+export WeftCommon (transClosureStep transClosure)
 
 /-- Soundness direction of the `transClosure` characterization: every pair in the
 closure is connected by a nonempty path of `R`-edges, i.e. lies in `Relation.TransGen`
