@@ -2,6 +2,7 @@ import WeftNamedBarriers.Language
 import WeftNamedBarriers.State
 import WeftNamedBarriers.Semantics
 import WeftNamedBarriers.Traces
+import WeftNamedBarriers.WellFormedness
 import WeftNamedBarriers.WellSynchronized
 import WeftNamedBarriers.CheckWellSynchronized
 import WeftNamedBarriers.Angelic
