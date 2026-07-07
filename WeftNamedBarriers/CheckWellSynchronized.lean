@@ -38,8 +38,9 @@ always a suffix of `T.prog i`, by `CTAStep.progOf_suffix`), so a suffix is pinne
 down by its length. Instruction `k` executes at the step where thread `i`'s
 remaining length falls from `|T.prog i| − k` to `|T.prog i| − k − 1` — for a `sync`
 this is the recycle step, exactly as in Definition 3. This matches `IsTimeOf` /
-`IsGenOf` on a genuine trace from `(I, T)` (the 1-indexed `+ 1` convention, with `0`
-for a command that never executes — see the `IsGenOf` doc).
+`IsGenOf` on a genuine trace from `(I, T)` (the 1-indexed `+ 1` convention; the
+relational `IsGenOf` marks a command that never executes with `none`, while the
+`Nat`-valued `pointGen` uses `0` — see the `IsGenOf` doc).
 -/
 
 namespace Weft
@@ -711,16 +712,16 @@ which carry the remaining semantic content as stubs; `happensBefore_precise` is 
 full stub. -/
 
 /-- The computable `pointGen` *is* the generation: for a barrier command `a` that
-executes in `τ`, `IsGenOf (I, T) τ a (pointGen T τ a)` holds (`pointTime` computes the
+executes in `τ`, `IsGenOf (I, T) τ a (some (pointGen T τ a))` holds (`pointTime` computes the
 time, so `pointGen` computes `recycleCount …`). -/
 theorem isGenOf_pointGen {T : CTA} {τ : List Config} {a : ProgPoint} {bb : Barrier} {ma : Nat}
     (hbb : (T.cmdAt a).bind Cmd.barrier? = some bb)
     (hma : IsTimeOf (Config.run State.initial T) τ a ma) :
-    IsGenOf (Config.run State.initial T) τ a (pointGen T τ a) := by
+    IsGenOf (Config.run State.initial T) τ a (some (pointGen T τ a)) := by
   have hpt : pointTime T τ a = some ma := pointTime_eq_of_isTimeOf hma
   have hpg : pointGen T τ a = recycleCount bb τ (ma - 1) + 1 := by
     simp only [pointGen, hbb, hpt]
-  exact ⟨hma.1, bb, hbb, Or.inl ⟨ma, hma, hpg⟩⟩
+  exact ⟨hma.1, bb, hbb, Or.inl ⟨ma, hma, by rw [hpg]⟩⟩
 
 /-- Per-edge soundness (the core semantic content). Each edge of `initRelation T τ`
 is a genuine ordering in every complete trace from `(I, T)`:
@@ -751,13 +752,13 @@ theorem initRelation_edge_sound {T : CTA} {τ : List Config}
       exists_time_of_ends_done hτ.1 hdone ((mem_progPoints_iff T b).mp hb).2
     -- `pointGen` computes `IsGenOf` on `τ`
     have hbbar : (T.cmdAt b).bind Cmd.barrier? = some bb := by rw [hbsync]; rfl
-    have hgenA : IsGenOf (Config.run State.initial T) τ a (pointGen T τ a) :=
+    have hgenA : IsGenOf (Config.run State.initial T) τ a (some (pointGen T τ a)) :=
       isGenOf_pointGen habar hma.choose_spec
-    have hgenB : IsGenOf (Config.run State.initial T) τ b (pointGen T τ b) :=
+    have hgenB : IsGenOf (Config.run State.initial T) τ b (some (pointGen T τ b)) :=
       isGenOf_pointGen hbbar hmb.choose_spec
     -- well-synchronization transfers the generation to `τ'`
-    obtain ⟨ga, _, hgaτ, hgaτ'⟩ := hws.2 τ τ' hτ.1 hτ' a ⟨bb, habar⟩
-    obtain ⟨gb, _, hgbτ, hgbτ'⟩ := hws.2 τ τ' hτ.1 hτ' b ⟨bb, hbbar⟩
+    obtain ⟨ga, hgaτ, hgaτ'⟩ := hws.2 τ τ' hτ.1 hτ' a ⟨bb, habar⟩
+    obtain ⟨gb, hgbτ, hgbτ'⟩ := hws.2 τ τ' hτ.1 hτ' b ⟨bb, hbbar⟩
     rw [IsGenOf.unique hgaτ hgenA] at hgaτ'
     rw [IsGenOf.unique hgbτ hgenB] at hgbτ'
     rw [hgen] at hgaτ'        -- both `IsGenOf … τ' _ (pointGen T τ b)`
@@ -1688,7 +1689,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
         intro c bb mc hcbar hcpt hmc
         obtain ⟨sdτ, hdτ⟩ := hτ.2
         obtain ⟨mτ, hmτ⟩ := exists_time_of_ends_done hτ.1 hdτ ((mem_progPoints_iff T c).mp hcpt).2
-        obtain ⟨g, _, hg1, hg2⟩ := hws.2 τ tr hτ.1 htrIC c ⟨bb, hcbar⟩
+        obtain ⟨g, hg1, hg2⟩ := hws.2 τ tr hτ.1 htrIC c ⟨bb, hcbar⟩
         rw [IsGenOf.unique hg1 (isGenOf_pointGen hcbar hmτ)] at hg2
         exact isGenOf_recycleCount hg2 hcbar hmc
       -- `c_{t''} = ⟨t'', et⟩`, a `sync` on `b''`, with generation `= recycleCount b'' tr pc + 1`.
@@ -2270,12 +2271,12 @@ theorem reverse_barrier_contradiction {T : CTA} {τ : List Config}
   obtain ⟨sd, hdone⟩ := hτ.2
   obtain ⟨m1, hm1⟩ := exists_time_of_ends_done hτ.1 hdone ((mem_progPoints_iff T c1).mp hc1).2
   obtain ⟨m2, hm2⟩ := exists_time_of_ends_done hτ.1 hdone ((mem_progPoints_iff T ca).mp hca).2
-  have hgenc1 : IsGenOf (Config.run State.initial T) τ c1 (pointGen T τ c1) :=
+  have hgenc1 : IsGenOf (Config.run State.initial T) τ c1 (some (pointGen T τ c1)) :=
     isGenOf_pointGen hc1bar hm1
-  have hgenca : IsGenOf (Config.run State.initial T) τ ca (pointGen T τ ca) :=
+  have hgenca : IsGenOf (Config.run State.initial T) τ ca (some (pointGen T τ ca)) :=
     isGenOf_pointGen hcabar hm2
-  obtain ⟨g1, _, hg1τ, hg1τ'⟩ := hws.2 τ τ' hτ.1 hτ'c c1 ⟨b, hc1bar⟩
-  obtain ⟨g2, _, hg2τ, hg2τ'⟩ := hws.2 τ τ' hτ.1 hτ'c ca ⟨b, hcabar⟩
+  obtain ⟨g1, hg1τ, hg1τ'⟩ := hws.2 τ τ' hτ.1 hτ'c c1 ⟨b, hc1bar⟩
+  obtain ⟨g2, hg2τ, hg2τ'⟩ := hws.2 τ τ' hτ.1 hτ'c ca ⟨b, hcabar⟩
   rw [IsGenOf.unique hg1τ hgenc1] at hg1τ'
   rw [IsGenOf.unique hg2τ hgenca] at hg2τ'
   have hr1 : pointGen T τ c1 = recycleCount b τ' (n1 - 1) + 1 :=
@@ -7382,11 +7383,6 @@ theorem wellSynchronized_of_check {T : CTA} {τ : List Config}
     | none => rw [hc] at hbar'; simp at hbar'
     | some c => exact mem_progPoints_of_cmdAt T hc
   have hidx : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hmem).2
-  -- the common generation is the reference trace's, nonzero since `η` executes in `τ`
-  obtain ⟨sd, hτdone⟩ := hτ.2
-  obtain ⟨mτ, hmτ⟩ := exists_time_of_ends_done hτ.1 hτdone hidx
-  have hgτ : pointGen T τ η = recycleCount b τ (mτ - 1) + 1 := by
-    simp only [pointGen, hbar', pointTime_eq_of_isTimeOf hmτ]
   -- both challenger traces conform (Theorem 6) and end `done` (Theorem 7)
   have hc₁ : Conforms T τ τ₁ := conforms_of_traceFrom hτ hcheck ⟨hτ₁.1.subtrace, hτ₁.2⟩
   have hc₂ : Conforms T τ τ₂ := conforms_of_traceFrom hτ hcheck ⟨hτ₂.1.subtrace, hτ₂.2⟩
@@ -7399,7 +7395,7 @@ theorem wellSynchronized_of_check {T : CTA} {τ : List Config}
     hc₁.gen_eq η hmem m₁ (pointTime_eq_of_isTimeOf hm₁)
   have hg₂ : pointGen T τ₂ η = pointGen T τ η :=
     hc₂.gen_eq η hmem m₂ (pointTime_eq_of_isTimeOf hm₂)
-  refine ⟨pointGen T τ η, by omega, ?_, ?_⟩
+  refine ⟨pointGen T τ η, ?_, ?_⟩
   · have h := isGenOf_pointGen hbar' hm₁; rwa [hg₁] at h
   · have h := isGenOf_pointGen hbar' hm₂; rwa [hg₂] at h
 
@@ -7745,12 +7741,12 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
         IsCompleteTraceFrom (Config.run State.initial T) σ' →
         (T.cmdAt η).bind Cmd.barrier? = some bb →
         (∃ mτ, IsTimeOf (Config.run State.initial T) τ η mτ) →
-        IsGenOf (Config.run State.initial T) σ' η (pointGen T τ η) := by
+        IsGenOf (Config.run State.initial T) σ' η (some (pointGen T τ η)) := by
       intro σ' η bb hσ' hbar hex
       obtain ⟨mτ, hmτ⟩ := hex
-      have hgenτ : IsGenOf (Config.run State.initial T) τ η (pointGen T τ η) :=
+      have hgenτ : IsGenOf (Config.run State.initial T) τ η (some (pointGen T τ η)) :=
         isGenOf_pointGen hbar hmτ
-      obtain ⟨g, _, hgτ, hgσ⟩ := hws.2 τ σ' hτ.1 hσ' η ⟨bb, hbar⟩
+      obtain ⟨g, hgτ, hgσ⟩ := hws.2 τ σ' hτ.1 hσ' η ⟨bb, hbar⟩
       rwa [IsGenOf.unique hgτ hgenτ] at hgσ
     have hgenc1 : pointGen T τ c1 = recycleCount b τ' (n1 - 1) + 1 :=
       isGenOf_recycleCount (gen_in τ' c1 b hcomp hc1bar ⟨m1τ, hm1τ⟩) hc1bar hn1
@@ -8125,12 +8121,12 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
         IsCompleteTraceFrom (Config.run State.initial T) σ' →
         (T.cmdAt η).bind Cmd.barrier? = some bb →
         (∃ mτ, IsTimeOf (Config.run State.initial T) τ η mτ) →
-        IsGenOf (Config.run State.initial T) σ' η (pointGen T τ η) := by
+        IsGenOf (Config.run State.initial T) σ' η (some (pointGen T τ η)) := by
       intro σ' η bb hσ' hbar hex
       obtain ⟨mτ, hmτ⟩ := hex
-      have hgenτ : IsGenOf (Config.run State.initial T) τ η (pointGen T τ η) :=
+      have hgenτ : IsGenOf (Config.run State.initial T) τ η (some (pointGen T τ η)) :=
         isGenOf_pointGen hbar hmτ
-      obtain ⟨g, _, hgτ, hgσ⟩ := hws.2 τ σ' hτ.1 hσ' η ⟨bb, hbar⟩
+      obtain ⟨g, hgτ, hgσ⟩ := hws.2 τ σ' hτ.1 hσ' η ⟨bb, hbar⟩
       rwa [IsGenOf.unique hgτ hgenτ] at hgσ
     have hgenc1 : pointGen T τ c1 = recycleCount b τ' (n1 - 1) + 1 :=
       isGenOf_recycleCount (gen_in τ' c1 b hcomp hc1bar ⟨m1τ, hm1τ⟩) hc1bar hn1
@@ -8386,8 +8382,9 @@ theorem firstInstr_contradiction {T : CTA} {τ : List Config}
   obtain ⟨sd, hdone⟩ := hτ.2
   have hc2L : c2.idx < (T.prog c2.thread).length := ((mem_progPoints_iff T c2).mp hc2).2
   obtain ⟨mτ, hmτ⟩ := exists_time_of_ends_done hτ.1 hdone hc2L
-  obtain ⟨g, _, hgτ, hgτ''⟩ := hws.2 τ τ'' hτ.1 hcomp'' c2 ⟨b, hbar2⟩
-  have hgeq : g = pointGen T τ c2 := IsGenOf.unique hgτ (isGenOf_pointGen hbar2 hmτ)
+  obtain ⟨g, hgτ, hgτ''⟩ := hws.2 τ τ'' hτ.1 hcomp'' c2 ⟨b, hbar2⟩
+  have hgeq : g = pointGen T τ c2 :=
+    Option.some.inj (IsGenOf.unique hgτ (isGenOf_pointGen hbar2 hmτ))
   rw [hgeq] at hgτ''
   obtain ⟨_, b', hb'cmd, hcase⟩ := hgτ''
   rcases hcase with ⟨mm, hmm, hgenrec⟩ | ⟨h0eq, _⟩
@@ -8395,8 +8392,9 @@ theorem firstInstr_contradiction {T : CTA} {τ : List Config}
       have hh : (T.cmdAt c2).bind Cmd.barrier? = some b' := hb'cmd
       rw [hbar2] at hh; exact (Option.some.inj hh).symm
     subst hbb'
-    rw [hrc mm hmm] at hgenrec; omega
-  · rw [h0eq] at hge2; omega
+    have hgenrec' := Option.some.inj hgenrec
+    rw [hrc mm hmm] at hgenrec'; omega
+  · exact nomatch h0eq
 
 /-- **`2 ≤ pointGen` core of the predecessor-less case.** A barrier op `c2` that is its
 thread's first instruction (`c2.idx = 0`) but is assigned generation `≥ 2` by the witness
@@ -8572,16 +8570,16 @@ theorem firstInstr_highGen_not_wellSynchronized {T : CTA} {τ : List Config}
       obtain ⟨sd, hdone⟩ := hτ.2
       have hc2L : c2.idx < (T.prog c2.thread).length := ((mem_progPoints_iff T c2).mp hc2).2
       obtain ⟨mτ, hmτ⟩ := exists_time_of_ends_done hτ.1 hdone hc2L
-      have hgenc2 : IsGenOf (Config.run State.initial T) τ c2 (pointGen T τ c2) :=
+      have hgenc2 : IsGenOf (Config.run State.initial T) τ c2 (some (pointGen T τ c2)) :=
         isGenOf_pointGen hbar2 hmτ
       have hc1L : c1.idx < (T.prog c1.thread).length := ((mem_progPoints_iff T c1).mp hc1).2
       obtain ⟨mτ1, hmτ1⟩ := exists_time_of_ends_done hτ.1 hdone hc1L
       have hpc1 : 1 ≤ pointGen T τ c1 := by
         have hh := isGenOf_recycleCount (isGenOf_pointGen hc1bar hmτ1) hc1bar hmτ1; omega
       have hge2 : 2 ≤ pointGen T τ c2 := by omega
-      obtain ⟨g, _, hgτ, hgτ''⟩ :=
+      obtain ⟨g, hgτ, hgτ''⟩ :=
         hws.2 τ (Config.run State.initial T :: τr) hτ.1 hcomp'' c2 ⟨b, hbar2⟩
-      have hgeq : g = pointGen T τ c2 := IsGenOf.unique hgτ hgenc2
+      have hgeq : g = pointGen T τ c2 := Option.some.inj (IsGenOf.unique hgτ hgenc2)
       rw [hgeq] at hgτ''
       obtain ⟨_, b', hb'cmd, hcase⟩ := hgτ''
       rcases hcase with ⟨mm, hmm, hgenrec⟩ | ⟨h0eq, _⟩
@@ -8594,8 +8592,9 @@ theorem firstInstr_highGen_not_wellSynchronized {T : CTA} {τ : List Config}
         subst hbb'
         rw [hc2eq] at hmm
         have hrc0 := firstSync_recycleCount_zero hcomp'' hprogT hC1'' hsync1 hprog1 hmm
-        rw [hrc0] at hgenrec; omega
-      · rw [h0eq] at hge2; omega
+        have hgenrec' := Option.some.inj hgenrec
+        rw [hrc0] at hgenrec'; omega
+      · exact nomatch h0eq
 
 /-- **Theorem 2 (completeness).** If `τ` is a complete trace from `(I, T)` ending in
 `done` (`τ ≡ (I, T) ⤳* (F, done)`) and `CheckWellSynchronized T τ` returns `false`,
