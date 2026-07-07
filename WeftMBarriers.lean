@@ -5,6 +5,7 @@ Authors: Rohan Yadav
 -/
 import WeftMBarriers.Language
 import WeftMBarriers.State
+import WeftMBarriers.Semantics
 
 /-!
 # Weft++ with shared-memory barriers — public interface

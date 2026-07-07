@@ -222,7 +222,7 @@ inductive CTAStep : Config → Config → Prop where
       (hstep : ThreadStep (.run s i (T.prog i)) (.err i P')) :
       CTAStep (.run s T) (.err T)
 
-@[inherit_doc ThreadStep] infix:40 " ⤳ₜ " => ThreadStep
-@[inherit_doc CTAStep] infix:40 " ⤳ " => CTAStep
+@[inherit_doc ThreadStep] scoped infix:40 " ⤳ₜ " => ThreadStep
+@[inherit_doc CTAStep] scoped infix:40 " ⤳ " => CTAStep
 
 end Weft
