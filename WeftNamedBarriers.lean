@@ -1,11 +1,11 @@
-import Weft.Language
-import Weft.State
-import Weft.Semantics
-import Weft.Traces
-import Weft.WellSynchronized
-import Weft.CheckWellSynchronized
-import Weft.Angelic
-import Weft.Looping
+import WeftNamedBarriers.Language
+import WeftNamedBarriers.State
+import WeftNamedBarriers.Semantics
+import WeftNamedBarriers.Traces
+import WeftNamedBarriers.WellSynchronized
+import WeftNamedBarriers.CheckWellSynchronized
+import WeftNamedBarriers.Angelic
+import WeftNamedBarriers.Looping
 
 namespace Weft
 

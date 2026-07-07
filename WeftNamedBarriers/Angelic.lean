@@ -3,8 +3,8 @@ Copyright (c) 2026 Stanford University. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Rohan Yadav
 -/
-import Weft.WellSynchronized
-import Weft.CheckWellSynchronized
+import WeftNamedBarriers.WellSynchronized
+import WeftNamedBarriers.CheckWellSynchronized
 
 /-!
 # Sequential composition and angelic completion

@@ -3,7 +3,7 @@ Copyright (c) 2026 Stanford University. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Rohan Yadav
 -/
-import Weft.Language
+import WeftNamedBarriers.Language
 import Mathlib.Logic.Function.Basic
 
 /-!
