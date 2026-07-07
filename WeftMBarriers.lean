@@ -7,6 +7,7 @@ import WeftMBarriers.Language
 import WeftMBarriers.State
 import WeftMBarriers.Semantics
 import WeftMBarriers.Traces
+import WeftMBarriers.WellFormedness
 
 /-!
 # Weft++ with shared-memory barriers — public interface
