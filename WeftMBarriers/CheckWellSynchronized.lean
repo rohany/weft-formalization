@@ -33,11 +33,13 @@ independent. Algorithm 2 extends Figure 4 with the mbarrier edges and checks:
   `arrive_mb` — Algorithm 2's `Reg`; note this already incorporates the fix
   applied to the named-barrier port (sources are *all* registering operations,
   not only `sync`s).
-* **wait pinning** (lines 23–28) — for each `w ≡ wait_mb sb ph` of observed
-  generation `g`: if `1 ≤ g`, `w` must have an in-thread predecessor (line 25,
-  with the bound adjusted from `2` to `1`); and if the next generation has any
-  registrants (`Reg(sb, g+1) ≠ ∅`), `w` must happen-before one of them
-  (line 27) — an upper bound pinning `w` before the completion of `g + 1`.
+* **wait pinning** (lines 23–30) — for each `w ≡ wait_mb sb ph` of observed
+  generation `g`: if `1 ≤ g`, `w` must have an in-thread predecessor `c3`
+  (lines 25–26), and every registrant of `Reg(sb, g−1)` must happen-before
+  `c3` (lines 27–28) — a lower bound: generation `g − 1` completes before `w`;
+  and if the next generation has any registrants (`Reg(sb, g+1) ≠ ∅`), `w`
+  must happen-before one of them (lines 29–30) — an upper bound pinning `w`
+  before the completion of `g + 1`.
 * **initialization ordering** (beyond Algorithm 2 as written) — every
   `init_mb sb _` must happen-before every *use* of `sb` (its `arrive_mb`s and
   `wait_mb`s): using an uninitialized mbarrier is an error, so a schedule that
@@ -59,9 +61,9 @@ independent. Algorithm 2 extends Figure 4 with the mbarrier edges and checks:
 * **Reflexivity via the disjunct**: Algorithm 2 seeds `R` with the diagonal
   (line 8) because its checks read `R` as `≤`. The executable closure `hb`
   carries only the irreflexive part (a finite set cannot carry the diagonal of
-  the infinite `ProgPoint`), so the registrant check accepts `c1 = c3`
-  directly. The wait check needs no such accommodation — a wait is never a
-  registrant, so `w ≠ c⁺` always.
+  the infinite `ProgPoint`), so the registrant check and the wait lower bound
+  accept `c1 = c3` (resp. `c = c3`) directly. The wait *upper* bound needs no
+  such accommodation — a wait is never a registrant, so `w ≠ c⁺` always.
 
 ## Computable `Gen⁺(τ)` (`pointGen`)
 
@@ -238,9 +240,10 @@ The registrant check (lines 19–22) requires, for every registrant `c1` of
 generation `g` on barrier `b` and every registrant `c2` of generation `g + 1`
 on `b` with in-thread predecessor `c3`, that `hb` already orders `c1 ≤ c3`;
 a predecessor-less such `c2` (`c2.idx = 0`) rejects outright (see the module
-doc). The wait checks (lines 23–28) pin each `wait_mb`'s observed generation
-from below (a generation `≥ 1` needs an in-thread predecessor) and from above
-(the wait precedes some next-generation registrant, when any exists). The
+doc). The wait checks (lines 23–30) pin each `wait_mb`'s observed generation
+from below (a generation `≥ 1` needs an in-thread predecessor, before which
+every `Reg(sb, g−1)` registrant completes) and from above (the wait precedes
+some next-generation registrant, when any exists). The
 initialization check (beyond Algorithm 2 as written) requires every use of an
 mbarrier to be ordered after its `init_mb`, and — a temporary restriction —
 each mbarrier to be initialized by at most one `init_mb` in the whole CTA. -/
@@ -269,16 +272,26 @@ def CheckWellSynchronized (T : CTA) (τ : List Config) :
               false
           else true
     | none => true
-  -- Step 4 (lines 23–28): pin each wait's observed generation.
+  -- Step 4 (lines 23–30): pin each wait's observed generation.
   let okWait : Bool := T.progPoints.all fun w =>
     match T.cmdAt w, G w with
     | some (.wait_mb sb _), some g =>
-        -- A wait observing generation `≥ 1` needs an in-thread
-        -- predecessor to pin it there.
-        (decide (g < 1) || decide (1 ≤ w.idx)) &&
-        -- line 27: if the next generation has registrants, `w` must
-        -- happen-before one of them (`w` is never a registrant, so no
-        -- reflexivity accommodation is needed).
+        -- lines 24–28: a wait observing generation `g ≥ 1` needs an in-thread
+        -- predecessor `c3` (lines 25–26), and generation `g − 1` must complete
+        -- before it: every registrant of `Reg(sb, g − 1)` happens-before `c3`
+        -- (lines 27–28, the lower bound). As in the registrant check, `c3` may
+        -- itself be the registrant (e.g. an `arrive_mb` immediately preceding
+        -- the wait), so the reflexive `c = c3` disjunct is accepted directly.
+        (decide (g < 1) ||
+          (decide (1 ≤ w.idx) &&
+            (T.progPoints.all fun c =>
+              if registrantGen T τ c = some (.inr sb, g - 1) then
+                decide (c = (⟨w.thread, w.idx - 1⟩ : ProgPoint) ∨
+                  (c, (⟨w.thread, w.idx - 1⟩ : ProgPoint)) ∈ hb)
+              else true))) &&
+        -- lines 29–30: if the next generation has registrants, `w` must
+        -- happen-before one of them (the upper bound; `w` is never a
+        -- registrant, so no reflexivity accommodation is needed).
         (let regNext : List ProgPoint := T.progPoints.filter fun cp =>
             registrantGen T τ cp = some (.inr sb, g + 1)
          regNext.isEmpty || regNext.any fun cp => decide ((w, cp) ∈ hb))
