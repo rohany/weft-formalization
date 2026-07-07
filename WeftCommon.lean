@@ -5,6 +5,7 @@ Authors: Rohan Yadav
 -/
 import WeftCommon.Language
 import WeftCommon.Traces
+import WeftCommon.WellFormedness
 
 /-!
 # WeftCommon — the shared core of the Weft language family
