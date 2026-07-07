@@ -3,9 +3,7 @@ Copyright (c) 2026 Stanford University. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Rohan Yadav
 -/
-import Mathlib.Data.Finset.Basic
-import Mathlib.Data.PNat.Basic
-import Mathlib.Logic.Function.Basic
+import WeftCommon.Language
 
 /-!
 # The Weft++ source language with shared-memory barriers (§5.2, Figure 3)
@@ -57,10 +55,7 @@ Per the papers:
 
 namespace WeftMBarriers
 
-/-- Shared-memory variable locations, denoted `g` in the paper. For simplicity
-the paper assumes all variables occupy 64 bits; the identity of a location is
-all that matters for the syntax, so we use names. -/
-abbrev Loc := String
+export WeftCommon (Loc ThreadId)
 
 /-- Named-barrier identifiers, denoted `nb`. The hardware provides `NB`
 (typically 16) named barriers; `nb` refers to a specific barrier name. -/
@@ -77,11 +72,6 @@ abbrev SharedBarrier := Nat
 an mbarrier returns to its initial state only after *two* recycles — the phase
 bit is what doubles the loop period, `fₘ(b) = 2 · f(b)` (§5.2.2). -/
 abbrev Phase := Bool
-
-/-- Thread identifiers, denoted `id` (and ranged over by `i`). Each thread
-program has a separate thread identifier (equivalent to `threadIdx.x` for the
-one-dimensional CTAs common in warp-specialized kernels). -/
-abbrev ThreadId := Nat
 
 /-- A single command `c`.
 
@@ -136,67 +126,17 @@ API and lemmas (`length`, `++`, membership, indexing, induction) for free, which
 the trace/timing arguments of §4 will need. -/
 abbrev Prog := List Cmd
 
-/-- A CTA `T = P₁ ‖ P₂ ‖ … ‖ P_N`: the parallel composition of its threads.
-
-It pairs a finite domain `ids` (the thread identifiers that exist — the `N`
-threads of the CTA, so `N = ids.card`) with a *total* program map `prog`, so
-lookups never fail (`prog i : Prog` always; a terminated thread maps to the empty
-program `[]`). The field `nil_outside_ids` couples the two: outside `ids` the
-program is empty, i.e. the support of `prog` is contained in `ids`. Hence there
-are no "ghost" threads with work outside the domain, `ids` is the fixed set of
-the CTA's threads (a terminated thread stays in `ids` with `prog i = []`), and we
-can both read/update a thread by id and quantify over the real threads via
-`ids`. A CTA has at least one thread (`ids_nonempty`), matching the paper's `N`
-threads. -/
-structure CTA where
-  /-- The thread identifiers present in this CTA — its (finite) domain. -/
-  ids : Finset ThreadId
-  /-- Each thread's remaining program; total, with terminated ids mapping to `[]`. -/
-  prog : ThreadId → Prog
-  /-- Coupling invariant: a thread outside the domain has no program left, so
-  every thread with remaining work is in `ids`. -/
-  nil_outside_ids : ∀ i ∉ ids, prog i = []
-  /-- A CTA has at least one thread — its domain is nonempty (`N ≥ 1` in the
-  paper). Preserved by every step, since `ids` never changes. -/
-  ids_nonempty : ids.Nonempty
+/-- The CTA type of the mbarrier-extended language: the shared functor
+`WeftCommon.CTA` (finite thread domain + total program map; see its
+documentation) instantiated at this language's commands. Its operations
+`set`/`wake`/`empty` and the termination predicate `IsDone` are the shared
+ones (`empty`/`IsDone` re-exported below; `set`/`wake` resolve by dot
+notation through the abbreviation). -/
+abbrev CTA := WeftCommon.CTA Cmd
 
 namespace CTA
-
-/-- Update one in-domain thread's program, keeping the domain `ids`. The
-membership hypothesis `hi` is what lets us re-establish the coupling invariant. -/
-def set (T : CTA) (i : ThreadId) (hi : i ∈ T.ids) (P : Prog) : CTA where
-  ids := T.ids
-  prog := Function.update T.prog i P
-  nil_outside_ids := by
-    intro j hj
-    have hji : j ≠ i := fun h => hj (h ▸ hi)
-    rw [Function.update_of_ne hji]
-    exact T.nil_outside_ids j hj
-  ids_nonempty := T.ids_nonempty
-
-/-- Wake the threads blocked at a recycling barrier: every thread in `I` drops its
-leading (parked `sync_nb` or `wait_mb`) command, others are unchanged. The domain
-is preserved, and the coupling holds because outside `ids` the program is already
-`[]` (and `[].tail = []`). -/
-def wake (T : CTA) (I : List ThreadId) : CTA where
-  ids := T.ids
-  prog := fun j => if j ∈ I then (T.prog j).tail else T.prog j
-  ids_nonempty := T.ids_nonempty
-  nil_outside_ids := by
-    intro j hj
-    have hnil : T.prog j = [] := T.nil_outside_ids j hj
-    by_cases h : j ∈ I <;> simp [h, hnil]
-
+export WeftCommon.CTA (empty IsDone)
 end CTA
-
-/-- The **empty CTA** on a thread set `ids`: every thread's program is empty. It carries no
-instructions, so it is the unit of sequential composition (`empty ⨾ T` and `T ⨾ empty` have `T`'s
-program up to `[]`-append) and is trivially well-synchronized. -/
-def CTA.empty (ids : Finset ThreadId) (hne : ids.Nonempty) : CTA where
-  ids := ids
-  prog := fun _ => []
-  nil_outside_ids := fun _ _ => rfl
-  ids_nonempty := hne
 
 namespace Cmd
 

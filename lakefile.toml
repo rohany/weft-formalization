@@ -1,7 +1,7 @@
 name = "Weft"
 version = "0.1.0"
 keywords = ["math"]
-defaultTargets = ["WeftNamedBarriers", "WeftMBarriers"]
+defaultTargets = ["WeftCommon", "WeftNamedBarriers", "WeftMBarriers"]
 
 [leanOptions]
 pp.unicode.fun = true # pretty-prints `fun a ↦ b`
@@ -13,6 +13,9 @@ maxSynthPendingDepth = 3
 name = "mathlib"
 scope = "leanprover-community"
 rev = "v4.31.0"
+
+[[lean_lib]]
+name = "WeftCommon"
 
 [[lean_lib]]
 name = "WeftNamedBarriers"

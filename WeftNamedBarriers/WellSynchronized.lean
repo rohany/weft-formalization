@@ -183,16 +183,16 @@ theorem CTAStep.progOf_drop {C C' : Config} (hstep : CTAStep C C') (t : ThreadId
       by_cases h : t = i
       · subst h
         obtain ⟨d, hd⟩ := hstep.run_drop
-        exact ⟨d, by simp [Config.progOf, CTA.set, Function.update_self, hd]⟩
-      · exact ⟨0, by simp [Config.progOf, CTA.set, Function.update_of_ne h]⟩
+        exact ⟨d, by simp [WeftCommon.Config.progOf, WeftCommon.CTA.set, Function.update_self, hd]⟩
+      · exact ⟨0, by simp [WeftCommon.Config.progOf, WeftCommon.CTA.set, Function.update_of_ne h]⟩
   | @recycle s T b I A n hb hfull hpark =>
       by_cases h : t ∈ I
-      · exact ⟨1, by simp [Config.progOf, CTA.wake, h, List.drop_one]⟩
-      · exact ⟨0, by simp [Config.progOf, CTA.wake, h]⟩
+      · exact ⟨1, by simp [WeftCommon.Config.progOf, WeftCommon.CTA.wake, h, List.drop_one]⟩
+      · exact ⟨0, by simp [WeftCommon.Config.progOf, WeftCommon.CTA.wake, h]⟩
   | @done s T hdone _ =>
-      exact ⟨(T.prog t).length, by simp [Config.progOf, List.drop_length]⟩
+      exact ⟨(T.prog t).length, by simp [WeftCommon.Config.progOf, List.drop_length]⟩
   | @error s T i P' _ hstep =>
-      exact ⟨0, by simp [Config.progOf]⟩
+      exact ⟨0, by simp [WeftCommon.Config.progOf]⟩
 
 /-- One CTA step makes each thread's program a suffix of its previous program. -/
 theorem CTAStep.progOf_suffix {C C' : Config} (hstep : CTAStep C C') (t : ThreadId) :
@@ -303,29 +303,29 @@ theorem CTAStep.progOf_length_le_succ {C C' : Config} (hstep : CTAStep C C') (t 
     (C.progOf t).length ≤ (C'.progOf t).length + 1 := by
   cases hstep with
   | @interleave s s' T i P' hi hbar hth =>
-      simp only [Config.progOf]
+      simp only [WeftCommon.Config.progOf]
       by_cases h : t = i
       · subst h
         obtain ⟨d, hd1, hd⟩ := hth.run_drop_le_one
-        simp only [CTA.set, Function.update_self, hd, List.length_drop]
+        simp only [WeftCommon.CTA.set, Function.update_self, hd, List.length_drop]
         omega
-      · simp only [CTA.set, Function.update_of_ne h]; omega
+      · simp only [WeftCommon.CTA.set, Function.update_of_ne h]; omega
   | @recycle s T b I A n hb hfull hpark =>
-      simp only [Config.progOf]
+      simp only [WeftCommon.Config.progOf]
       by_cases h : t ∈ I
-      · simp only [CTA.wake, if_pos h]
+      · simp only [WeftCommon.CTA.wake, if_pos h]
         cases T.prog t with
         | nil => simp
         | cons x xs => simp
-      · simp only [CTA.wake, if_neg h]; omega
+      · simp only [WeftCommon.CTA.wake, if_neg h]; omega
   | @done s T hdone _ =>
       have hnil : T.prog t = [] := by
         by_cases ht : t ∈ T.ids
         · exact hdone t ht
         · exact T.nil_outside_ids t ht
-      simp only [Config.progOf, hnil]; simp
+      simp only [WeftCommon.Config.progOf, hnil]; simp
   | @error s T i P' _ hth =>
-      simp only [Config.progOf]; omega
+      simp only [WeftCommon.Config.progOf]; omega
 
 /-- Every command runs in a successful execution: in a complete trace from `C₀` that
 ends in `done`, every valid program point `η` (`η.idx <` its program length) has a
@@ -428,17 +428,17 @@ theorem sync_drop_recycles {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
   cases hstep with
   | @interleave s s' T i P' hi hbar hth =>
       exfalso
-      simp only [Config.progOf] at hC hC'
+      simp only [WeftCommon.Config.progOf] at hC hC'
       by_cases h : t = i
       · subst h
-        simp only [CTA.set, Function.update_self] at hC'
+        simp only [WeftCommon.CTA.set, Function.update_self] at hC'
         subst hC'
         rw [hC] at hth
         cases hth
-      · simp only [CTA.set, Function.update_of_ne h] at hC'
+      · simp only [WeftCommon.CTA.set, Function.update_of_ne h] at hC'
         rw [hC] at hC'; simp at hC'
   | @recycle s T b I A n hb hfull hpark =>
-      simp only [Config.progOf] at hC hC'
+      simp only [WeftCommon.Config.progOf] at hC hC'
       by_cases h : t ∈ I
       · have hpk := hpark t h
         rw [hC] at hpk; simp only [List.head?_cons, Option.some.injEq, Cmd.sync.injEq] at hpk
@@ -446,11 +446,11 @@ theorem sync_drop_recycles {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
         simp [stepRecyclesBarrier, Config.state?, hb, BarrierState.isFull, hfull,
           Function.update_self, BarrierState.unconfigured]
       · exfalso
-        simp only [CTA.wake, if_neg h] at hC'
+        simp only [WeftCommon.CTA.wake, if_neg h] at hC'
         rw [hC] at hC'; simp at hC'
   | @done s T hdone _ =>
       exfalso
-      simp only [Config.progOf] at hC
+      simp only [WeftCommon.Config.progOf] at hC
       have hnil : T.prog t = [] := by
         by_cases ht : t ∈ T.ids
         · exact hdone t ht
@@ -458,7 +458,7 @@ theorem sync_drop_recycles {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
       rw [hnil] at hC; simp at hC
   | @error s T i P' _ hth =>
       exfalso
-      simp only [Config.progOf] at hC hC'
+      simp only [WeftCommon.Config.progOf] at hC hC'
       rw [hC] at hC'; simp at hC'
 
 /-- Reading a generation off `IsGenOf` at a known time: if `η` is a `bb`-command that
@@ -933,7 +933,7 @@ def Config.WF : Config → Prop
 /-- `WF` holds at the initial configuration: no barrier is configured, so the
 configured-barrier condition is vacuous and every barrier is the empty unconfigured
 state. -/
-theorem WF_initial {T : CTA} : (Config.run State.initial T).WF := by
+theorem WF_initial {T : CTA} : (Config.WF (Config.run State.initial T)) := by
   refine ⟨fun b I A n hB => ?_, fun b I A hB => ?_, State.BlockInv.initial⟩
   · simp [State.initial, BarrierState.unconfigured] at hB
   · simp only [State.initial, BarrierState.unconfigured, BarrierState.mk.injEq] at hB
@@ -969,14 +969,14 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
         refine ⟨hle, (fun i' hi' => ?_), hpos⟩
         have hne : i' ≠ i := by
           rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
-        simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
       | write_noop =>
         intro b I A n hB
         obtain ⟨hle, hpark, hpos⟩ := hcond b I A n hB
         refine ⟨hle, (fun i' hi' => ?_), hpos⟩
         have hne : i' ≠ i := by
           rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
-        simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
       | arrive_configure he hb =>
         intro b I A n hB
         simp only [Function.update_apply] at hB
@@ -989,7 +989,7 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
           refine ⟨hle, (fun i' hi' => ?_), hpos⟩
           have hne : i' ≠ i := by
             rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
-          simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
       | arrive_register he hb hpos hlt =>
         intro b I A n hB
         simp only [Function.update_apply] at hB
@@ -1002,12 +1002,12 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
           refine ⟨by omega, (fun i' hi' => ?_), by omega⟩
           have hne : i' ≠ i := by
             rintro rfl; have := hcpark i' hi'; rw [hpi] at this; simp at this
-          simp only [CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
         · obtain ⟨hle, hpark, hpos'⟩ := hcond b I A n hB
           refine ⟨hle, (fun i' hi' => ?_), hpos'⟩
           have hne : i' ≠ i := by
             rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
-          simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
       | sync_configure he hb =>
         intro b I A n hB
         simp only [Function.update_apply] at hB
@@ -1019,12 +1019,14 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
           subst hbq
           refine ⟨by simp; omega, (fun i' hi' => ?_), by simp⟩
           simp only [List.mem_singleton] at hi'; subst hi'
-          simp only [CTA.set, Function.update_self, List.head?_cons]
+          simp only [WeftCommon.CTA.set, Function.update_self, List.head?_cons]
         · obtain ⟨hle, hpark, hpos⟩ := hcond b I A n hB
           refine ⟨hle, (fun i' hi' => ?_), hpos⟩
           by_cases hne : i' = i
-          · subst hne; simp only [CTA.set, Function.update_self]; rw [← hpi]; exact hpark _ hi'
-          · simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+          · subst hne
+            simp only [WeftCommon.CTA.set, Function.update_self]
+            rw [← hpi]; exact hpark _ hi'
+          · simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
       | sync_block he hb hpos hlt =>
         intro b I A n hB
         simp only [Function.update_apply] at hB
@@ -1037,15 +1039,17 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
           refine ⟨by simp only [List.length_cons]; omega, (fun i' hi' => ?_),
             by simp only [List.length_cons]; omega⟩
           rcases List.mem_cons.mp hi' with rfl | hi'
-          · simp only [CTA.set, Function.update_self, List.head?_cons]
+          · simp only [WeftCommon.CTA.set, Function.update_self, List.head?_cons]
           · by_cases hne : i' = i
-            · subst hne; simp only [CTA.set, Function.update_self, List.head?_cons]
-            · simp only [CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
+            · subst hne; simp only [WeftCommon.CTA.set, Function.update_self, List.head?_cons]
+            · simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
         · obtain ⟨hle, hpark, hpos'⟩ := hcond b I A n hB
           refine ⟨hle, (fun i' hi' => ?_), hpos'⟩
           by_cases hne : i' = i
-          · subst hne; simp only [CTA.set, Function.update_self]; rw [← hpi]; exact hpark _ hi'
-          · simp only [CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+          · subst hne
+            simp only [WeftCommon.CTA.set, Function.update_self]
+            rw [← hpi]; exact hpark _ hi'
+          · simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
     · cases hth with
       | read_noop => exact hcondn
       | write_noop => exact hcondn
@@ -1081,7 +1085,7 @@ theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF)
           have h1 := hpark i' hmem
           have h2 := hpk i' hi'
           rw [h1] at h2; simp only [Option.some.injEq, Cmd.sync.injEq] at h2; exact hbb h2.1.symm
-        simp only [CTA.wake, if_neg hni]; exact hpk i' hi'
+        simp only [WeftCommon.CTA.wake, if_neg hni]; exact hpk i' hi'
     · intro b I A hB
       by_cases hbb : b = b₀
       · subst hbb
@@ -1114,7 +1118,7 @@ theorem WF_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep 
 /-- A stuck `run` configuration (well-formed) has a thread headed by a
 synchronization command — a thread parked at a `sync`, or one about to register. -/
 theorem stuck_has_sync_head {s : State} {T : CTA}
-    (hwf : (Config.run s T).WF)
+    (hwf : (Config.WF (Config.run s T)))
     (hstuck : Config.Stuck (Config.run s T)) :
     ∃ t cmd c b, T.prog t = cmd :: c ∧ cmd.barrier? = some b := by
   by_contra hcon
@@ -1208,8 +1212,8 @@ contradicting `wellSync_no_unexec_sync`. The deadlock case rests on the
 well-formedness invariant `Config.WF` (`hwf` + `CTAStep.WF_preserved` + `WF_chain`)
 specialized to the stuck last configuration (`stuck_has_sync_head`). -/
 theorem Config.WellSynchronized.completeTrace_ends_done {s₀ : State} {T₀ : CTA}
-    (h : (Config.run s₀ T₀).WellSynchronized)
-    (hwf : (Config.run s₀ T₀).WF) {τ : List Config}
+    (h : (Config.WellSynchronized (Config.run s₀ T₀)))
+    (hwf : (Config.WF (Config.run s₀ T₀))) {τ : List Config}
     (hτ : IsCompleteTraceFrom (Config.run s₀ T₀) τ) :
     ∃ s, τ.getLast? = some (Config.done s) := by
   obtain ⟨Cₙ, hlast, hcases⟩ := hτ.1.ends
@@ -1223,8 +1227,8 @@ theorem Config.WellSynchronized.completeTrace_ends_done {s₀ : State} {T₀ : C
     exfalso
     have hstuck : Config.Stuck (Config.run s T') := by
       rcases hcases with ⟨s', hd⟩ | ⟨T'', he⟩ | hs
-      · exact Config.noConfusion hd
-      · exact Config.noConfusion he
+      · simp at hd
+      · simp at he
       · exact hs
     obtain ⟨η, hηsync, hηnoexec⟩ := deadlock_has_unexec_sync hτ hwf hlast hstuck
     exact wellSync_no_unexec_sync h hτ hηsync hηnoexec
@@ -1303,7 +1307,7 @@ def State.numConfigured (s : State) (S : Finset Barrier) : Nat :=
 terminal; the `+1` on `run` keeps `μ(run) ≥ 1 > 0 = μ(done) = μ(err)`, so the
 `done`/`error` steps strictly decrease it too. -/
 def Config.cfgMeasure (S : Finset Barrier) : Config → Nat
-  | .run s T => 3 * T.numCmds + 2 * s.numEnabled T + s.numConfigured S + 1
+  | .run s T => 3 * CTA.numCmds T + 2 * s.numEnabled T + s.numConfigured S + 1
   | .done _ => 0
   | .err _ => 0
 
@@ -1324,7 +1328,7 @@ def Config.barriersWithin (S : Finset Barrier) : Config → Prop
 no barrier is configured, and every mentioned barrier is in `barrierSet` by
 definition. -/
 theorem barriersWithin_initial {T : CTA} :
-    (Config.run State.initial T).barriersWithin T.barrierSet := by
+    (Config.barriersWithin T.barrierSet (Config.run State.initial T)) := by
   refine ⟨fun b hb => ?_, fun i c hc b hbc => ?_⟩
   · simp [State.initial, BarrierState.unconfigured] at hb
   · have hi : i ∈ T.ids := by
@@ -1336,13 +1340,13 @@ theorem barriersWithin_initial {T : CTA} :
 /-- Updating one thread's program changes the command count by the length
 difference (stated additively to avoid `Nat` subtraction). -/
 theorem numCmds_set {T : CTA} {i : ThreadId} (hi : i ∈ T.ids) (P' : Prog) :
-    (T.set i hi P').numCmds + (T.prog i).length = T.numCmds + P'.length := by
+    CTA.numCmds (T.set i hi P') + (T.prog i).length = T.numCmds + P'.length := by
   have hset : ∀ j, ((T.set i hi P').prog j).length
       = Function.update (fun k => (T.prog k).length) i P'.length j := by
     intro j
     by_cases h : j = i
-    · subst h; simp [CTA.set]
-    · simp [CTA.set, Function.update_of_ne h]
+    · subst h; simp [WeftCommon.CTA.set]
+    · simp [WeftCommon.CTA.set, Function.update_of_ne h]
   change (∑ j ∈ T.ids, ((T.set i hi P').prog j).length) + (T.prog i).length
       = (∑ j ∈ T.ids, (T.prog j).length) + P'.length
   rw [Finset.sum_congr rfl (fun j _ => hset j), Finset.sum_update_of_mem hi,
@@ -1413,11 +1417,11 @@ theorem numConfigured_reconfigure {s : State} {S : Finset Barrier} {b₀ : Barri
 drops the command count by one per woken in-domain thread. -/
 theorem numCmds_wake {T : CTA} {I : List ThreadId} {b₀ : Barrier} {n : ℕ+}
     (hpark : ∀ i ∈ I, (T.prog i).head? = some (Cmd.sync b₀ n)) :
-    T.numCmds = (T.wake I).numCmds + (T.ids.filter (· ∈ I)).card := by
+    T.numCmds = CTA.numCmds (T.wake I) + (T.ids.filter (· ∈ I)).card := by
   have key : ∀ j ∈ T.ids, (T.prog j).length
       = ((T.wake I).prog j).length + (if j ∈ I then 1 else 0) := by
     intro j _
-    simp only [CTA.wake]
+    simp only [WeftCommon.CTA.wake]
     by_cases h : j ∈ I
     · have hne : (T.prog j) ≠ [] := by
         have hp := hpark j h; intro hnil; rw [hnil] at hp; simp at hp
@@ -1501,7 +1505,7 @@ theorem step_decreases (S : Finset Barrier) {C C' : Config}
     obtain ⟨hcfg, hmen⟩ := hinv
     set s' : State := ⟨updateMapOn s.E I true, Function.update s.B b₀ BarrierState.unconfigured⟩
     have hb0S : b₀ ∈ S := hcfg b₀ (by rw [hb0]; rfl)
-    have hC : T.numCmds = (T.wake I).numCmds + (T.ids.filter (· ∈ I)).card := numCmds_wake hpark
+    have hC : T.numCmds = CTA.numCmds (T.wake I) + (T.ids.filter (· ∈ I)).card := numCmds_wake hpark
     have hE : s'.numEnabled (T.wake I) ≤ s.numEnabled T + (T.ids.filter (· ∈ I)).card :=
       numEnabled_updateMapOn_le
     have hCf : s'.numConfigured S + 1 = s.numConfigured S :=
@@ -1523,7 +1527,7 @@ theorem inv_preserved (S : Finset Barrier) {C C' : Config}
     have hmen' : ∀ j, ∀ c ∈ (T.set i hi P').prog j, ∀ b, c.barrier? = some b → b ∈ S := by
       intro j c hc b hbc
       obtain ⟨d, hd⟩ := (CTAStep.interleave hi hbar hth).progOf_drop j
-      simp only [Config.progOf] at hd
+      simp only [WeftCommon.Config.progOf] at hd
       rw [hd] at hc
       exact hmen j c (mem_of_mem_drop hc) b hbc
     refine ⟨fun b hb => ?_, hmen'⟩
@@ -1556,7 +1560,7 @@ theorem inv_preserved (S : Finset Barrier) {C C' : Config}
     have hmen' : ∀ j, ∀ c ∈ (T.wake I).prog j, ∀ b, c.barrier? = some b → b ∈ S := by
       intro j c hc b hbc
       obtain ⟨d, hd⟩ := (CTAStep.recycle hb0 hfull hpark).progOf_drop j
-      simp only [Config.progOf] at hd
+      simp only [WeftCommon.Config.progOf] at hd
       rw [hd] at hc
       exact hmen j c (mem_of_mem_drop hc) b hbc
     refine ⟨fun b hb => ?_, hmen'⟩
@@ -1578,12 +1582,12 @@ theorem exists_completeTrace (S : Finset Barrier) (C : Config) (hinv : C.barrier
     intro C hinv hn
     by_cases hstuck : Config.Stuck C
     · exact ⟨[C], ⟨List.isChain_singleton C, C, by simp, Or.inr (Or.inr hstuck)⟩, by simp⟩
-    · simp only [Config.Stuck, not_not] at hstuck
+    · simp only [Config.Stuck, WeftCommon.Config.Stuck, not_not] at hstuck
       obtain ⟨C', hCC'⟩ := hstuck
-      have hdec : C'.cfgMeasure S < n := hn ▸ step_decreases S hCC' hinv
+      have hdec : Config.cfgMeasure S C' < n := hn ▸ step_decreases S hCC' hinv
       obtain ⟨τ', hτ'⟩ := ih _ hdec C' (inv_preserved S hCC' hinv) rfl
       have hτ'ne : τ' ≠ [] := by
-        intro h; rw [h] at hτ'; simp [IsCompleteTraceFrom] at hτ'
+        intro h; rw [h] at hτ'; simp [IsCompleteTraceFrom, WeftCommon.IsCompleteTraceFrom] at hτ'
       refine ⟨C :: τ', ⟨?_, ?_⟩, by simp⟩
       · change List.IsChain CTAStep (C :: τ')
         rw [List.isChain_cons]

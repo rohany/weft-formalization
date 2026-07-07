@@ -424,8 +424,8 @@ theorem acountSum_set {T : CTA} {i : ThreadId} (hi : i ∈ T.ids) (P' : Prog) (b
           ((P'.filterMap Cmd.barrierRef).countP (fun r => r.1 == b)) j := by
     intro j
     by_cases h : j = i
-    · subst h; simp [CTA.set]
-    · simp [CTA.set, Function.update_of_ne h]
+    · subst h; simp [WeftCommon.CTA.set]
+    · simp [WeftCommon.CTA.set, Function.update_of_ne h]
   rw [Finset.sum_congr rfl (fun j _ => hset j), Finset.sum_update_of_mem hi,
       ← Finset.erase_eq, ← Finset.add_sum_erase T.ids _ hi]
   omega
@@ -462,10 +462,10 @@ theorem barrierPotential_step {b : Barrier} {C C' : Config} (hstep : CTAStep C C
   cases hstep with
   | @interleave s s' T i P' hi hbar hth =>
     have hsum := acountSum_set hi P' b
-    have hbpc : (Config.run s' (T.set i hi P')).barrierProgCount b
+    have hbpc : (Config.barrierProgCount b (Config.run s' (T.set i hi P')))
         = ∑ j ∈ T.ids,
             (((T.set i hi P').prog j).filterMap Cmd.barrierRef).countP (fun r => r.1 == b) := rfl
-    have hbpcR : (Config.run s T).barrierProgCount b
+    have hbpcR : (Config.barrierProgCount b (Config.run s T))
         = ∑ j ∈ T.ids, ((T.prog j).filterMap Cmd.barrierRef).countP (fun r => r.1 == b) := rfl
     simp only [Config.barrierPotential, Config.arrivedLen]
     rw [hbpc, hbpcR]
@@ -523,7 +523,7 @@ theorem barrierPotential_step {b : Barrier} {C C' : Config} (hstep : CTAStep C C
           = ∑ j ∈ T.ids, ((T.prog j).filterMap Cmd.barrierRef).countP (fun r => r.1 == b) := by
         apply Finset.sum_congr rfl
         intro j _
-        simp only [CTA.wake]
+        simp only [WeftCommon.CTA.wake]
         by_cases hj : j ∈ I₀
         · simp only [if_pos hj]
           have hh := hpark j hj
@@ -641,7 +641,7 @@ theorem bcount_step {b : Barrier} {nb : Nat} {C C' : Config} (hstep : CTAStep C 
       by_cases hbb : b = b₀
       · subst hbb
         have hmem : Cmd.arrive b n ∈ (Config.run s T).progOf i := by
-          simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self
+          simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self
         have hnnb := hcmd i (Cmd.arrive b n) hmem n rfl
         simp only [Function.update_self, Option.some.injEq] at hn'
         rw [← hn']; exact hnnb
@@ -658,7 +658,7 @@ theorem bcount_step {b : Barrier} {nb : Nat} {C C' : Config} (hstep : CTAStep C 
       by_cases hbb : b = b₀
       · subst hbb
         have hmem : Cmd.sync b n ∈ (Config.run s T).progOf i := by
-          simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self
+          simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self
         have hnnb := hcmd i (Cmd.sync b n) hmem n rfl
         simp only [Function.update_self, Option.some.injEq] at hn'
         rw [← hn']; exact hnnb
@@ -754,10 +754,10 @@ theorem barrierPotential_recycle_eq {s : State} {T : CTA} {b : Barrier}
     {I₀ : List ThreadId} {A₀ : ℕ} {n₀ : ℕ+}
     (hb : s.B b = ⟨I₀, A₀, some n₀⟩) (hfull : I₀.length + A₀ = (n₀ : Nat))
     (hpark : ∀ i ∈ I₀, (T.prog i).head? = some (Cmd.sync b n₀)) (hnd : I₀.Nodup) :
-    (Config.run s T).barrierPotential b
-      = (Config.run
+    (Config.barrierPotential b (Config.run s T))
+      = (Config.barrierPotential b (Config.run
             (⟨updateMapOn s.E I₀ true, Function.update s.B b BarrierState.unconfigured⟩ : State)
-            (T.wake I₀)).barrierPotential b
+            (T.wake I₀)))
         + (n₀ : Nat) := by
   have hsub : ∀ i ∈ I₀, i ∈ T.ids := by
     intro i hi
@@ -788,7 +788,7 @@ theorem barrierPotential_recycle_eq {s : State} {T : CTA} {b : Barrier}
       simp
     · rw [if_neg hj, if_neg hj]; simp
   simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, hb,
-    Function.update_self, BarrierState.unconfigured, Nat.zero_add, CTA.wake]
+    Function.update_self, BarrierState.unconfigured, Nat.zero_add, WeftCommon.CTA.wake]
   rw [Finset.sum_congr rfl key, Finset.sum_add_distrib, ← Finset.card_filter, hcard]
   omega
 
@@ -911,7 +911,7 @@ theorem bstate_frozen_step {b : Barrier} {nb : Nat} {I₀ : List ThreadId} {A₀
       by_cases hbb : b = b₀
       · subst hbb
         have hmem : Cmd.arrive b n ∈ (Config.run s T).progOf i := by
-          simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self
+          simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self
         have hnnb := hcmd i (Cmd.arrive b n) hmem n rfl
         exfalso; apply hne
         have hn : n₀ = n := by
@@ -929,7 +929,7 @@ theorem bstate_frozen_step {b : Barrier} {nb : Nat} {I₀ : List ThreadId} {A₀
       by_cases hbb : b = b₀
       · subst hbb
         have hmem : Cmd.sync b n ∈ (Config.run s T).progOf i := by
-          simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self
+          simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self
         have hnnb := hcmd i (Cmd.sync b n) hmem n rfl
         exfalso; apply hne
         have hn : n₀ = n := by
@@ -1043,16 +1043,16 @@ theorem Config.WellSynchronized.headCount_consistent_of_successful {I : CTA}
     rw [← List.dropLast_append_getLast hτne, List.mem_append, List.mem_singleton] at hC
     rcases hC with hCd | hCl
     · obtain ⟨s', T', hrun⟩ := mem_dropLast_isRun hchain C hCd
-      rw [hCerr] at hrun; exact Config.noConfusion hrun
+      rw [hCerr] at hrun; exact nomatch hrun
     · rw [List.getLast?_eq_some_getLast hτne, Option.some.injEq] at hlast
-      rw [hlast, hCerr] at hCl; exact Config.noConfusion hCl
+      rw [hlast, hCerr] at hCl; exact nomatch hCl
   -- the consistency fact, available at every configuration via the suffix relation
   have hcmd_all : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+, Cmd.barrierRef c = some (b, m) →
       (m : Nat) = nb := by
     intro C hC i c hc m hbref
     have hc0 : c ∈ (Config.run s (I ^ k)).progOf i :=
       (progOf_suffix_head hchain hhead C hC i).subset hc
-    have hc1 : c ∈ (I ^ k).prog i := by simpa [Config.progOf] using hc0
+    have hc1 : c ∈ (I ^ k).prog i := by simpa [WeftCommon.Config.progOf] using hc0
     have hcI : c ∈ I.prog i := I.mem_pow_prog hc1
     have hi : i ∈ I.ids := by
       by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
@@ -1082,10 +1082,10 @@ theorem Config.WellSynchronized.headCount_consistent_of_successful {I : CTA}
       | some sC' => simp [stepRecyclesBarrier, hCs, hC's, hfullC]
   -- conservation then forces `arrivers (I ^ k) b = 0`, impossible for a referenced barrier
   have hcons := barrierPotential_conservation b hchain hhead hlast hno_err hnorec
-  have hdonepot : (Config.done s_d).barrierPotential b = (s.B b).arrived := by
+  have hdonepot : (Config.barrierPotential b (Config.done s_d)) = (s.B b).arrived := by
     simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount,
       Nat.add_zero, hbd]
-  have hheadpot : (Config.run s (I ^ k)).barrierPotential b
+  have hheadpot : (Config.barrierPotential b (Config.run s (I ^ k)))
       = (s.B b).arrived + (I ^ k).arrivers b := by
     simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, CTA.arrivers]
   rw [hdonepot, hheadpot] at hcons
@@ -1114,7 +1114,7 @@ that number strictly below `arrival-count(b)` — a contradiction.
 NOTE (rohany): This is an important, top-level theorem. -/
 theorem Config.WellSynchronized.pow_barriers_advance {I : CTA}
     (h : I.ConsistentArrivalCounts) {s : State} {b : Barrier}
-    (hwf : (Config.run s (I ^ I.loopK h)).WF)
+    (hwf : (Config.WF (Config.run s (I ^ I.loopK h))))
     -- avoids the full-at-entry case (see `headCount_consistent_of_successful`): a full
     -- `b` forces an immediate `recycle` that erases its count before any command tests it.
     (hfull : (s.B b).isFull = false)
@@ -1156,16 +1156,16 @@ theorem Config.WellSynchronized.pow_barriers_advance {I : CTA}
     rw [← List.dropLast_append_getLast hτne, List.mem_append, List.mem_singleton] at hC
     rcases hC with hCd | hCl
     · obtain ⟨s', T', hrun⟩ := mem_dropLast_isRun hchain C hCd
-      rw [hCerr] at hrun; exact Config.noConfusion hrun
+      rw [hCerr] at hrun; exact nomatch hrun
     · rw [List.getLast?_eq_some_getLast hτne, Option.some.injEq] at hlast
-      rw [hlast, hCerr] at hCl; exact Config.noConfusion hCl
+      rw [hlast, hCerr] at hCl; exact nomatch hCl
   -- the consistency fact, available at every configuration via the suffix relation
   have hcmd_all : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+, Cmd.barrierRef c = some (b, m) →
       (m : Nat) = nb := by
     intro C hC i c hc m hbref
     have hc0 : c ∈ (Config.run s (I ^ k)).progOf i :=
       (progOf_suffix_head hchain hhead C hC i).subset hc
-    have hc1 : c ∈ (I ^ k).prog i := by simpa [Config.progOf] using hc0
+    have hc1 : c ∈ (I ^ k).prog i := by simpa [WeftCommon.Config.progOf] using hc0
     have hcI : c ∈ I.prog i := I.mem_pow_prog hc1
     have hi : i ∈ I.ids := by
       by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
@@ -1175,10 +1175,10 @@ theorem Config.WellSynchronized.pow_barriers_advance {I : CTA}
     (noRecycle_of_recycleCount_zero b hcon)
   -- a lower bound on the start potential suffices (any starting residue only helps);
   -- the program command-count alone already accounts for all `arrivers (I ^ k) b`
-  have hC₀pot : (I ^ k).arrivers b ≤ (Config.run s (I ^ k)).barrierPotential b := by
+  have hC₀pot : (I ^ k).arrivers b ≤ (Config.barrierPotential b (Config.run s (I ^ k))) := by
     simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, CTA.arrivers]
     exact Nat.le_add_left _ _
-  have hdonepot : (Config.done s_d).barrierPotential b = (s_d.B b).arrived := by
+  have hdonepot : (Config.barrierPotential b (Config.done s_d)) = (s_d.B b).arrived := by
     simp [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount]
   rw [hdonepot] at hcons
   have harr : nb ≤ (s_d.B b).arrived := by rw [hcons]; exact le_trans hstep2 hC₀pot
@@ -1231,7 +1231,7 @@ NOTE (rohany): This is an important, top-level theorem.
 -/
 theorem Config.WellSynchronized.pow_barriers_advance_count {I : CTA}
     (h : I.ConsistentArrivalCounts) {s : State} {b : Barrier}
-    (hwf : (Config.run s (I ^ I.loopK h)).WF)
+    (hwf : (Config.WF (Config.run s (I ^ I.loopK h))))
     -- avoids the full-at-entry case (see `headCount_consistent_of_successful`): a full
     -- `b` is forced to `recycle` once before the loop body runs, which would add one
     -- recycle on top of the `(k * arrivers b) / arrival-count b` from the loop itself.
@@ -1271,15 +1271,15 @@ theorem Config.WellSynchronized.pow_barriers_advance_count {I : CTA}
     rw [← List.dropLast_append_getLast hτne, List.mem_append, List.mem_singleton] at hC
     rcases hC with hCd | hCl
     · obtain ⟨s', T', hrun⟩ := mem_dropLast_isRun hchain C hCd
-      rw [hCerr] at hrun; exact Config.noConfusion hrun
+      rw [hCerr] at hrun; exact nomatch hrun
     · rw [List.getLast?_eq_some_getLast hτne, Option.some.injEq] at hlast
-      rw [hlast, hCerr] at hCl; exact Config.noConfusion hCl
+      rw [hlast, hCerr] at hCl; exact nomatch hCl
   have hcmd_all : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+, Cmd.barrierRef c = some (b, m) →
       (m : Nat) = nb := by
     intro C hC i c hc m hbref
     have hc0 : c ∈ (Config.run s (I ^ k)).progOf i :=
       (progOf_suffix_head hchain hhead C hC i).subset hc
-    have hc1 : c ∈ (I ^ k).prog i := by simpa [Config.progOf] using hc0
+    have hc1 : c ∈ (I ^ k).prog i := by simpa [WeftCommon.Config.progOf] using hc0
     have hcI : c ∈ I.prog i := I.mem_pow_prog hc1
     have hi : i ∈ I.ids := by
       by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
@@ -1292,10 +1292,10 @@ theorem Config.WellSynchronized.pow_barriers_advance_count {I : CTA}
   -- conservation with recycles
   have hcons := barrierPotential_with_recycles (b := b) (nb := nb) hchain hhead hlast hno_err
     hcount_all hBI_all
-  have hC₀pot : (Config.run s (I ^ k)).barrierPotential b
+  have hC₀pot : (Config.barrierPotential b (Config.run s (I ^ k)))
       = (s.B b).arrived + (I ^ k).arrivers b := by
     simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, CTA.arrivers]
-  have hdonepot : (Config.done s_d).barrierPotential b = (s_d.B b).arrived := by
+  have hdonepot : (Config.barrierPotential b (Config.done s_d)) = (s_d.B b).arrived := by
     simp [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount]
   rw [hC₀pot, hdonepot] at hcons
   -- both arrived counts are below the arrival count
@@ -1360,7 +1360,7 @@ same `hAeq` step proved inside `pow_barriers_advance_count`): the total arrivals
 `k · arrivers(b)` are a multiple of `arrival-count(b)`, and both arrived counts are below
 it, so they must be equal. -/
 theorem arrivedLen_preserved {I : CTA} (h : I.ConsistentArrivalCounts) {s : State}
-    {b : Barrier} (hwf : (Config.run s (I ^ I.loopK h)).WF)
+    {b : Barrier} (hwf : (Config.WF (Config.run s (I ^ I.loopK h))))
     (hfull : (s.B b).isFull = false) {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) τ)
     (hb : b ∈ (I ^ I.loopK h).barrierSet)
@@ -1394,15 +1394,15 @@ theorem arrivedLen_preserved {I : CTA} (h : I.ConsistentArrivalCounts) {s : Stat
     rw [← List.dropLast_append_getLast hτne, List.mem_append, List.mem_singleton] at hC
     rcases hC with hCd | hCl
     · obtain ⟨s', T', hrun⟩ := mem_dropLast_isRun hchain C hCd
-      rw [hCerr] at hrun; exact Config.noConfusion hrun
+      rw [hCerr] at hrun; exact nomatch hrun
     · rw [List.getLast?_eq_some_getLast hτne, Option.some.injEq] at hlast
-      rw [hlast, hCerr] at hCl; exact Config.noConfusion hCl
+      rw [hlast, hCerr] at hCl; exact nomatch hCl
   have hcmd_all : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ m : ℕ+, Cmd.barrierRef c = some (b, m) →
       (m : Nat) = nb := by
     intro C hC i c hc m hbref
     have hc0 : c ∈ (Config.run s (I ^ k)).progOf i :=
       (progOf_suffix_head hchain hhead C hC i).subset hc
-    have hc1 : c ∈ (I ^ k).prog i := by simpa [Config.progOf] using hc0
+    have hc1 : c ∈ (I ^ k).prog i := by simpa [WeftCommon.Config.progOf] using hc0
     have hcI : c ∈ I.prog i := I.mem_pow_prog hc1
     have hi : i ∈ I.ids := by
       by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
@@ -1413,10 +1413,10 @@ theorem arrivedLen_preserved {I : CTA} (h : I.ConsistentArrivalCounts) {s : Stat
     (by intro s' hs'; simp only [Config.state?, Option.some.injEq] at hs'; subst hs'; exact hwf.2.2)
   have hcons := barrierPotential_with_recycles (b := b) (nb := nb) hchain hhead hlast hno_err
     hcount_all hBI_all
-  have hC₀pot : (Config.run s (I ^ k)).barrierPotential b
+  have hC₀pot : (Config.barrierPotential b (Config.run s (I ^ k)))
       = (s.B b).arrived + (I ^ k).arrivers b := by
     simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, CTA.arrivers]
-  have hdonepot : (Config.done s_d).barrierPotential b = (s_d.B b).arrived := by
+  have hdonepot : (Config.barrierPotential b (Config.done s_d)) = (s_d.B b).arrived := by
     simp [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount]
   rw [hC₀pot, hdonepot] at hcons
   have hA0 : (s.B b).arrived < nb := by
@@ -1479,28 +1479,28 @@ theorem bstate_unref_step {b : Barrier} {β : BarrierState} (hfullβ : β.isFull
       have hbb : b ≠ b₀ := fun heq => by
         subst heq
         exact hcmd i (Cmd.arrive b n)
-          (by simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
+          (by simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
       simp only [Function.update_of_ne hbb]; exact hCb
     | arrive_register he hb0 hpos hlt =>
       rename_i b₀ n I A
       have hbb : b ≠ b₀ := fun heq => by
         subst heq
         exact hcmd i (Cmd.arrive b n)
-          (by simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
+          (by simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
       simp only [Function.update_of_ne hbb]; exact hCb
     | sync_configure he hb0 =>
       rename_i b₀ n c
       have hbb : b ≠ b₀ := fun heq => by
         subst heq
         exact hcmd i (Cmd.sync b n)
-          (by simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
+          (by simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
       simp only [Function.update_of_ne hbb]; exact hCb
     | sync_block he hb0 hpos hlt =>
       rename_i b₀ n c I A
       have hbb : b ≠ b₀ := fun heq => by
         subst heq
         exact hcmd i (Cmd.sync b n)
-          (by simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
+          (by simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self) n rfl
       simp only [Function.update_of_ne hbb]; exact hCb
   | @recycle s T b₀ I₀ A₀ n₀ hb hfullr hpark =>
     have hCb : s.B b = β := hC s rfl
@@ -1549,7 +1549,7 @@ unreferenced barrier is never touched, so its whole state is frozen.
 NOTE (rohany): This is an important top-level theorem. -/
 theorem Config.WellSynchronized.pow_barriers_restored {I : CTA}
     (h : I.ConsistentArrivalCounts) {s : State}
-    (hwf : (Config.run s (I ^ I.loopK h)).WF)
+    (hwf : (Config.WF (Config.run s (I ^ I.loopK h))))
     (hfull : ∀ b, (s.B b).isFull = false) {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) τ)
     {s_d : State} (hlast : τ.getLast? = some (Config.done s_d)) :
@@ -1566,7 +1566,7 @@ theorem Config.WellSynchronized.pow_barriers_restored {I : CTA}
       apply hb
       have hc0 : c ∈ (Config.run s (I ^ k)).progOf i :=
         (progOf_suffix_head hchain hhead C hC i).subset hc
-      have hc1 : c ∈ (I ^ k).prog i := by simpa [Config.progOf] using hc0
+      have hc1 : c ∈ (I ^ k).prog i := by simpa [WeftCommon.Config.progOf] using hc0
       have hbar : Cmd.barrier? c = some b := by
         cases c with
         | read g => simp [Cmd.barrierRef] at hbref
@@ -1689,7 +1689,7 @@ pins the entry count to `arrivalCount h b` and `bcount_chain` propagates it to `
 (`sync_err_count`/`arrive_err_count` would otherwise fire). Unreferenced barriers are frozen. This
 is what lets the loop body replay verbatim from a non-initial post-prefix state. -/
 theorem pow_done_state_restored {I : CTA} (h : I.ConsistentArrivalCounts) {s : State}
-    (hwf : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false)
+    (hwf : (Config.WF (Config.run s (I ^ I.loopK h)))) (hfull : ∀ b, (s.B b).isFull = false)
     (hsE : ∀ i, s.E i = true) (hsync : ∀ b, (s.B b).synced = [])
     {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) τ)
@@ -1759,7 +1759,7 @@ theorem pow_done_state_restored {I : CTA} (h : I.ConsistentArrivalCounts) {s : S
             intro C hC i c hc m hbref'
             have hc0 : c ∈ (Config.run s (I ^ I.loopK h)).progOf i :=
               (progOf_suffix_head hchain hhead C hC i).subset hc
-            have hc1 : c ∈ (I ^ I.loopK h).prog i := by simpa [Config.progOf] using hc0
+            have hc1 : c ∈ (I ^ I.loopK h).prog i := by simpa [WeftCommon.Config.progOf] using hc0
             have hcI : c ∈ I.prog i := I.mem_pow_prog hc1
             have hi : i ∈ I.ids := by
               by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
@@ -1802,7 +1802,7 @@ theorem pow_done_state_restored {I : CTA} (h : I.ConsistentArrivalCounts) {s : S
             apply hbref
             have hc0 : c ∈ (Config.run s (I ^ I.loopK h)).progOf i :=
               (progOf_suffix_head hchain hhead C hC i).subset hc
-            have hc1 : c ∈ (I ^ I.loopK h).prog i := by simpa [Config.progOf] using hc0
+            have hc1 : c ∈ (I ^ I.loopK h).prog i := by simpa [WeftCommon.Config.progOf] using hc0
             have hi : i ∈ (I ^ I.loopK h).ids := by
               by_contra hni; rw [(I ^ I.loopK h).nil_outside_ids i hni] at hc1; simp at hc1
             have hbar : Cmd.barrier? c = some b := by
@@ -1882,7 +1882,8 @@ theorem recycleCount_suffix (b : Barrier) {τ σ : List Config} {p K : Nat}
   rw [h r, show p + r + 1 = p + (r + 1) from by omega, h (r + 1)]
 
 /-- A `run → run` step preserves the CTA's thread set: `interleave` updates one program
-(`CTA.set`) and `recycle` advances parked threads (`CTA.wake`), both keeping `ids`. -/
+(`WeftCommon.CTA.set`) and `recycle` advances parked threads (`WeftCommon.CTA.wake`),
+both keeping `ids`. -/
 theorem CTAStep.run_ids_eq {s s' : State} {T T' : CTA}
     (hstep : CTAStep (Config.run s T) (Config.run s' T')) : T'.ids = T.ids := by
   cases hstep with
@@ -1951,11 +1952,11 @@ theorem seqLift_penultimate_gen {A B : CTA} (hids : A.ids = B.ids) {s₀ : State
       intro i; by_cases hi : i ∈ T.ids
       · exact hdone i hi
       · exact T.nil_outside_ids i hi
-    have hBeq : T.appendTail B = B := by
+    have hBeq : CTA.appendTail T B = B := by
       apply CTA.ext
       · change T.ids ∪ B.ids = B.ids; rw [hTids, hids, Finset.union_self]
       · funext i; change T.prog i ++ B.prog i = B.prog i; rw [hTprog i, List.nil_append]
-    change Config.run sd (T.appendTail B) = Config.run sd B
+    change Config.run sd (CTA.appendTail T B) = Config.run sd B
     rw [hBeq]
 
 /-- **Done-state properties.** The terminal `done s` of any successful trace (from `initial`) is a
@@ -1967,7 +1968,7 @@ theorem done_state_of_successfulTrace {T₀ : CTA} {s : State} {τ : List Config
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T₀) τ)
     (hlast : τ.getLast? = some (Config.done s)) :
     (∀ i, s.E i = true) ∧ (∀ b, (s.B b).synced = []) ∧ (∀ b, (s.B b).isFull = false) ∧
-      ∀ (T : CTA), (Config.run s T).WF := by
+      ∀ (T : CTA), (Config.WF (Config.run s T)) := by
   have hchain : List.IsChain CTAStep τ := hτ.1.1.subtrace
   have hhead : τ.head? = some (Config.run State.initial T₀) := hτ.1.2
   obtain ⟨y, hy_mem, hy_step⟩ : ∃ y ∈ τ, CTAStep y (Config.done s) := by
@@ -2061,7 +2062,7 @@ theorem CTA.WellSynchronized.seq_angelic_tail {A B : CTA} (hids : A.ids = B.ids)
   have hPlast : P.getLast? = some (Config.run s_d B) := by
     rw [hPdef, List.getLast?_map, List.getLast?_eq_some_getLast hdrop, Option.map_some, hCstar]
   -- strong normalization supplies a completion from the boundary `C⋆ = run s_d B`
-  have hbw : (Config.run s_d B).barriersWithin (A.seq B hids).barrierSet :=
+  have hbw : (Config.barriersWithin (A.seq B hids).barrierSet (Config.run s_d B)) :=
     barriersWithin_chain _ hPchain hPhead barriersWithin_initial _ (List.mem_of_getLast? hPlast)
   obtain ⟨cont, hcont⟩ := exists_completeTrace (A.seq B hids).barrierSet _ hbw
   have hconthead : cont.head? = some (Config.run s_d B) := hcont.2
@@ -2700,7 +2701,7 @@ theorem CTA.WellSynchronized.last_batch_recycle_offset {I : CTA}
       omega
     have hnLen : ((A ^ n).prog t).length = n * (A.prog t).length := CTA.pow_prog_length A n t
     have hprogeq : (A ^ n).prog t = (A ^ (n - 2)).prog t ++ (A.seq A rfl).prog t :=
-      congrFun (congrArg CTA.prog hAn) t
+      congrFun (congrArg WeftCommon.CTA.prog hAn) t
     -- transport a two-batch instruction time into the `n`-batch trace (shifted by the prefix)
     have transport : ∀ (q M' : Nat), q < ((A.seq A rfl).prog t).length →
         IsTimeOf (Config.run State.initial (A.seq A rfl)) τAA ⟨t, q⟩ M' →
@@ -3003,7 +3004,8 @@ theorem pow_replay_recycle_structure {I : CTA} (h : I.ConsistentArrivalCounts) {
     {t₁ : List Config}
     (ht₁ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) t₁)
     (ht₁L : t₁.getLast? = some (Config.done s))
-    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false) (m : Nat) :
+    (hwf_s : (Config.WF (Config.run s (I ^ I.loopK h))))
+    (hfull : ∀ b, (s.B b).isFull = false) (m : Nat) :
     ∃ τ, IsSuccessfulTraceFrom (Config.run s ((I ^ I.loopK h) ^ m)) τ ∧
       τ.getLast? = some (Config.done s) ∧
       ∀ (t : ThreadId) (j : Nat) (c : Cmd) (b : Barrier) (par : ℕ+) (p M M₁ : Nat),
@@ -3245,21 +3247,21 @@ theorem pow_full_recycleCount {I : CTA} (h : I.ConsistentArrivalCounts) {s : Sta
     rw [← List.dropLast_append_getLast hτne, List.mem_append, List.mem_singleton] at hC
     rcases hC with hCd | hCl
     · obtain ⟨s', T', hrun⟩ := mem_dropLast_isRun hchain C hCd
-      rw [hCerr] at hrun; exact Config.noConfusion hrun
+      rw [hCerr] at hrun; exact nomatch hrun
     · rw [List.getLast?_eq_some_getLast hτne, Option.some.injEq] at hlast
-      rw [hlast, hCerr] at hCl; exact Config.noConfusion hCl
+      rw [hlast, hCerr] at hCl; exact nomatch hCl
   have hcmd_all : ∀ C ∈ τ, ∀ i c, c ∈ C.progOf i → ∀ p : ℕ+, Cmd.barrierRef c = some (b, p) →
       (p : Nat) = nb := by
     intro C hC i c hc p hbref
     have hc0 : c ∈ (Config.run s (A ^ m)).progOf i :=
       (progOf_suffix_head hchain hhead C hC i).subset hc
-    have hc1 : c ∈ (A ^ m).prog i := by simpa [Config.progOf] using hc0
+    have hc1 : c ∈ (A ^ m).prog i := by simpa [WeftCommon.Config.progOf] using hc0
     have hcA : c ∈ A.prog i := A.mem_pow_prog hc1
     have hcI : c ∈ I.prog i := by rw [hA] at hcA; exact I.mem_pow_prog hcA
     have hi : i ∈ I.ids := by
       by_contra hni; rw [I.nil_outside_ids i hni] at hcI; simp at hcI
     rw [hnb]; exact (h.choose_spec i hi c hcI b p hbref).symm
-  have hbcount0 : ∀ n', (Config.run s (A ^ m)).bcount b = some n' → (n' : Nat) = nb := by
+  have hbcount0 : ∀ n', (Config.bcount b (Config.run s (A ^ m))) = some n' → (n' : Nat) = nb := by
     intro n' hn'
     simp only [Config.bcount] at hn'
     rw [hnb]; exact hcount_s n' hn'
@@ -3271,10 +3273,10 @@ theorem pow_full_recycleCount {I : CTA} (h : I.ConsistentArrivalCounts) {s : Sta
   -- conservation with recycles
   have hcons := barrierPotential_with_recycles (b := b) (nb := nb) hchain hhead hlast hno_err
     hcount_all hBI_all
-  have hC₀pot : (Config.run s (A ^ m)).barrierPotential b
+  have hC₀pot : (Config.barrierPotential b (Config.run s (A ^ m)))
       = (s.B b).arrived + (A ^ m).arrivers b := by
     simp only [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, CTA.arrivers]
-  have hdonepot : (Config.done s).barrierPotential b = (s.B b).arrived := by
+  have hdonepot : (Config.barrierPotential b (Config.done s)) = (s.B b).arrived := by
     simp [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount]
   rw [hC₀pot, hdonepot] at hcons
   -- the start's own arrived count cancels (`s` is restored), leaving `m · A.arrivers b / nb`
@@ -3312,7 +3314,7 @@ theorem bstate_unconfigured_step {b : Barrier} {C C' : Config} (hstep : CTAStep 
       by_cases hbb : b = b₀
       · subst hbb
         have hmem : Cmd.arrive b n ∈ (Config.run s T).progOf i := by
-          simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self
+          simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self
         exact absurd rfl (hcmd i (Cmd.arrive b n) hmem n)
       · simp only [Function.update_of_ne hbb]; exact hCb
     | arrive_register he hb0 hpos hlt =>
@@ -3325,7 +3327,7 @@ theorem bstate_unconfigured_step {b : Barrier} {C C' : Config} (hstep : CTAStep 
       by_cases hbb : b = b₀
       · subst hbb
         have hmem : Cmd.sync b n ∈ (Config.run s T).progOf i := by
-          simp only [Config.progOf]; rw [hpi]; exact List.mem_cons_self
+          simp only [WeftCommon.Config.progOf]; rw [hpi]; exact List.mem_cons_self
         exact absurd rfl (hcmd i (Cmd.sync b n) hmem n)
       · simp only [Function.update_of_ne hbb]; exact hCb
     | sync_block he hb0 hpos hlt =>
@@ -3388,7 +3390,7 @@ theorem pow_full_recycleCount_zero {I : CTA} (h : I.ConsistentArrivalCounts) {s 
     intro C hC i c hc p hbref
     have hc0 : c ∈ (Config.run s (A ^ m)).progOf i :=
       (progOf_suffix_head hchain hhead C hC i).subset hc
-    have hc1 : c ∈ (A ^ m).prog i := by simpa [Config.progOf] using hc0
+    have hc1 : c ∈ (A ^ m).prog i := by simpa [WeftCommon.Config.progOf] using hc0
     have hcA : c ∈ A.prog i := A.mem_pow_prog hc1
     have hcI : c ∈ I.prog i := by rw [hA] at hcA; exact I.mem_pow_prog hcA
     have hi : i ∈ I.ids := by
@@ -3430,7 +3432,7 @@ theorem sync_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {s 
     {t : ThreadId} {j : Nat} {b : Barrier} {par : ℕ+} {M₁ : Nat}
     (hcj : ((I ^ I.loopK h).prog t)[j]? = some (Cmd.sync b par))
     (hM₁ : IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁)
-    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false) :
+    (hwf_s : (Config.WF (Config.run s (I ^ I.loopK h)))) (hfull : ∀ b, (s.B b).isFull = false) :
     recycleCount b t₁ (M₁ - 1) + 1 ≤ I.loopK h * I.arrivers b / I.arrivalCount h b := by
   set A := I ^ I.loopK h with hA
   have hchain1 : List.IsChain CTAStep t₁ := ht₁.1.1.subtrace
@@ -3489,7 +3491,7 @@ theorem barrierOp_recycleCount_le_batch {I : CTA} (h : I.ConsistentArrivalCounts
     {t : ThreadId} {j : Nat} {c : Cmd} {b : Barrier} {par : ℕ+} {M₁ : Nat}
     (hcj : ((I ^ I.loopK h).prog t)[j]? = some c) (hbr : Cmd.barrierRef c = some (b, par))
     (hM₁ : IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁)
-    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false) :
+    (hwf_s : (Config.WF (Config.run s (I ^ I.loopK h)))) (hfull : ∀ b, (s.B b).isFull = false) :
     recycleCount b t₁ (M₁ - 1) ≤ I.loopK h * I.arrivers b / I.arrivalCount h b := by
   set A := I ^ I.loopK h with hA
   have hchain1 : List.IsChain CTAStep t₁ := ht₁.1.1.subtrace
@@ -3524,7 +3526,7 @@ theorem arrive_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {
     {t : ThreadId} {j : Nat} {b : Barrier} {par : ℕ+} {M₁ : Nat}
     (hcj : ((I ^ I.loopK h).prog t)[j]? = some (Cmd.arrive b par))
     (hM₁ : IsTimeOf (Config.run s (I ^ I.loopK h)) t₁ ⟨t, j⟩ M₁)
-    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false)
+    (hwf_s : (Config.WF (Config.run s (I ^ I.loopK h)))) (hfull : ∀ b, (s.B b).isFull = false)
     (harr0 : (s.B b).arrived = 0) :
     recycleCount b t₁ (M₁ - 1) + 1 ≤ I.loopK h * I.arrivers b / I.arrivalCount h b := by
   set A := I ^ I.loopK h with hA
@@ -3570,9 +3572,9 @@ theorem arrive_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {
     rw [← List.dropLast_append_getLast hτne, List.mem_append, List.mem_singleton] at hC
     rcases hC with hCd | hCl
     · obtain ⟨s', T', hrun⟩ := mem_dropLast_isRun hchain1 C hCd
-      rw [hCerr] at hrun; exact Config.noConfusion hrun
+      rw [hCerr] at hrun; exact nomatch hrun
     · rw [List.getLast?_eq_some_getLast hτne, Option.some.injEq] at ht₁L
-      rw [ht₁L, hCerr] at hCl; exact Config.noConfusion hCl
+      rw [ht₁L, hCerr] at hCl; exact nomatch hCl
   -- Potential conservation on suffix σ = t₁.drop (M₁ - 1)
   set σ := t₁.drop (M₁ - 1) with hσdef
   have hσchain : List.IsChain CTAStep σ := hchain1.drop (M₁ - 1)
@@ -3591,26 +3593,27 @@ theorem arrive_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {
   have hcons := barrierPotential_conservation b hσchain hσhead hσlast
     (fun C hC T hCerr => hno_err C (List.mem_of_mem_drop hC) T hCerr) hσ_norec
   -- Φ(done s) = 0 (harr0 and no remaining commands)
-  have hpot_done : (Config.done s).barrierPotential b = 0 := by
+  have hpot_done : (Config.barrierPotential b (Config.done s)) = 0 := by
     simp [Config.barrierPotential, Config.arrivedLen, Config.barrierProgCount, harr0]
   -- CM1 is a run config (progOf t is non-empty; done has empty progOf)
   obtain ⟨sM, TM, hCM1run⟩ : ∃ sM TM, CM1 = Config.run sM TM := by
     cases CM1 with
     | run sM TM => exact ⟨sM, TM, rfl⟩
     | done sM =>
-      simp only [Config.progOf] at hprogM1
+      simp only [WeftCommon.Config.progOf] at hprogM1
       have : (A.prog t).drop j = [] := hprogM1.symm
       rw [List.drop_eq_nil_iff] at this; omega
     | err TM => exact absurd rfl (hno_err (Config.err TM) (List.mem_of_getElem? hCM1) TM)
   -- TM.ids = A.ids; t ∈ TM.ids; TM.prog t = (A.prog t).drop j
   have hTMids : TM.ids = A.ids :=
-    run_ids_chain hchain1 ht₁.1.2 (fun s₀ T₀ hC₀ => (congr_arg CTA.ids (Config.run.inj hC₀).2).symm)
+    run_ids_chain hchain1 ht₁.1.2
+      (fun s₀ T₀ hC₀ => (congr_arg WeftCommon.CTA.ids (Config.run.inj hC₀).2).symm)
       CM1 (List.mem_of_getElem? hCM1) sM TM hCM1run
   have htIds : t ∈ TM.ids := hTMids ▸ mem_ids_of_idx_lt A hjL
   have hTMprog : TM.prog t = (A.prog t).drop j := by
-    have h := hprogM1; rw [hCM1run] at h; simpa [Config.progOf] using h
+    have h := hprogM1; rw [hCM1run] at h; simpa [WeftCommon.Config.progOf] using h
   -- barrierProgCount b CM1 ≥ 1: arrive b par is at the head of TM.prog t
-  have hbpc : 1 ≤ CM1.barrierProgCount b := by
+  have hbpc : 1 ≤ Config.barrierProgCount b CM1 := by
     rw [hCM1run, Config.barrierProgCount]
     refine Nat.le_trans ?_ (Finset.single_le_sum (fun _ _ => Nat.zero_le _) htIds)
     rw [hTMprog]
@@ -3626,7 +3629,7 @@ theorem arrive_recycleCount_lt_batch {I : CTA} (h : I.ConsistentArrivalCounts) {
         List.countP_cons]
     simp
   -- Φ(CM1) ≥ 1 (potential = arrivedLen + barrierProgCount)
-  have hpot_pos : 1 ≤ CM1.barrierPotential b := by
+  have hpot_pos : 1 ≤ Config.barrierPotential b CM1 := by
     simp only [Config.barrierPotential]; omega
   rw [← hcons, hpot_done] at hpot_pos
   exact absurd hpot_pos (by omega)
@@ -4821,7 +4824,7 @@ theorem CTA.WellSynchronized.last_batches_recycle_offset {I : CTA}
       omega
     have hnLen : ((A ^ n).prog t).length = n * (A.prog t).length := CTA.pow_prog_length A n t
     have hprogeq : (A ^ n).prog t = (A ^ (n - 3)).prog t ++ (A.seq (A.seq A rfl) rfl).prog t :=
-      congrFun (congrArg CTA.prog hAn) t
+      congrFun (congrArg WeftCommon.CTA.prog hAn) t
     -- transport a three-batch instruction time into the `n`-batch trace (shifted by the prefix)
     have transport : ∀ (q M' : Nat), q < ((A.seq (A.seq A rfl) rfl).prog t).length →
         IsTimeOf (Config.run State.initial (A.seq (A.seq A rfl) rfl)) τAAA ⟨t, q⟩ M' →
@@ -6062,7 +6065,7 @@ The two cases are the seq-analogue of `last_batches_replay_bundle`'s `keygen`. -
 theorem glue_replay_gen {I : CTA} (h : I.ConsistentArrivalCounts) {s : State} {t₁ : List Config}
     (ht₁ : IsSuccessfulTraceFrom (Config.run s (I ^ I.loopK h)) t₁)
     (_ht₁L : t₁.getLast? = some (Config.done s)) {E : CTA}
-    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false)
+    (hwf_s : (Config.WF (Config.run s (I ^ I.loopK h)))) (hfull : ∀ b, (s.B b).isFull = false)
     (hids : (I ^ I.loopK h).ids = E.ids) {m : Nat} {τm : List Config}
     (hτm : IsSuccessfulTraceFrom (Config.run s ((I ^ I.loopK h) ^ m)) τm)
     (hτmL : τm.getLast? = some (Config.done s))
@@ -6681,7 +6684,7 @@ theorem seq_epilogue_pointGen_lower {I : CTA} (h : I.ConsistentArrivalCounts) {s
     (heL : ((I ^ I.loopK h).prog t).length ≤ e)
     (hcE : ((I ^ I.loopK h).seq E hids).cmdAt ⟨t, e⟩ = some c)
     (hbr : Cmd.barrierRef c = some (b, par)) (hbA : b ∈ (I ^ I.loopK h).barrierSet)
-    (hwf_s : (Config.run s (I ^ I.loopK h)).WF) (hfull : ∀ b, (s.B b).isFull = false) :
+    (hwf_s : (Config.WF (Config.run s (I ^ I.loopK h)))) (hfull : ∀ b, (s.B b).isFull = false) :
     I.loopK h * I.arrivers b / I.arrivalCount h b + 1
       ≤ pointGen ((I ^ I.loopK h).seq E hids) tE ⟨t, e⟩ := by
   set A := I ^ I.loopK h with hA
@@ -6880,7 +6883,7 @@ theorem loop_prefix_batch_data {I : CTA} (h : I.ConsistentArrivalCounts) {k : Na
     (hk : k = I.loopK h) {Pre E : CTA} (hpre : Pre.ids = (I ^ k).ids) (hids : (I ^ k).ids = E.ids)
     (hPre : Pre.WellSynchronized) (hPreBody : (Pre.seq (I ^ k) hpre).WellSynchronized)
     (hPreBatchE : (CTA.loopProgram Pre (I ^ k) E hpre hids 1).WellSynchronized) :
-    ∃ s_P, (∀ b, (s_P.B b).isFull = false) ∧ (∀ (T : CTA), (Config.run s_P T).WF) ∧
+    ∃ s_P, (∀ b, (s_P.B b).isFull = false) ∧ (∀ (T : CTA), (Config.WF (Config.run s_P T))) ∧
       ∃ tP, IsSuccessfulTraceFrom (Config.run State.initial Pre) tP ∧
         tP.getLast? = some (Config.done s_P) ∧
       ∃ t₁, IsSuccessfulTraceFrom (Config.run s_P (I ^ k)) t₁ ∧
@@ -6932,7 +6935,7 @@ theorem loop_prefix_ref_data {I : CTA} (h : I.ConsistentArrivalCounts) {k : Nat}
     (hk : k = I.loopK h) {Pre E_ref : CTA} (hpre : Pre.ids = (I ^ k).ids)
     (hidsRef : (I ^ k).ids = E_ref.ids)
     {s_P : State} (hfull : ∀ b, (s_P.B b).isFull = false)
-    (hwf_any : ∀ (T : CTA), (Config.run s_P T).WF)
+    (hwf_any : ∀ (T : CTA), (Config.WF (Config.run s_P T)))
     {tP : List Config} (htP : IsSuccessfulTraceFrom (Config.run State.initial Pre) tP)
     (htPL : tP.getLast? = some (Config.done s_P))
     {t₁ : List Config} (ht₁ : IsSuccessfulTraceFrom (Config.run s_P (I ^ k)) t₁)
@@ -6996,7 +6999,7 @@ theorem CTA.WellSynchronized.loop_epilogue_replay_bundle {I : CTA}
     (ht₁L : t₁.getLast? = some (Config.done s)) {tE : List Config}
     (htE : IsSuccessfulTraceFrom (Config.run s ((I ^ k).seq E hids)) tE)
     (htEpre : t₁.dropLast.map (Config.seqLift (I ^ k) E) <+: tE)
-    (hfull : ∀ b, (s.B b).isFull = false) (hwf_any : ∀ (T : CTA), (Config.run s T).WF) :
+    (hfull : ∀ b, (s.B b).isFull = false) (hwf_any : ∀ (T : CTA), (Config.WF (Config.run s T))) :
     ∃ τ, IsSuccessfulTraceFrom (Config.run s
         (((I ^ k) ^ (n + 1)).seq E ((CTA.pow_ids (I ^ k) (n + 1)).trans hids))) τ ∧
       -- (co-location) a flagged pair is front-local or fully shiftable
@@ -10236,14 +10239,14 @@ theorem checkLoopWellSynchronized_correct_empty_impl {I : CTA} (h : I.Consistent
     checkLoopWellSynchronized (CTA.empty I.ids I.ids_nonempty) I (CTA.empty I.ids I.ids_nonempty)
         h rfl rfl (τ ⟨0, by omega⟩) (τ ⟨I.loopK h, by omega⟩) τ = true
       ↔ ∀ n : Nat, (I ^ n).WellSynchronized := by
-  have hOemp : ∀ t, (CTA.empty I.ids I.ids_nonempty).prog t = [] := fun _ => rfl
+  have hOemp : ∀ t, (CTA.empty I.ids I.ids_nonempty : CTA).prog t = [] := fun _ => rfl
   -- the empty prefix's trace is the `0`-unrolling (which equals the empty CTA)
   have hτp : IsSuccessfulTraceFrom (Config.run State.initial (CTA.empty I.ids I.ids_nonempty))
       (τ ⟨0, by omega⟩) := hτ ⟨0, by omega⟩
   -- `P ⨾ I^k` is the `k`-unrolling with its trailing (empty) epilogue dropped
   have hloopk : CTA.loopProgram (CTA.empty I.ids I.ids_nonempty) I
         (CTA.empty I.ids I.ids_nonempty) rfl rfl (I.loopK h)
-      = (CTA.empty I.ids I.ids_nonempty).seq (I ^ I.loopK h)
+      = CTA.seq (CTA.empty I.ids I.ids_nonempty) (I ^ I.loopK h)
         (rfl.trans (CTA.pow_ids I (I.loopK h)).symm) := by
     apply CTA.ext
     · rfl
@@ -10253,12 +10256,12 @@ theorem checkLoopWellSynchronized_correct_empty_impl {I : CTA} (h : I.Consistent
         = (CTA.empty I.ids I.ids_nonempty).prog t ++ (I ^ I.loopK h).prog t
       rw [hOemp, List.append_nil]
   have hτpk : IsSuccessfulTraceFrom (Config.run State.initial
-      ((CTA.empty I.ids I.ids_nonempty).seq (I ^ I.loopK h)
+      (CTA.seq (CTA.empty I.ids I.ids_nonempty) (I ^ I.loopK h)
         (rfl.trans (CTA.pow_ids I (I.loopK h)).symm))) (τ ⟨I.loopK h, by omega⟩) := by
     have ht := hτ ⟨I.loopK h, by omega⟩
     rwa [hloopk] at ht
   -- `P ⨾ I^k = I^k` (empty prefix) and `loopProgram (empty) I (empty) n = I^n`
-  have hpkeq : (CTA.empty I.ids I.ids_nonempty).seq (I ^ I.loopK h)
+  have hpkeq : CTA.seq (CTA.empty I.ids I.ids_nonempty) (I ^ I.loopK h)
         (rfl.trans (CTA.pow_ids I (I.loopK h)).symm) = I ^ I.loopK h := by
     apply CTA.ext
     · change I.ids = (I ^ I.loopK h).ids; rw [CTA.pow_ids]

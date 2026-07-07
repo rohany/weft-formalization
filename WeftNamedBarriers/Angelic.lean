@@ -89,9 +89,9 @@ unchanged, since `A ⨾ B` performs the same steps while in its `A`-phase). A fi
 `A`-configuration (`done`) becomes the `A ⨾ B` configuration in which `A` is done and
 `B` is about to start. -/
 def Config.seqLift (A B : CTA) : Config → Config
-  | .run s C => .run s (C.appendTail B)
+  | .run s C => .run s (CTA.appendTail C B)
   | .done s  => .run s (A.emptied.appendTail B)
-  | .err T   => .err (T.appendTail B)
+  | .err T   => .err (CTA.appendTail T B)
 
 /- CLAUDE: Place helper methods for proving the angelic prefix lemma between here: -/
 
@@ -132,11 +132,11 @@ theorem CTAStep.appendTail {s s' : State} {C C' : CTA} (B : CTA)
     have hi' : i ∈ (C.appendTail B).ids := Finset.mem_union_left _ hi
     have hth' : ThreadStep (.run s i ((C.appendTail B).prog i)) (.run s' i (P' ++ B.prog i)) :=
       hth.appendProg
-    have hCTA : (C.appendTail B).set i hi' (P' ++ B.prog i) = (C.set i hi P').appendTail B := by
+    have hCTA : (C.appendTail B).set i hi' (P' ++ B.prog i) = CTA.appendTail (C.set i hi P') B := by
       apply CTA.ext
       · rfl
       · funext j
-        simp only [CTA.set, CTA.appendTail, Function.update_apply]
+        simp only [WeftCommon.CTA.set, CTA.appendTail, Function.update_apply]
         by_cases hj : j = i <;> simp [hj]
     rw [← hCTA]
     exact CTAStep.interleave hi' hbar hth'
@@ -148,7 +148,7 @@ theorem CTAStep.appendTail {s s' : State} {C C' : CTA} (B : CTA)
       cases hpj : C.prog j with
       | nil => rw [hpj] at hp; simp at hp
       | cons x xs => rw [hpj] at hp; simpa using hp
-    have hCTA : (C.appendTail B).wake I = (C.wake I).appendTail B := by
+    have hCTA : (C.appendTail B).wake I = CTA.appendTail (C.wake I) B := by
       apply CTA.ext
       · rfl
       · funext j
@@ -156,8 +156,8 @@ theorem CTAStep.appendTail {s s' : State} {C C' : CTA} (B : CTA)
         · have hne : C.prog j ≠ [] := by
             have := hpark j hj; intro h; rw [h] at this; simp at this
           obtain ⟨x, xs, hxs⟩ := List.exists_cons_of_ne_nil hne
-          simp [CTA.wake, CTA.appendTail, hj, hxs]
-        · simp [CTA.wake, CTA.appendTail, hj]
+          simp [WeftCommon.CTA.wake, CTA.appendTail, hj, hxs]
+        · simp [WeftCommon.CTA.wake, CTA.appendTail, hj]
     rw [← hCTA]
     exact CTAStep.recycle hb hfull hpark'
 
