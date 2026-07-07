@@ -146,13 +146,7 @@ structure State where
   `MBarrierState`. -/
   BM : SharedBarrier → MBarrierState
 
-/-- Map update over a set of keys, realizing the paper's `f[x/Y]`: the map that
-agrees with `f` on all inputs not in `Y`, and maps every `y ∈ Y` to `x`. Built as
-an iterated `Function.update` so it inherits that primitive's lemmas. (The
-single-key update `f[x/y]` is just `Function.update f y x` directly.) -/
-def updateMapOn {α β : Type} [DecidableEq α]
-    (f : α → β) (Y : List α) (x : β) : α → β :=
-  Y.foldr (fun y g => Function.update g y x) f
+export WeftCommon (updateMapOn)
 
 namespace State
 
@@ -193,9 +187,5 @@ theorem ArrivedCountEquiv.isEquivalence : Equivalence State.ArrivedCountEquiv :=
   ⟨ArrivedCountEquiv.refl, fun h => h.symm, fun h₁ h₂ => h₁.trans h₂⟩
 
 end State
-
-/-- `done`: a CTA with no more commands to execute, i.e. every thread in the
-domain has reached `return` (the empty command list `[]`). -/
-def CTA.IsDone (T : CTA) : Prop := ∀ i ∈ T.ids, T.prog i = []
 
 end WeftMBarriers

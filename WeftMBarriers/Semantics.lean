@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Rohan Yadav
 -/
 import WeftMBarriers.State
+import WeftCommon.Traces
 
 /-!
 # The Weft++ operational semantics (§5.2, Figures 4–5)
@@ -126,16 +127,17 @@ inductive ThreadConfig where
   /-- `err, i, P`: thread `i` has produced the error state. -/
   | err (i : ThreadId) (P : Prog)
 
-/-- A CTA-level configuration. Following the paper, `done` keeps the state and
-collapses the CTA, whereas `err` replaces the state with the error state but
-keeps the CTA. -/
-inductive Config where
-  /-- `E, BN, BM, T`: CTA `T` running in state `s`. -/
-  | run (s : State) (T : CTA)
-  /-- `E, BN, BM, done`: the CTA has no more commands to execute. -/
-  | done (s : State)
-  /-- `err, T`: the error state, carrying the CTA `T`. -/
-  | err (T : CTA)
+/-- A CTA-level configuration: the shared functor `WeftCommon.Config`
+instantiated at this language's states and commands. Following the paper,
+`done` keeps the state and collapses the CTA, whereas `err` replaces the state
+with the error state but keeps the CTA. The constructors are re-exported below
+under their usual names. -/
+abbrev Config := WeftCommon.Config State Cmd
+
+namespace Config
+export WeftCommon.Config (run done err noConfusion
+  run.injEq done.injEq err.injEq run.inj done.inj err.inj)
+end Config
 
 /-- The thread-level small-step relation
 `E, BN, BM, i, P  ⤳  E', BN', BM', i, P'` (Figure 4, named-barrier fragment).

@@ -1191,7 +1191,7 @@ theorem recycle_advances_synced {C C' : Config} (hstep : CTAStep C C') {b : Barr
       have htI : t ∈ I := by
         obtain rfl : s₀ = s := by simpa [Config.state?] using hCs
         rw [hb] at ht; exact ht
-      simp only [Config.progOf, CTA.wake, if_pos htI]
+      simp only [WeftCommon.Config.progOf, WeftCommon.CTA.wake, if_pos htI]
     · exfalso
       simp [stepRecyclesBarrier, Config.state?, Function.update_of_ne hbb,
         isFull_and_unconfigured_false] at hrec
@@ -1239,7 +1239,7 @@ theorem synced_before_recycle {C₀ : Config} {τ : List Config} {b : Barrier} {
       obtain ⟨rfl, rfl⟩ := hp
       rw [hb]; exact hit
     · exfalso
-      simp [Config.progOf, CTA.wake, hit] at hsmprog
+      simp [WeftCommon.Config.progOf, WeftCommon.CTA.wake, hit] at hsmprog
   | @done _ _ hdone hnofull =>
     exfalso
     simp [stepRecyclesBarrier, Config.state?, isFull_and_unconfigured_false] at hrec
@@ -1421,13 +1421,13 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
     ∃ C', CTAStep C C' ∧ GBounded T τ η₁ C' := by
   classical
   obtain ⟨s, T_C, rfl, hbound, hpurity⟩ := hGB
-  have hwf : (Config.run s T_C).WF := WF_of_reaches hreach
+  have hwf : (Config.WF (Config.run s T_C)) := WF_of_reaches hreach
   -- a `G`-thread `i₀` still has commands below its cut (`¬ Gdone`)
   simp only [Gdone, not_forall] at hnotdone
   obtain ⟨i₀, hi₀ids, hi₀ne⟩ := hnotdone
   obtain ⟨e₀, he₀le, he₀prog⟩ := hbound i₀
   have hi₀G : e₀ < fcut T τ η₁ i₀ := by
-    simp only [Config.progOf] at hi₀ne
+    simp only [WeftCommon.Config.progOf] at hi₀ne
     rw [he₀prog, List.length_drop] at hi₀ne
     have hcl := fcut_le_length T τ η₁ i₀
     omega
@@ -1443,9 +1443,9 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
         rw [heprog, List.length_drop] at hpj
         have hcl := fcut_le_length T τ η₁ j
         refine ⟨e + 1, by omega, ?_⟩
-        simp only [CTA.wake, hjI, if_true]
+        simp only [WeftCommon.CTA.wake, hjI, if_true]
         rw [heprog, List.tail_drop]
-      · exact ⟨e, hele, by simp only [CTA.wake, hjI, if_false]; exact heprog⟩
+      · exact ⟨e, hele, by simp only [WeftCommon.CTA.wake, hjI, if_false]; exact heprog⟩
     · intro b' j hj'
       by_cases hb'b : b' = b
       · subst hb'b
@@ -1457,7 +1457,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
           intro hjI
           exact hb'b (hwf.2.2.2.2 b' b j hjsynced (by rw [hbeq]; exact hjI))
         have hpj := hpurity b' j hjsynced
-        simpa only [CTA.wake, hjnotI, if_false] using hpj
+        simpa only [WeftCommon.CTA.wake, hjnotI, if_false] using hpj
   · -- **Case B**: no barrier is full, so `hbar` holds (every barrier unconfigured/under-full).
     push Not at hfull
     have hbar : ∀ bb, s.B bb = BarrierState.unconfigured ∨
@@ -1485,17 +1485,17 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
         refine ⟨s', _, rfl, ?_, ?_⟩
         · intro j
           by_cases hji : j = i
-          · subst hji; exact ⟨e + 1, by omega, by simp [CTA.set, Function.update_self]⟩
+          · subst hji; exact ⟨e + 1, by omega, by simp [WeftCommon.CTA.set, Function.update_self]⟩
           · obtain ⟨ej, hjle, hjprog⟩ := hbound j
             exact ⟨ej, hjle, by
-              simp only [CTA.set, Function.update_of_ne hji]; exact hjprog⟩
+              simp only [WeftCommon.CTA.set, Function.update_of_ne hji]; exact hjprog⟩
         · intro b'' j hj
           rw [hsyn] at hj
           have hjnoti : j ≠ i := by
             intro hji; subst hji
             exact absurd hen (by rw [hwf.2.2.2.1 b'' j hj]; simp)
           have hpj := hpurity b'' j hj
-          simp only [CTA.set, Function.update_of_ne hjnoti]; exact hpj
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hjnoti]; exact hpj
       cases hcmd : (T.prog i)[e]'hi_len with
       | read g =>
         exact ⟨_, CTAStep.interleave hiids hbar (by rw [hhead, hcmd]; exact ThreadStep.read_noop),
@@ -1542,8 +1542,8 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
             (Cmd.sync b n :: (T.prog i).drop (e + 1))).prog j = T_C.prog j := by
           intro j
           by_cases hj : j = i
-          · subst hj; simp only [CTA.set, Function.update_self]; rw [hhead, hcmd]
-          · simp only [CTA.set, Function.update_of_ne hj]
+          · subst hj; simp only [WeftCommon.CTA.set, Function.update_self]; rw [hhead, hcmd]
+          · simp only [WeftCommon.CTA.set, Function.update_of_ne hj]
         rcases hbar b with hbu | ⟨I, A, n', hbcfg, hlt⟩
         · refine ⟨_, CTAStep.interleave hiids hbar
             (by rw [hhead, hcmd]; exact ThreadStep.sync_configure hen hbu), gbPark _ _ hprogeq ?_⟩
@@ -1584,7 +1584,8 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
       have hCmem : Config.run s T_C ∈ lc := List.mem_of_mem_getLast? hllast
       obtain ⟨b₁, hi₀b₁⟩ := hei _ hCmem s rfl i₀ hi₀dis
       -- Build the full trace `Σ` from `initial` through `C` to `done` (glue prefix + completion).
-      have hbwC : (Config.run s T_C).barriersWithin T.barrierSet := barriersWithin_of_reaches hreach
+      have hbwC : (Config.barriersWithin T.barrierSet (Config.run s T_C)) :=
+        barriersWithin_of_reaches hreach
       obtain ⟨σ, hσIC, hσhd⟩ := exists_completeTrace T.barrierSet (Config.run s T_C) hbwC
       obtain ⟨σtail, rfl⟩ : ∃ l, σ = Config.run s T_C :: l := by
         cases σ with
@@ -1927,7 +1928,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
             have hLcfg : (T.prog ii).length - (Td.prog ii).length < (T.prog ii).length := by omega
             have hC'eq : (Td.set ii hii P').prog ii =
                 (T.prog ii).drop ((T.prog ii).length - (Td.prog ii).length + 1) := by
-              simp only [CTA.set, Function.update_self]
+              simp only [WeftCommon.CTA.set, Function.update_self]
               rw [← List.drop_drop, ← hedprog, hpi, List.drop_one, List.tail_cons]
             have hmi : IsTimeOf (Config.run State.initial T) tr
                 (⟨ii, (T.prog ii).length - (Td.prog ii).length⟩ : ProgPoint) (d + 1) :=
@@ -1958,7 +1959,7 @@ theorem gstep {T : CTA} {τ : List Config} {η₁ : ProgPoint}
               rw [Function.update_self]; exact List.mem_cons_self
             have hprog' : (Td.set ii hii (Cmd.sync b'' nn :: c)).prog ii =
                 (T.prog ii).drop ((T.prog ii).length - (Td.prog ii).length) := by
-              rw [← hedprog]; simp only [CTA.set, Function.update_self]; exact hpi.symm
+              rw [← hedprog]; simp only [WeftCommon.CTA.set, Function.update_self]; exact hpi.symm
             have htdlen : 0 < (Td.prog ii).length := by rw [hpi]; simp
             have hsuflen : (Td.prog ii).length ≤ (T.prog ii).length := suffix_length_le hsuf0
             have hLcfg : (T.prog ii).length - (Td.prog ii).length < (T.prog ii).length := by omega
@@ -2017,7 +2018,7 @@ theorem reach_cut_aux {T : CTA} {τ : List Config} {η₁ : ProgPoint}
       · obtain ⟨e, hele, hprog⟩ := he i
         by_cases hi : i ∈ T.ids
         · have hd := hdone i hi
-          simp only [Config.progOf] at hd
+          simp only [WeftCommon.Config.progOf] at hd
           rw [hprog, List.length_drop] at hd
           have hcl := fcut_le_length T τ η₁ i
           rw [hprog, show e = fcut T τ η₁ i by omega]
@@ -2028,7 +2029,7 @@ theorem reach_cut_aux {T : CTA} {τ : List Config} {η₁ : ProgPoint}
         have heq : (T.prog i).length - (T_C.prog i).length = fcut T τ η₁ i := by
           by_cases hi : i ∈ T.ids
           · have hd := hdone i hi
-            simp only [Config.progOf] at hd
+            simp only [WeftCommon.Config.progOf] at hd
             rw [hprog, List.length_drop] at hd ⊢
             have hcl := fcut_le_length T τ η₁ i
             omega
@@ -2065,7 +2066,7 @@ theorem run_ideal {T : CTA} {τ : List Config} {η₁ : ProgPoint}
       (∀ b i, i ∉ (s_G.B b).synced) := by
   -- run `G` to the cut config `C_G`
   obtain ⟨pre, s_G, T_G, hhd, hch, hlast, hcut, hreachG, hsempty⟩ :=
-    reach_cut_aux hτ hws ((Config.run State.initial T).cfgMeasure T.barrierSet)
+    reach_cut_aux hτ hws ((Config.cfgMeasure T.barrierSet (Config.run State.initial T)))
       (Config.run State.initial T) (GBounded_init T τ η₁) Relation.ReflTransGen.refl rfl
   have hpne : pre ≠ [] := by intro h; rw [h] at hhd; simp at hhd
   have hpos : 0 < pre.length := List.length_pos_of_ne_nil hpne
@@ -2073,7 +2074,8 @@ theorem run_ideal {T : CTA} {τ : List Config} {η₁ : ProgPoint}
     have h := List.getLast?_eq_some_getLast hpne
     rw [hlast] at h; exact (Option.some.injEq _ _).mp h.symm
   -- `C_G` is reachable, so it satisfies the support invariant; complete from it.
-  have hbwG : (Config.run s_G T_G).barriersWithin T.barrierSet := barriersWithin_of_reaches hreachG
+  have hbwG : (Config.barriersWithin T.barrierSet (Config.run s_G T_G)) :=
+    barriersWithin_of_reaches hreachG
   obtain ⟨σ, hσIC, hσhead⟩ := exists_completeTrace T.barrierSet (Config.run s_G T_G) hbwG
   obtain ⟨σtail, rfl⟩ : ∃ l, σ = Config.run s_G T_G :: l := by
     cases σ with
@@ -2571,8 +2573,8 @@ theorem stepRecyclesBarrier_elim {C C' : Config} (hstep : CTAStep C C') {b : Bar
     ∃ s Tc I A n, C = Config.run s Tc ∧ s.B b = ⟨I, A, some n⟩ ∧
       I.length + A = (n : ℕ) ∧ (∀ i ∈ I, (Tc.prog i).head? = some (Cmd.sync b n)) ∧
       C' = Config.run
-                      { E := updateMapOn s.E I true,
-                        B := Function.update s.B b BarrierState.unconfigured }
+                      ({ E := updateMapOn s.E I true,
+                         B := Function.update s.B b BarrierState.unconfigured } : State)
              (Tc.wake I) := by
   cases hstep with
   | @interleave s s' Tc i P' hi hbar hth =>
@@ -2826,13 +2828,13 @@ theorem arrived_step {C C' : Config} (hstep : CTAStep C C') {b : Barrier}
       by_cases hbb : b = ba
       · subst hbb
         refine Or.inr (Or.inl ⟨t, na, P', hPi, ?_⟩)
-        simp [Config.progOf, CTA.set, Function.update_self]
+        simp [WeftCommon.Config.progOf, WeftCommon.CTA.set, Function.update_self]
       · exact Or.inl (by simp only [Function.update_of_ne hbb])
     | @arrive_register _ _ ba na _ I A he hb hpos hlt =>
       by_cases hbb : b = ba
       · subst hbb
         refine Or.inr (Or.inl ⟨t, na, P', hPi, ?_⟩)
-        simp [Config.progOf, CTA.set, Function.update_self]
+        simp [WeftCommon.Config.progOf, WeftCommon.CTA.set, Function.update_self]
       · exact Or.inl (by simp only [Function.update_of_ne hbb])
     | @sync_configure _ _ ba na _ he hb =>
       by_cases hbb : b = ba
@@ -2891,7 +2893,7 @@ theorem arrive_exec_decode {C C' : Config} (hstep : CTAStep C C') {i : ThreadId}
     · exfalso
       have hCc : Tc.prog i = Cmd.arrive b n' :: rest := hC
       have hsame : (Tc.set t ht P').prog i = Tc.prog i := by
-        simp [CTA.set, Function.update_of_ne (Ne.symm hti)]
+        simp [WeftCommon.CTA.set, Function.update_of_ne (Ne.symm hti)]
       have hC'' : Tc.prog i = rest := by rw [← hsame]; exact hC'
       rw [hC''] at hCc
       have hlen := congrArg List.length hCc
@@ -2903,7 +2905,7 @@ theorem arrive_exec_decode {C C' : Config} (hstep : CTAStep C C') {i : ThreadId}
     · have hhd := hpark i hi
       rw [hCc] at hhd
       simp at hhd
-    · have hsame : (Tc.wake I).prog i = Tc.prog i := by simp [CTA.wake, if_neg hi]
+    · have hsame : (Tc.wake I).prog i = Tc.prog i := by simp [WeftCommon.CTA.wake, if_neg hi]
       have hCw : (Tc.wake I).prog i = rest := hC'
       rw [hsame, hCc] at hCw
       have hlen := congrArg List.length hCw
@@ -3288,7 +3290,7 @@ theorem arrive_drop_thread_unique {C C' : Config} (hstep : CTAStep C C')
       · rw [hti, hti2]
       · exfalso
         have hsame : (Tc.set t ht P').prog i₂ = Tc.prog i₂ := by
-          simp [CTA.set, Function.update_of_ne hti2]
+          simp [WeftCommon.CTA.set, Function.update_of_ne hti2]
         have hc : Tc.prog i₂ = Cmd.arrive b₂ n₂ :: r₂ := h2
         have hc' : Tc.prog i₂ = r₂ := by rw [← hsame]; exact h2'
         rw [hc'] at hc
@@ -3296,7 +3298,7 @@ theorem arrive_drop_thread_unique {C C' : Config} (hstep : CTAStep C C')
         simp at hlen
     · exfalso
       have hsame : (Tc.set t ht P').prog i₁ = Tc.prog i₁ := by
-        simp [CTA.set, Function.update_of_ne hti]
+        simp [WeftCommon.CTA.set, Function.update_of_ne hti]
       have hc : Tc.prog i₁ = Cmd.arrive b₁ n₁ :: r₁ := h1
       have hc' : Tc.prog i₁ = r₁ := by rw [← hsame]; exact h1'
       rw [hc'] at hc
@@ -3309,7 +3311,7 @@ theorem arrive_drop_thread_unique {C C' : Config} (hstep : CTAStep C C')
     · have hhd := hpark i₁ hi
       rw [hc] at hhd
       simp at hhd
-    · have hsame : (Tc.wake I).prog i₁ = Tc.prog i₁ := by simp [CTA.wake, if_neg hi]
+    · have hsame : (Tc.wake I).prog i₁ = Tc.prog i₁ := by simp [WeftCommon.CTA.wake, if_neg hi]
       have hc' : (Tc.wake I).prog i₁ = r₁ := h1'
       rw [hsame, hc] at hc'
       have hlen := congrArg List.length hc'
@@ -3411,8 +3413,8 @@ theorem genFiber_round_data {T : CTA} {τ : List Config}
       I.length + A = (n : ℕ) ∧
       (∀ i ∈ I, (Tc.prog i).head? = some (Cmd.sync b n)) ∧
       τ[p + 1]? = some (Config.run
-        { E := updateMapOn s.E I true,
-          B := Function.update s.B b BarrierState.unconfigured } (Tc.wake I)) ∧
+        ({ E := updateMapOn s.E I true,
+           B := Function.update s.B b BarrierState.unconfigured } : State) (Tc.wake I)) ∧
       (∀ η ∈ genFiber T τ b g, (T.cmdAt η).bind Cmd.count? = some n) ∧
       (∀ η ∈ genFiber T τ b g, ∀ nn : ℕ+, T.cmdAt η = some (.sync b nn) →
         η.thread ∈ I ∧ Tc.prog η.thread = (T.prog η.thread).drop η.idx) ∧
@@ -3458,15 +3460,15 @@ theorem genFiber_round_data {T : CTA} {τ : List Config}
       exact Option.some.inj hC
     subst hDeq
     have hD'eq : D' = Config.run
-        { E := updateMapOn s.E I true,
-          B := Function.update s.B b BarrierState.unconfigured } (Tc.wake I) := by
+        ({ E := updateMapOn s.E I true,
+           B := Function.update s.B b BarrierState.unconfigured } : State) (Tc.wake I) := by
       rw [hD'] at hC'
       exact Option.some.inj hC'
     subst hD'eq
     have htI : η.thread ∈ I := by
       by_contra htn
       have hsame : (Tc.wake I).prog η.thread = Tc.prog η.thread := by
-        simp [CTA.wake, if_neg htn]
+        simp [WeftCommon.CTA.wake, if_neg htn]
       have h1 : Tc.prog η.thread =
           ((Config.run State.initial T).progOf η.thread).drop η.idx := hDdrop
       have h2 : (Tc.wake I).prog η.thread =
@@ -3491,10 +3493,10 @@ theorem genFiber_round_data {T : CTA} {τ : List Config}
         exact ⟨l, by rw [hhead]⟩
     have hCprog : (Config.run s Tc).progOf i = Cmd.sync b n :: rest := hrest
     have hC'prog : (Config.run
-        { E := updateMapOn s.E I true,
-          B := Function.update s.B b BarrierState.unconfigured }
+        ({ E := updateMapOn s.E I true,
+           B := Function.update s.B b BarrierState.unconfigured } : State)
         (Tc.wake I)).progOf i = rest := by
-      simp only [Config.progOf, CTA.wake, if_pos hi, hrest, List.tail_cons]
+      simp only [WeftCommon.Config.progOf, WeftCommon.CTA.wake, if_pos hi, hrest, List.tail_cons]
     obtain ⟨htime, hcmd⟩ := exec_step_time hτ.1 hC hC' hCprog hC'prog
     refine ⟨_, mem_genFiber.mpr ⟨mem_progPoints_of_cmdAt T hcmd, ?_, ?_⟩, rfl, n, hcmd⟩
     · rw [hcmd]; rfl
@@ -3732,10 +3734,11 @@ theorem genFiber_nonempty_of_succ {T : CTA} {τ : List Config}
         exact ⟨l, by rw [hhead]⟩
     have hCprog : (Config.run s Tc).progOf t = Cmd.sync b n :: rest := hrest
     have hC'prog : (Config.run
-        { E := updateMapOn s.E (t :: I') true,
-          B := Function.update s.B b BarrierState.unconfigured }
+        ({ E := updateMapOn s.E (t :: I') true,
+           B := Function.update s.B b BarrierState.unconfigured } : State)
         (Tc.wake (t :: I'))).progOf t = rest := by
-      simp only [Config.progOf, CTA.wake, if_pos (List.mem_cons_self ..), hrest,
+      simp only [WeftCommon.Config.progOf, WeftCommon.CTA.wake,
+        if_pos (List.mem_cons_self ..), hrest,
         List.tail_cons]
     obtain ⟨htime, hcmd⟩ := exec_step_time hτ.1 hC hC' hCprog hC'prog
     refine ⟨_, mem_genFiber.mpr ⟨mem_progPoints_of_cmdAt T hcmd, ?_, ?_⟩⟩
@@ -5156,7 +5159,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       intro η hidx hd1 hd2
       by_contra hηt
       have hsame : (Tc.set t ht P').prog η.thread = Tc.prog η.thread := by
-        simp [CTA.set, Function.update_of_ne hηt]
+        simp [WeftCommon.CTA.set, Function.update_of_ne hηt]
       have hd2' : (Tc.set t ht P').prog η.thread =
           (T.prog η.thread).drop (η.idx + 1) := hd2
       rw [hsame, hd1] at hd2'
@@ -5220,8 +5223,8 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
           pointerAt T x (Config.run s Tc)) := by
       intro x sl P₂ htx hxt
       have hsame : (Tc.set t htx P₂).prog x.thread = Tc.prog x.thread := by
-        simp [CTA.set, Function.update_of_ne hxt]
-      simp [pointerAt, Config.progOf, hsame]
+        simp [WeftCommon.CTA.set, Function.update_of_ne hxt]
+      simp [pointerAt, WeftCommon.Config.progOf, hsame]
     obtain ⟨Pt, hPt⟩ : ∃ P, Tc.prog t = P := ⟨_, rfl⟩
     rw [hPt] at hth
     cases hth with
@@ -5378,7 +5381,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         change ((Tc.set t ht P').prog t).length +
           ((T.prog t).length - (Tc.prog t).length + 1) ≤ (T.prog t).length
         have hset : (Tc.set t ht P').prog t = P' := by
-          simp [CTA.set, Function.update_self]
+          simp [WeftCommon.CTA.set, Function.update_self]
         rw [hset]
         have hcclen : (Tc.prog t).length = P'.length + 1 := by rw [hPt]; simp
         omega
@@ -5604,7 +5607,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         change ((Tc.set t ht P').prog t).length +
           ((T.prog t).length - (Tc.prog t).length + 1) ≤ (T.prog t).length
         have hset : (Tc.set t ht P').prog t = P' := by
-          simp [CTA.set, Function.update_self]
+          simp [WeftCommon.CTA.set, Function.update_self]
         rw [hset]
         have hcclen : (Tc.prog t).length = P'.length + 1 := by rw [hPt]; simp
         omega
@@ -5831,13 +5834,13 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         mem_genFiber.mpr ⟨hmemN, hbarN, hrr⟩
       -- the stepping thread's program is unchanged (control stays at the `sync`)
       have hsetsame : (Tc.set t ht (Cmd.sync ba na :: cc)).prog t = Tc.prog t := by
-        simp only [CTA.set, Function.update_self]
+        simp only [WeftCommon.CTA.set, Function.update_self]
         rw [hPt]
       have hnodrop : ∀ (η : ProgPoint), η.idx < (T.prog η.thread).length →
           Tc.prog η.thread = (T.prog η.thread).drop η.idx →
           (Config.run
-            { E := Function.update s.E t false,
-              B := Function.update s.B ba ⟨[t], 0, some na⟩ }
+            ({ E := Function.update s.E t false,
+               B := Function.update s.B ba ⟨[t], 0, some na⟩ } : State)
             (Tc.set t ht (Cmd.sync ba na :: cc))).progOf η.thread =
             (T.prog η.thread).drop (η.idx + 1) → False := by
         intro η hidx hd1 hd2
@@ -5853,8 +5856,8 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       -- pointer transfer for every thread (t's program is unchanged too)
       have hpointer_all : ∀ (x : ProgPoint),
           (pointerAt T x (Config.run
-            { E := Function.update s.E t false,
-              B := Function.update s.B ba ⟨[t], 0, some na⟩ }
+            ({ E := Function.update s.E t false,
+               B := Function.update s.B ba ⟨[t], 0, some na⟩ } : State)
             (Tc.set t ht (Cmd.sync ba na :: cc))) ↔
             pointerAt T x (Config.run s Tc)) := by
         intro x
@@ -5862,7 +5865,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         · have hsame : (Tc.set t ht (Cmd.sync ba na :: cc)).prog x.thread =
               Tc.prog x.thread := by
             rw [hxt, hsetsame]
-          simp [pointerAt, Config.progOf, hsame]
+          simp [pointerAt, WeftCommon.Config.progOf, hsame]
         · exact hpointer_ne x _ _ ht hxt
       refine ⟨?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
@@ -6057,13 +6060,13 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
           genFiber T τ ba (recycleCount ba τ' (τ'.length - 1) + 1) :=
         mem_genFiber.mpr ⟨hmemN, hbarN, hrr⟩
       have hsetsame : (Tc.set t ht (Cmd.sync ba na :: cc)).prog t = Tc.prog t := by
-        simp only [CTA.set, Function.update_self]
+        simp only [WeftCommon.CTA.set, Function.update_self]
         rw [hPt]
       have hnodrop : ∀ (η : ProgPoint), η.idx < (T.prog η.thread).length →
           Tc.prog η.thread = (T.prog η.thread).drop η.idx →
           (Config.run
-            { E := Function.update s.E t false,
-              B := Function.update s.B ba ⟨t :: I, A, some na⟩ }
+            ({ E := Function.update s.E t false,
+               B := Function.update s.B ba ⟨t :: I, A, some na⟩ } : State)
             (Tc.set t ht (Cmd.sync ba na :: cc))).progOf η.thread =
             (T.prog η.thread).drop (η.idx + 1) → False := by
         intro η hidx hd1 hd2
@@ -6078,8 +6081,8 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         omega
       have hpointer_all : ∀ (x : ProgPoint),
           (pointerAt T x (Config.run
-            { E := Function.update s.E t false,
-              B := Function.update s.B ba ⟨t :: I, A, some na⟩ }
+            ({ E := Function.update s.E t false,
+               B := Function.update s.B ba ⟨t :: I, A, some na⟩ } : State)
             (Tc.set t ht (Cmd.sync ba na :: cc))) ↔
             pointerAt T x (Config.run s Tc)) := by
         intro x
@@ -6087,7 +6090,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         · have hsame : (Tc.set t ht (Cmd.sync ba na :: cc)).prog x.thread =
               Tc.prog x.thread := by
             rw [hxt, hsetsame]
-          simp [pointerAt, Config.progOf, hsame]
+          simp [pointerAt, WeftCommon.Config.progOf, hsame]
         · exact hpointer_ne x _ _ ht hxt
       have htnI : t ∉ I := by
         intro htI
@@ -6269,13 +6272,15 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
   | @recycle _ _ b₀ I A n₀ hb hfull hpark =>
     -- this step is exactly a recycle of `b₀`
     have hrecb : stepRecyclesBarrier b₀ (Config.run s Tc) (Config.run
-        { E := updateMapOn s.E I true,
-          B := Function.update s.B b₀ BarrierState.unconfigured } (Tc.wake I)) = true := by
+        ({ E := updateMapOn s.E I true,
+             B := Function.update s.B b₀ BarrierState.unconfigured } : State)
+          (Tc.wake I)) = true := by
       simp [stepRecyclesBarrier, Config.state?, hb, BarrierState.isFull, hfull,
         Function.update_self]
     have hnorecb : ∀ b, b ≠ b₀ → stepRecyclesBarrier b (Config.run s Tc) (Config.run
-        { E := updateMapOn s.E I true,
-          B := Function.update s.B b₀ BarrierState.unconfigured } (Tc.wake I)) = false := by
+        ({ E := updateMapOn s.E I true,
+             B := Function.update s.B b₀ BarrierState.unconfigured } : State)
+          (Tc.wake I)) = false := by
       intro b hbne
       have hupd : (Function.update s.B b₀ BarrierState.unconfigured) b = s.B b :=
         Function.update_of_ne hbne _ _
@@ -6325,8 +6330,8 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
     have hnew_char : ∀ (η : ProgPoint), η.idx < (T.prog η.thread).length →
         Tc.prog η.thread = (T.prog η.thread).drop η.idx →
         (Config.run
-          { E := updateMapOn s.E I true,
-            B := Function.update s.B b₀ BarrierState.unconfigured }
+          ({ E := updateMapOn s.E I true,
+             B := Function.update s.B b₀ BarrierState.unconfigured } : State)
           (Tc.wake I)).progOf η.thread = (T.prog η.thread).drop (η.idx + 1) →
         η.thread ∈ I ∧ T.cmdAt η = some (Cmd.sync b₀ n₀) ∧
           pointerAt T η (Config.run s Tc) := by
@@ -6349,7 +6354,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
           exact hg
       · exfalso
         have hsame : (Tc.wake I).prog η.thread = Tc.prog η.thread := by
-          simp [CTA.wake, if_neg hηI]
+          simp [WeftCommon.CTA.wake, if_neg hηI]
         have hd2' : (Tc.wake I).prog η.thread =
             (T.prog η.thread).drop (η.idx + 1) := hd2
         rw [hsame, hd1] at hd2'
@@ -6360,8 +6365,8 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
     have hnewtime : ∀ (x : ProgPoint), x.thread ∈ I →
         pointerAt T x (Config.run s Tc) → x.idx < (T.prog x.thread).length →
         ∃ m, pointTime T (τ' ++ [Config.run
-          { E := updateMapOn s.E I true,
-            B := Function.update s.B b₀ BarrierState.unconfigured }
+          ({ E := updateMapOn s.E I true,
+             B := Function.update s.B b₀ BarrierState.unconfigured } : State)
           (Tc.wake I)]) x = some m := by
       intro x hxI hpx hidx
       refine exists_pointTime_of_passed hchainσ h0σ List.getLast?_concat
@@ -6373,7 +6378,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         | nil => rw [hTt] at hhd; simp at hhd
         | cons a l => simp
       have hwake : (Tc.wake I).prog x.thread = (Tc.prog x.thread).tail := by
-        simp [CTA.wake, if_pos hxI]
+        simp [WeftCommon.CTA.wake, if_pos hxI]
       change ((Tc.wake I).prog x.thread).length + (x.idx + 1) ≤
         (T.prog x.thread).length
       rw [hwake]
@@ -6404,12 +6409,12 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       exact hxF
     -- clause 4's fresh round: everything in the closing fiber has now executed
     have hround_new : ∀ b, stepRecyclesBarrier b (Config.run s Tc) (Config.run
-        { E := updateMapOn s.E I true,
-          B := Function.update s.B b₀ BarrierState.unconfigured } (Tc.wake I)) = true →
+        ({ E := updateMapOn s.E I true,
+           B := Function.update s.B b₀ BarrierState.unconfigured } : State) (Tc.wake I)) = true →
         ∀ η ∈ genFiber T τ b (recycleCount b τ' (τ'.length - 1) + 1),
           ∃ m, pointTime T (τ' ++ [Config.run
-            { E := updateMapOn s.E I true,
-              B := Function.update s.B b₀ BarrierState.unconfigured }
+            ({ E := updateMapOn s.E I true,
+               B := Function.update s.B b₀ BarrierState.unconfigured } : State)
             (Tc.wake I)]) η = some m := by
       intro b hrb η hη
       have hbb : b = b₀ := by
@@ -6460,8 +6465,8 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         rw [hpgσ, hgenη]
         have hrca := recycleCount_append b₀ τ'
           (Config.run
-          { E := updateMapOn s.E I true,
-            B := Function.update s.B b₀ BarrierState.unconfigured } (Tc.wake I))
+          ({ E := updateMapOn s.E I true,
+             B := Function.update s.B b₀ BarrierState.unconfigured } : State) (Tc.wake I))
           (j := τ'.length - 1) (by omega)
         omega
     · -- state
@@ -6530,7 +6535,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
             obtain ⟨hiI, hex'⟩ := hEfalse i hex
             have hsame : (Tc.wake I).prog x.thread = Tc.prog x.thread := by
               have hxIn : x.thread ∉ I := by rw [hthx]; exact hiI
-              simp [CTA.wake, if_neg hxIn]
+              simp [WeftCommon.CTA.wake, if_neg hxIn]
             have hpxC : pointerAt T x (Config.run s Tc) := by
               have hpx' : ((Tc.wake I).prog x.thread).length =
                   (T.prog x.thread).length - x.idx := hpx
@@ -6611,7 +6616,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
               exact hbb this
             have hsame : (Tc.wake I).prog x.thread = Tc.prog x.thread := by
               have hxIn : x.thread ∉ I := by rw [hthx]; exact hiI
-              simp [CTA.wake, if_neg hxIn]
+              simp [WeftCommon.CTA.wake, if_neg hxIn]
             refine ⟨x, hxF, hthx, hsx, ?_, ?_⟩
             · have hpx' : (Tc.prog x.thread).length =
                   (T.prog x.thread).length - x.idx := hpx
@@ -6628,7 +6633,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
             obtain ⟨hiI, hex'⟩ := hEfalse i hex
             have hsame : (Tc.wake I).prog x.thread = Tc.prog x.thread := by
               have hxIn : x.thread ∉ I := by rw [hthx]; exact hiI
-              simp [CTA.wake, if_neg hxIn]
+              simp [WeftCommon.CTA.wake, if_neg hxIn]
             have hpxC : pointerAt T x (Config.run s Tc) := by
               have hpx' : ((Tc.wake I).prog x.thread).length =
                   (T.prog x.thread).length - x.idx := hpx
@@ -6754,7 +6759,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
               (T.prog x.thread).length - x.idx := hpx
           have hidxx : x.idx < (T.prog x.thread).length :=
             ((mem_progPoints_iff T x).mp (mem_genFiber.mp hxF).1).2
-          simp only [Config.progOf, List.length_nil] at hpx'
+          simp only [WeftCommon.Config.progOf, List.length_nil] at hpx'
           omega
     · refine hedge_all ?_
       intro y bb nb hysync hidx hd1 hd2 x hxpts hxbar hgenxy
@@ -6899,7 +6904,7 @@ theorem conforms_complete_done {T : CTA} {τ : List Config}
       have hlastidx : σ[σ.length - 1]? = some (Config.run s Tc) := by
         rw [← List.getLast?_eq_getElem?]; exact hlast
       have hreach := reaches_of_chain_getElem hchain h0idx _ _ hlastidx
-      have hwf : (Config.run s Tc).WF := WF_of_reaches hreach
+      have hwf : (Config.WF (Config.run s Tc)) := WF_of_reaches hreach
       have hei : s.EnabledInv :=
         enabledInv_chain hchain h0
           (fun s₀ hs₀ => by
@@ -7484,7 +7489,7 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
   have hfcutc1 : fcut T τ c1 c1.thread ≤ c1.idx := fcut_le_of_hb Relation.ReflTransGen.refl hc1
   have hpn1 : p < n1 := by
     refine lt_time_of_lt_progOf hn1 hcut ?_
-    simp only [Config.progOf]
+    simp only [WeftCommon.Config.progOf]
     rw [hcutprog c1.thread, List.length_drop]
     have : c1.idx < (T.prog c1.thread).length := hc1L
     omega
@@ -7528,7 +7533,7 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
   -- shared chain invariants
   have hC₀head : τ'.head? = some (Config.run State.initial T) := hcomp.2
   have hwfAll : ∀ C ∈ τ', C.WF := WF_chain hchain hC₀head WF_initial
-  have hei0 : ∀ s, (Config.run State.initial T).state? = some s → s.EnabledInv := by
+  have hei0 : ∀ s, (Config.state? (Config.run State.initial T)) = some s → s.EnabledInv := by
     intro s hs
     simp only [Config.state?, Option.some.injEq] at hs; subst hs; exact State.EnabledInv.initial
   have heiAll : ∀ C ∈ τ', ∀ s, C.state? = some s → s.EnabledInv :=
@@ -7574,14 +7579,14 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
           cases hth with
           | sync_configure he hb => exact hsemp_e1 b c2.thread (by simp [Function.update_self])
           | sync_block he hb _ _ => exact hsemp_e1 b c2.thread (by simp [Function.update_self])
-        · simp only [CTA.set, Function.update_of_ne (Ne.symm hic2)]; exact hprog
+        · simp only [WeftCommon.CTA.set, Function.update_of_ne (Ne.symm hic2)]; exact hprog
       | @recycle _ _ bb I A n hb hfull hpark =>
         have hI : I = [] := by
           rcases List.eq_nil_or_concat I with h | ⟨I', x, rfl⟩
           · exact h
           · exact absurd (hsemp_e bb x (by rw [hb]; simp)) (by simp)
         subst hI
-        simpa [CTA.wake] using hprog
+        simpa [WeftCommon.CTA.wake] using hprog
   -- **Firing config** `q-1`: `c2` poised at head, enabled, with `hbar` holding.
   have hmem : ∀ {j C}, τ'[j]? = some C → C ∈ τ' := fun hj => List.mem_of_getElem? hj
   obtain ⟨sm, Tm, hCq1, hprogm⟩ := hinv (d₀ - 1) (le_refl _)
@@ -7604,7 +7609,7 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
   have hbarq : ∀ b'', sm.B b'' = BarrierState.unconfigured ∨
       ∃ I A n, sm.B b'' = ⟨I, A, some n⟩ ∧ I.length + A < (n : Nat) :=
     hbar_of_joins_synced hstepq rfl rfl (hsemp_q1 b' t') hjoin
-  have hwfq : (Config.run sm Tm).WF := hwfAll _ (hmem hCq1)
+  have hwfq : (Config.WF (Config.run sm Tm)) := hwfAll _ (hmem hCq1)
   -- reachability of the firing config (for `barriersWithin`)
   have hreach : ∀ j, j ≤ p + d₀ → ∀ C, τ'[j]? = some C →
       Relation.ReflTransGen CTAStep (Config.run State.initial T) C := by
@@ -7677,8 +7682,8 @@ theorem competing_sync_false {T : CTA} {τ : List Config}
     have hc2bar : (T.cmdAt c2).bind Cmd.barrier? = some b := by rw [hcmd2]; rfl
     have hbne : sN.B b ≠ BarrierState.unconfigured := by
       intro hcon; rw [hcon] at hsync; simp [BarrierState.unconfigured] at hsync
-    have hbwN : (Config.run sN (Tm.set c2.thread hc2ids
-        (Cmd.sync b mm :: (T.prog c2.thread).drop (c2.idx + 1)))).barriersWithin T.barrierSet :=
+    have hbwN : (Config.barriersWithin T.barrierSet (Config.run sN (Tm.set c2.thread hc2ids
+        (Cmd.sync b mm :: (T.prog c2.thread).drop (c2.idx + 1))))) :=
       inv_preserved T.barrierSet hcstep (barriersWithin_of_reaches hreachq1)
     obtain ⟨σ, hσ⟩ := exists_completeTrace T.barrierSet _ hbwN
     set τ'' := τ'.take (p + d₀) ++ σ with hτ''def
@@ -7810,7 +7815,7 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
   have hfcutc1 : fcut T τ c1 c1.thread ≤ c1.idx := fcut_le_of_hb Relation.ReflTransGen.refl hc1
   have hpn1 : p < n1 := by
     refine lt_time_of_lt_progOf hn1 hcut ?_
-    simp only [Config.progOf]
+    simp only [WeftCommon.Config.progOf]
     rw [hcutprog c1.thread, List.length_drop]
     have : c1.idx < (T.prog c1.thread).length := hc1L
     omega
@@ -7825,7 +7830,7 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
     have hc1ne : ((Config.run State.initial T).progOf c1.thread).drop c1.idx ≠ [] := by
       intro h; have hl := congrArg List.length h
       simp only [List.length_drop, List.length_nil] at hl
-      simp only [Config.progOf] at hc1L; omega
+      simp only [WeftCommon.Config.progOf] at hc1L; omega
     cases hC1astep with
     | @interleave _ _ _ _ _ _ _ _ => exact ⟨_, _, rfl⟩
     | @recycle _ _ _ _ _ _ _ _ _ => exact ⟨_, _, rfl⟩
@@ -7845,7 +7850,7 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
           = ((Config.run State.initial T).progOf c1.thread).drop (c1.idx + 1) := hC1a'prog
       rw [h1] at h2; have hl := congrArg List.length h2
       simp only [List.length_drop] at hl
-      simp only [Config.progOf] at hc1L; omega
+      simp only [WeftCommon.Config.progOf] at hc1L; omega
   -- **Search for the firing config**: the first config (after the cut) whose successor either
   -- joins a `synced` list, *or* is `c1`'s arrive at `n1`.  `c1`'s arrive witnesses it (`p+d=n1`).
   have hPex : ∃ d, ∃ s T, τ'[p + d]? = some (Config.run s T) ∧
@@ -7880,7 +7885,7 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
   -- shared chain invariants
   have hC₀head : τ'.head? = some (Config.run State.initial T) := hcomp.2
   have hwfAll : ∀ C ∈ τ', C.WF := WF_chain hchain hC₀head WF_initial
-  have hei0 : ∀ s, (Config.run State.initial T).state? = some s → s.EnabledInv := by
+  have hei0 : ∀ s, (Config.state? (Config.run State.initial T)) = some s → s.EnabledInv := by
     intro s hs
     simp only [Config.state?, Option.some.injEq] at hs; subst hs; exact State.EnabledInv.initial
   have heiAll : ∀ C ∈ τ', ∀ s, C.state? = some s → s.EnabledInv :=
@@ -7924,14 +7929,14 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
           cases hth with
           | sync_configure he hb => exact hsemp_e1 b c2.thread (by simp [Function.update_self])
           | sync_block he hb _ _ => exact hsemp_e1 b c2.thread (by simp [Function.update_self])
-        · simp only [CTA.set, Function.update_of_ne (Ne.symm hic2)]; exact hprog
+        · simp only [WeftCommon.CTA.set, Function.update_of_ne (Ne.symm hic2)]; exact hprog
       | @recycle _ _ bb I A n hb hfull hpark =>
         have hI : I = [] := by
           rcases List.eq_nil_or_concat I with h | ⟨I', x, rfl⟩
           · exact h
           · exact absurd (hsemp_e bb x (by rw [hb]; simp)) (by simp)
         subst hI
-        simpa [CTA.wake] using hprog
+        simpa [WeftCommon.CTA.wake] using hprog
   -- **Firing config** `q-1`: `c2` poised at head, enabled, with `hbar` holding.
   have hmem : ∀ {j C}, τ'[j]? = some C → C ∈ τ' := fun hj => List.mem_of_getElem? hj
   obtain ⟨sm, Tm, hCq1, hprogm⟩ := hinv (d₀ - 1) (le_refl _)
@@ -7974,7 +7979,7 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
         -- `c1`'s program at `n1-1` is `drop c1.idx` (config there is `run sm Tm`)
         have e1 : C1a = Config.run sm Tm := by
           rw [hj1, hCq1] at hC1a; exact (Option.some.injEq _ _).mp hC1a.symm
-        rw [e1] at hC1aprog; simp only [Config.progOf] at hC1aprog
+        rw [e1] at hC1aprog; simp only [WeftCommon.Config.progOf] at hC1aprog
         -- the config at `n1` (`= run s1n T1n`) is the recycle target, so `T1n = Tm.wake []`;
         -- a recycle wakes nobody (`I = []`), leaving `c1`'s program unchanged — but it advanced.
         have hTeq : T1n = Tm.wake [] := by
@@ -7983,14 +7988,14 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
           rw [hCq''] at hat
           have h := (Option.some.injEq _ _).mp hat
           rw [Config.run.injEq] at h; exact h.2.symm
-        simp only [Config.progOf] at hC1a'prog
+        simp only [WeftCommon.Config.progOf] at hC1a'prog
         rw [hTeq] at hC1a'prog
-        simp only [CTA.wake, List.not_mem_nil, if_false] at hC1a'prog
+        simp only [WeftCommon.CTA.wake, List.not_mem_nil, if_false] at hC1a'prog
         rw [hC1aprog] at hC1a'prog
         have hl := congrArg List.length hC1a'prog
         simp only [List.length_drop] at hl
-        simp only [Config.progOf] at hc1L; omega
-  have hwfq : (Config.run sm Tm).WF := hwfAll _ (hmem hCq1)
+        simp only [WeftCommon.Config.progOf] at hc1L; omega
+  have hwfq : (Config.WF (Config.run sm Tm)) := hwfAll _ (hmem hCq1)
   -- reachability of the firing config (for `barriersWithin`)
   have hreach : ∀ j, j ≤ p + d₀ → ∀ C, τ'[j]? = some C →
       Relation.ReflTransGen CTAStep (Config.run State.initial T) C := by
@@ -8062,8 +8067,8 @@ theorem competing_arrive_sync_false {T : CTA} {τ : List Config}
     have hc2bar : (T.cmdAt c2).bind Cmd.barrier? = some b := by rw [hcmd2]; rfl
     have hbne : sN.B b ≠ BarrierState.unconfigured := by
       intro hcon; rw [hcon] at hsync; simp [BarrierState.unconfigured] at hsync
-    have hbwN : (Config.run sN (Tm.set c2.thread hc2ids
-        (Cmd.sync b mm :: (T.prog c2.thread).drop (c2.idx + 1)))).barriersWithin T.barrierSet :=
+    have hbwN : (Config.barriersWithin T.barrierSet (Config.run sN (Tm.set c2.thread hc2ids
+        (Cmd.sync b mm :: (T.prog c2.thread).drop (c2.idx + 1))))) :=
       inv_preserved T.barrierSet hcstep (barriersWithin_of_reaches hreachq1)
     obtain ⟨σ, hσ⟩ := exists_completeTrace T.barrierSet _ hbwN
     set τ'' := τ'.take (p + d₀) ++ σ with hτ''def
@@ -8221,7 +8226,7 @@ theorem recycle_wakes_synced {C C' : Config} (hstep : CTAStep C C') (b : Barrier
     by_cases hbb : ba = b
     · subst hbb
       have htI : t ∈ I := by rw [hb] at hmem; exact hmem
-      simp [CTA.wake, htI]
+      simp [WeftCommon.CTA.wake, htI]
     · exfalso
       have hne : s₀.B b ≠ BarrierState.unconfigured := by
         intro h; rw [h] at hmem; simp [BarrierState.unconfigured] at hmem
@@ -8243,14 +8248,14 @@ theorem CTAStep.progOf_drop_run {C C' : Config} (hstep : CTAStep C C') (t : Thre
     injection hC with _ hT0; injection hC' with _ hT'; subst hT0; subst hT'
     by_cases h : t = i
     · subst h; obtain ⟨d, hd1, hd⟩ := hts.run_drop_le_one
-      exact ⟨d, hd1, by simp [CTA.set, Function.update_self, hd]⟩
-    · exact ⟨0, by omega, by simp [CTA.set, Function.update_of_ne h]⟩
+      exact ⟨d, hd1, by simp [WeftCommon.CTA.set, Function.update_self, hd]⟩
+    · exact ⟨0, by omega, by simp [WeftCommon.CTA.set, Function.update_of_ne h]⟩
   | @recycle s₀ T₀ ba I A n hb hfull hpark =>
     intro _ _ _ _ hC hC'
     injection hC with _ hT0; injection hC' with _ hT'; subst hT0; subst hT'
     by_cases h : t ∈ I
-    · exact ⟨1, le_refl 1, by simp [CTA.wake, if_pos h, List.drop_one]⟩
-    · exact ⟨0, by omega, by simp [CTA.wake, if_neg h]⟩
+    · exact ⟨1, le_refl 1, by simp [WeftCommon.CTA.wake, if_pos h, List.drop_one]⟩
+    · exact ⟨0, by omega, by simp [WeftCommon.CTA.wake, if_neg h]⟩
   | done hdone hnofull => intro _ _ _ _ _ hC'; simp at hC'
   | error hts => intro _ _ _ _ _ hC'; simp at hC'
 
@@ -8438,7 +8443,7 @@ theorem firstInstr_highGen_not_wellSynchronized' {T : CTA} {τ : List Config}
         · change 0 < (T.prog c2.thread).length; rw [hprogT]; simp
         · change T.prog c2.thread = (T.prog c2.thread).drop 0; rw [List.drop_zero]
         · change T1.prog c2.thread = (T.prog c2.thread).drop 1
-          rw [hT1def, hprogT]; simp [CTA.set, Function.update_self]
+          rw [hT1def, hprogT]; simp [WeftCommon.CTA.set, Function.update_self]
       refine firstInstr_contradiction hτ hws hc2 hbar2 hge2 hcomp'' ?_
       intro m' hm'; rw [hc2eq] at hm'
       rw [IsTimeOf.unique hm' htime1]; simp [recycleCount]
@@ -8465,7 +8470,7 @@ theorem firstInstr_highGen_not_wellSynchronized' {T : CTA} {τ : List Config}
       obtain ⟨τr, hcomp'', hC1''⟩ := exists_firstStep_complete hstep01
       have hsync1 : c2.thread ∈ (s1.B b).synced := by rw [hs1def]; simp [Function.update_self]
       have hprog1 : T1.prog c2.thread = T.prog c2.thread := by
-        rw [hT1def]; simp [CTA.set]
+        rw [hT1def]; simp [WeftCommon.CTA.set]
       refine firstInstr_contradiction hτ hws hc2 hbar2 hge2 hcomp'' ?_
       intro m' hm'; rw [hc2eq] at hm'
       exact firstSync_recycleCount_zero hcomp'' hprogT hC1'' hsync1 hprog1 hm'
@@ -8541,7 +8546,7 @@ theorem firstInstr_highGen_not_wellSynchronized {T : CTA} {τ : List Config}
         rw [hprogT]; exact ThreadStep.sync_configure rfl rfl
       have hstep01 : CTAStep (Config.run State.initial T) (Config.run s1 T1) :=
         CTAStep.interleave hi (fun _ => Or.inl rfl) hts
-      have hinv1 : (Config.run s1 T1).barriersWithin T.barrierSet :=
+      have hinv1 : (Config.barriersWithin T.barrierSet (Config.run s1 T1)) :=
         barriersWithin_of_reaches (Relation.ReflTransGen.single hstep01)
       obtain ⟨τr, hτr⟩ := exists_completeTrace T.barrierSet (Config.run s1 T1) hinv1
       have hτrne : τr ≠ [] := by
@@ -8562,7 +8567,7 @@ theorem firstInstr_highGen_not_wellSynchronized {T : CTA} {τ : List Config}
       have hsync1 : c2.thread ∈ (s1.B b).synced := by
         rw [hs1def]; simp [Function.update_self]
       have hprog1 : T1.prog c2.thread = T.prog c2.thread := by
-        rw [hT1def]; simp [CTA.set]
+        rw [hT1def]; simp [WeftCommon.CTA.set]
       -- read off generations from `hws`; the witness forces `pointGen T τ c2 ≥ 2`
       obtain ⟨sd, hdone⟩ := hτ.2
       have hc2L : c2.idx < (T.prog c2.thread).length := ((mem_progPoints_iff T c2).mp hc2).2
@@ -8581,7 +8586,7 @@ theorem firstInstr_highGen_not_wellSynchronized {T : CTA} {τ : List Config}
       obtain ⟨_, b', hb'cmd, hcase⟩ := hgτ''
       rcases hcase with ⟨mm, hmm, hgenrec⟩ | ⟨h0eq, _⟩
       · have hbb' : b' = b := by
-          simp only [ProgPoint.cmd, Config.progOf, hidx0] at hb'cmd
+          simp only [ProgPoint.cmd, WeftCommon.Config.progOf, hidx0] at hb'cmd
           rw [hprogT] at hb'cmd
           simp only [List.getElem?_cons_zero, Option.bind_some, Cmd.barrier?,
             Option.some.injEq] at hb'cmd

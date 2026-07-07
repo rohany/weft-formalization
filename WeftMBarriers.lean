@@ -6,6 +6,7 @@ Authors: Rohan Yadav
 import WeftMBarriers.Language
 import WeftMBarriers.State
 import WeftMBarriers.Semantics
+import WeftMBarriers.Traces
 
 /-!
 # Weft++ with shared-memory barriers — public interface
