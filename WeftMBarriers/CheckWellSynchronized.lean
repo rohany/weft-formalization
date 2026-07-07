@@ -322,4 +322,76 @@ irreflexive `Relation.TransGen` part; this adds the diagonal back. -/
 def happensBefore (T : CTA) (τ : List Config) : ProgPoint → ProgPoint → Prop :=
   Relation.ReflTransGen (fun a b => (a, b) ∈ initRelation T τ)
 
+/-! ## Lemma 1 for Algorithm 2 — the happens-before relation is sound and precise
+
+The two directions and their assembly, mirroring the named-barrier development.
+The proofs are the mbarrier port's core semantic obligations (§5.2.4, §5.2.5):
+
+* **soundness** — every `initRelation` edge is a genuine ordering in every
+  complete trace: program order because threads execute in order; the
+  registration edges (`arrive_nb → sync_nb`, `arrive_mb → wait_mb`) because
+  well-synchronization pins both endpoints to the same generation in every
+  schedule, and a generation's registrations complete before anything of that
+  generation is released; `sync_nb ↔ sync_nb` because same-generation named
+  syncs are all released by the same recycle. Note there are no `wait ↔ wait`
+  edges to justify — mbarrier waits of one generation need not resolve
+  simultaneously.
+* **preciseness** — any ordering that holds in *every* schedule is already in
+  the closure: reflexivity and same-thread orderings reduce to program order;
+  for points on different threads one exhibits a *reversing schedule* for any
+  pair the relation does not order (§5.2.5's swap argument, whose case
+  analysis for mbarriers includes the wait pairs). -/
+
+/-- **Soundness half of Lemma 1** (Algorithm 2): every `happensBefore` ordering
+is respected by every complete trace — if `happensBefore T τ η₁ η₂`, then in
+every complete trace from `(I, T)` where both points execute, `η₁` executes no
+later than `η₂`. -/
+theorem happensBefore_sound {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hws : T.WellSynchronized) {η₁ η₂ : ProgPoint}
+    (hR : happensBefore T τ η₁ η₂) :
+    ∀ τ', IsCompleteTraceFrom (Config.run State.initial T) τ' →
+      ∀ n₁ n₂, IsTimeOf (Config.run State.initial T) τ' η₁ n₁ →
+        IsTimeOf (Config.run State.initial T) τ' η₂ n₂ → n₁ ≤ n₂ := by
+  sorry
+
+/-- **Preciseness half of Lemma 1** (Algorithm 2): every ordering that holds in
+*all* complete traces is already in `happensBefore`. The valid-point premises
+are required — for a never-executing point the timing side is vacuously true
+while `happensBefore` cannot relate it. -/
+theorem happensBefore_precise {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hws : T.WellSynchronized) {η₁ η₂ : ProgPoint}
+    (hv₁ : η₁ ∈ T.progPoints) (hv₂ : η₂ ∈ T.progPoints)
+    (hle : ∀ τ', IsCompleteTraceFrom (Config.run State.initial T) τ' →
+      ∀ n₁ n₂, IsTimeOf (Config.run State.initial T) τ' η₁ n₁ →
+        IsTimeOf (Config.run State.initial T) τ' η₂ n₂ → n₁ ≤ n₂) :
+    happensBefore T τ η₁ η₂ := by
+  sorry
+
+/-- **Lemma 1** for the mbarrier-extended language. For a well-synchronized
+configuration `(I, T)`, the static happens-before relation constructed by
+Algorithm 2 — `happensBefore T τ`, the reflexive-transitive closure of
+`initRelation T τ` — is sound and precise in the sense of Definition 4
+(`WeftCommon.SoundAndPrecise`), **on program points**.
+
+The valid-point restriction (`η₁ η₂ ∈ T.progPoints`) is required: the
+unrestricted `SoundAndPrecise` is false, because for a never-executing point
+the timing side is vacuously true while `happensBefore` cannot relate it (see
+`happensBefore_precise`). Assembled from the two directions
+`happensBefore_sound` and `happensBefore_precise`.
+
+Implementation of the top-level `WeftMBarriers.soundAndPrecise_happensBefore`
+(in `WeftMBarriers.lean`). -/
+theorem soundAndPrecise_happensBefore_impl {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hws : T.WellSynchronized) :
+    ∀ η₁ η₂ : ProgPoint, η₁ ∈ T.progPoints → η₂ ∈ T.progPoints →
+      (happensBefore T τ η₁ η₂ ↔
+        ∀ τ', IsCompleteTraceFrom (Config.run State.initial T) τ' →
+          ∀ n₁ n₂, IsTimeOf (Config.run State.initial T) τ' η₁ n₁ →
+            IsTimeOf (Config.run State.initial T) τ' η₂ n₂ → n₁ ≤ n₂) := by
+  intro η₁ η₂ hv₁ hv₂
+  exact ⟨happensBefore_sound hτ hws, happensBefore_precise hτ hws hv₁ hv₂⟩
+
 end WeftMBarriers
