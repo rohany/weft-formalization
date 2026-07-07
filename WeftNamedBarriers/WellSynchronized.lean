@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Rohan Yadav
 -/
 import WeftNamedBarriers.WellFormedness
+import WeftCommon.WellSynchronized
 import Mathlib.Algebra.BigOperators.Group.Finset.Basic
 import Mathlib.Algebra.BigOperators.Group.Finset.Piecewise
 import Mathlib.Data.Nat.Find
@@ -42,7 +43,8 @@ barrier to unconfigured** — every thread step on `b` configures it or extends 
 lists, never unconfigures it. So a step `C ⤳ C'` recycles `b` exactly when `b` is
 configured-and-full in `C` and unconfigured in `C'` (`stepRecyclesBarrier`).
 
-We model `Gen(τ)(cη) = n` as the relation `IsGenOf C₀ τ η n`. It is total on
+We model `Gen(τ)(cη)` as the relation `IsGenOf C₀ τ η (g : Option ℕ)` — `some n`
+when `cη` executes with generation `n`, `none` when it never does. It is total on
 synchronization commands: an executed sync command gets generation `≥ 1`, and one
 that never executes in `τ` (e.g. blocked by a deadlock) gets `0` — the paper's
 convention that unexecuted commands have generation `0`. On the memory commands
@@ -97,28 +99,27 @@ def recycleCount (b : Barrier) (τ : List Config) (m : Nat) : Nat :=
 /-- Definition 5 (§4.1), in the consistent 1-indexed reading (see the module
 doc). The generation `Gen(τ)(cη) = n` of a synchronization command at program
 point `η`, in a complete trace `τ` from `C₀`. If `cη` operates on barrier `b` and
-executes at time `t(τ, η) = m`, then `n` is one more than the number of recyclings
-of `b` strictly before step `m` (`recycleCount b τ (m - 1)` counts the recyclings
-in the first `m - 1` steps); if `cη` is a synchronization command that never
-executes in `τ` (e.g. blocked by a deadlock), then `n = 0`. Like `IsTimeOf`, it
-carries `IsCompleteTraceFrom C₀ τ` so it is meaningful used on its own. As a
-function of `(C₀, τ, η)` it is total on synchronization commands (`≥ 1` when
-executed, `0` when not) and undefined on the memory commands `read`/`write` (not
-in `Gen`'s domain).
+executes at time `t(τ, η) = m`, then its generation is `some` of one more than
+the number of recyclings of `b` strictly before step `m` (`recycleCount b τ (m - 1)`
+counts the recyclings in the first `m - 1` steps); if `cη` is a synchronization
+command that never executes in `τ` (e.g. blocked by a deadlock), its generation is
+`none`. Like `IsTimeOf`, it carries `IsCompleteTraceFrom C₀ τ` so it is meaningful
+used on its own. As a function of `(C₀, τ, η)` it is total on synchronization
+commands and undefined on the memory commands `read`/`write` (not in `Gen`'s
+domain).
 
 Note (rohany): The (m-1) + 1 thing is a bit odd, but it has to deal with some
 ambiguity in the Weft paper. Definition 5 in the weft paper should should be that
 there are n recyclings strictly before m. However, the time definition is inclusive
 of the instruction that executes at m. So the m-1 is needed to get to "strictly-before".
-And then the plus 1 is because we want barrier generations to be 1-indexed rather than
-0-indexed, because the formalization uses a 0 generation for an operation to represent
-when the operation has not executed at all in the trace (i.e. deadlocks).
--/
-def IsGenOf (C₀ : Config) (τ : List Config) (η : ProgPoint) (n : Nat) : Prop :=
+The plus 1 keeps the executed generations 1-indexed, aligned with the computable
+`pointGen` (whose `Nat` codomain uses `0` as its own never-executes sentinel);
+never-executing here is `none`, so the `+ 1` is alignment, not a sentinel. -/
+def IsGenOf (C₀ : Config) (τ : List Config) (η : ProgPoint) (g : Option ℕ) : Prop :=
   IsCompleteTraceFrom C₀ τ ∧
   ∃ b, (η.cmd C₀).bind Cmd.barrier? = some b ∧
-    ((∃ m, IsTimeOf C₀ τ η m ∧ n = recycleCount b τ (m - 1) + 1) ∨
-      (n = 0 ∧ ¬ ∃ m, IsTimeOf C₀ τ η m))
+    ((∃ m, IsTimeOf C₀ τ η m ∧ g = some (recycleCount b τ (m - 1) + 1)) ∨
+      (g = none ∧ ¬ ∃ m, IsTimeOf C₀ τ η m))
 
 /-- Definition 7 (§4.1). A configuration `C₀ = (s, T)` is *well-synchronized* if it
 is a `run` configuration and any two complete traces from it assign every
@@ -130,11 +131,8 @@ The first conjunct requires `C₀` to be a `run` configuration (Def 7's `(s, T)`
 Without it, a terminal `err` configuration with no synchronization commands would
 satisfy the rest vacuously and be "well-synchronized" while not even able to
 make progress. -/
-def Config.WellSynchronized (C₀ : Config) : Prop :=
-  (∃ s T, C₀ = Config.run s T) ∧
-  ∀ τ₁ τ₂, IsCompleteTraceFrom C₀ τ₁ → IsCompleteTraceFrom C₀ τ₂ →
-    ∀ η : ProgPoint, (∃ b, (η.cmd C₀).bind Cmd.barrier? = some b) →
-      ∃ g, g ≠ 0 ∧ IsGenOf C₀ τ₁ η g ∧ IsGenOf C₀ τ₂ η g
+abbrev Config.WellSynchronized (C₀ : Config) : Prop :=
+  WeftCommon.WellSynchronized CTAStep Cmd.barrier? IsGenOf C₀
 
 /-- Definition 6 (§4.1). A CTA `T` is *well-synchronized* if the configuration
 `(I, T)` is — i.e. Definition 7 at the initial state `I = State.initial`. -/
@@ -274,7 +272,7 @@ theorem exists_time_of_ends_done {C₀ : Config} {τ' : List Config} {sd : State
     (fun _ _ h t => h.progOf_length_le_succ t) hτ hlast hk
 
 /-- `IsGenOf` is a partial function: a command has at most one generation in a trace. -/
-theorem IsGenOf.unique {C₀ : Config} {τ : List Config} {η : ProgPoint} {g g' : Nat}
+theorem IsGenOf.unique {C₀ : Config} {τ : List Config} {η : ProgPoint} {g g' : Option ℕ}
     (h : IsGenOf C₀ τ η g) (h' : IsGenOf C₀ τ η g') : g = g' := by
   obtain ⟨_, b, hb, hcase⟩ := h
   obtain ⟨_, b', hb', hcase'⟩ := h'
@@ -349,13 +347,13 @@ theorem sync_drop_recycles {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
 /-- Reading a generation off `IsGenOf` at a known time: if `η` is a `bb`-command that
 executes at `m`, its generation is `recycleCount bb τ (m-1) + 1`. -/
 theorem isGenOf_recycleCount {C₀ : Config} {τ : List Config} {η : ProgPoint} {g : Nat}
-    {bb : Barrier} {m : Nat} (hgen : IsGenOf C₀ τ η g)
+    {bb : Barrier} {m : Nat} (hgen : IsGenOf C₀ τ η (some g))
     (hbb : (η.cmd C₀).bind Cmd.barrier? = some bb) (hm : IsTimeOf C₀ τ η m) :
     g = recycleCount bb τ (m - 1) + 1 := by
   obtain ⟨_, bb', hbb', hcase⟩ := hgen
   rw [hbb] at hbb'; obtain rfl := Option.some.inj hbb'
-  rcases hcase with ⟨m', hm', hg⟩ | ⟨_, hno⟩
-  · rw [hg, IsTimeOf.unique hm hm']
+  rcases hcase with ⟨m', hm', hg⟩ | ⟨hnone, hno⟩
+  · rw [Option.some.inj hg, IsTimeOf.unique hm hm']
   · exact absurd ⟨m, hm⟩ hno
 
 /-- A `sync`'s execution step *is* a recycle of its barrier: at the step `n` where a
@@ -433,11 +431,11 @@ theorem wellSync_no_unexec_sync {C₀ : Config} (h : C₀.WellSynchronized)
     {τ : List Config} (hτ : IsCompleteTraceFrom C₀ τ) {η : ProgPoint}
     (hηsync : ∃ b, (η.cmd C₀).bind Cmd.barrier? = some b)
     (hηnoexec : ¬ ∃ m, IsTimeOf C₀ τ η m) : False := by
-  obtain ⟨g, hg0, hgen, _⟩ := h.2 τ τ hτ hτ η hηsync
+  obtain ⟨g, hgen, _⟩ := h.2 τ τ hτ hτ η hηsync
   obtain ⟨_, b, _, hcase⟩ := hgen
   rcases hcase with ⟨m, hm, _⟩ | ⟨hg, _⟩
   · exact hηnoexec ⟨m, hm⟩
-  · exact hg0 hg
+  · exact nomatch hg
 
 /-- A stuck `run` configuration (well-formed) has a thread headed by a
 synchronization command — a thread parked at a `sync`, or one about to register. -/

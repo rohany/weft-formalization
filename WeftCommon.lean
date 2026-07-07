@@ -6,6 +6,7 @@ Authors: Rohan Yadav
 import WeftCommon.Language
 import WeftCommon.Traces
 import WeftCommon.WellFormedness
+import WeftCommon.WellSynchronized
 
 /-!
 # WeftCommon — the shared core of the Weft language family
