@@ -42,9 +42,10 @@ and the fullness-uniqueness property. The file has three layers:
    chain lemmas, plus `WF_of_reaches`; `atMostOneFull_of_reaches` and the
    exclusivity corollary follow by projection.
 
-The three step-preservation lemmas (`blockInv_step`, `enabledInv_step`,
-`CTAStep.WF_preserved`) are the remaining `sorry`s, each carrying its proof
-sketch.
+The step-preservation proofs factor through three transfer lemmas per
+invariant — `congr` (the seven rules that touch no blocking list), `park` (the
+three parking rules), and `wake` (the two recycles) — so each rule only
+supplies a few rewriting facts about its state update.
 -/
 
 namespace WeftMBarriers
@@ -254,6 +255,16 @@ theorem State.atMostOneFull_initial : State.initial.AtMostOneFull := by
     simp [State.FullBarrier, State.initial, MBarrierState.isFull,
       MBarrierState.uninitialized] at hb
 
+/-- At most one barrier is full when every full barrier is a specific `b₀`. -/
+theorem State.AtMostOneFull.of_unique {s' : State} {b₀ : NamedBarrier ⊕ SharedBarrier}
+    (h : ∀ b, s'.FullBarrier b → b = b₀) : s'.AtMostOneFull :=
+  fun _ hx _ hy => (h _ hx).trans (h _ hy).symm
+
+/-- At most one barrier is full when none is. -/
+theorem State.AtMostOneFull.of_none {s' : State}
+    (h : ∀ b, ¬ s'.FullBarrier b) : s'.AtMostOneFull :=
+  fun x hx => absurd hx (h x)
+
 /-- The blocking list of a barrier of either kind: the `synced` list of a named
 barrier (`.inl`), the `waiting` list of an mbarrier (`.inr`). Indexing by the sum
 lets the blocking invariant quantify over the blocking lists of *both* kinds at
@@ -287,6 +298,113 @@ theorem State.BlockInv.initial : State.initial.BlockInv := by
     cases b <;> simp [State.blocked, State.initial, NamedBarrierState.unconfigured,
       MBarrierState.uninitialized] at hi
 
+/-! #### Transfer lemmas
+
+The ten `run → run` thread rules and the two recycles change the blocking
+structure in only three ways: not at all (`congr` — `read`/`write`, the
+arrive/init rules, and `mb_wait_pass`, none of which touch a blocking list or
+the enabled map), by parking the stepping thread at one barrier (`park` —
+`sync_configure`/`sync_block`/`mb_wait_block`), or by clearing one barrier's
+list and waking exactly its members (`wake` — the two recycles). Each transfer
+lemma re-establishes the invariant from a description of the change, so the
+step lemmas below only supply three or four rewriting facts per rule. -/
+
+/-- `BlockInv` transfers along a step that changes no blocking list and no
+enabledness. -/
+theorem State.BlockInv.congr {s s' : State} (hbi : s.BlockInv)
+    (hb : ∀ b, s'.blocked b = s.blocked b) (hE : ∀ j, s'.E j = s.E j) :
+    s'.BlockInv := by
+  obtain ⟨hnd, hdis, hone⟩ := hbi
+  refine ⟨fun b => ?_, fun b j hj => ?_, fun b b' j h1 h2 => ?_⟩
+  · rw [hb b]; exact hnd b
+  · rw [hb b] at hj; rw [hE j]; exact hdis b j hj
+  · rw [hb b] at h1; rw [hb b'] at h2; exact hone b b' j h1 h2
+
+/-- `BlockInv` transfers along a step that parks the *enabled* thread `i` at
+barrier `b₀` (of either kind), leaving every other blocking list unchanged:
+`i` is fresh in every list (it was enabled), so `Nodup` and uniqueness survive
+the cons. -/
+theorem State.BlockInv.park {s s' : State} (hbi : s.BlockInv) {i : ThreadId}
+    {b₀ : NamedBarrier ⊕ SharedBarrier}
+    (hpark : s'.blocked b₀ = i :: s.blocked b₀)
+    (hsame : ∀ b, b ≠ b₀ → s'.blocked b = s.blocked b)
+    (hE : ∀ j, s'.E j = Function.update s.E i false j)
+    (hen : s.E i = true) : s'.BlockInv := by
+  obtain ⟨hnd, hdis, hone⟩ := hbi
+  have hifresh : ∀ b, i ∉ s.blocked b := by
+    intro b hmem
+    have h := hdis b i hmem
+    rw [hen] at h
+    exact absurd h (by simp)
+  refine ⟨fun b => ?_, fun b j hj => ?_, fun b b' j h1 h2 => ?_⟩
+  · by_cases hbb : b = b₀
+    · subst hbb; rw [hpark]; exact List.nodup_cons.mpr ⟨hifresh b, hnd b⟩
+    · rw [hsame b hbb]; exact hnd b
+  · rw [hE j]
+    by_cases hji : j = i
+    · subst hji; simp
+    · rw [Function.update_of_ne hji]
+      by_cases hbb : b = b₀
+      · subst hbb
+        rw [hpark] at hj
+        rcases List.mem_cons.mp hj with rfl | hjmem
+        · exact absurd rfl hji
+        · exact hdis b j hjmem
+      · rw [hsame b hbb] at hj; exact hdis b j hj
+  · by_cases hji : j = i
+    · subst hji
+      have hb1 : b = b₀ := by
+        by_contra hne
+        rw [hsame b hne] at h1
+        exact hifresh b h1
+      have hb2 : b' = b₀ := by
+        by_contra hne
+        rw [hsame b' hne] at h2
+        exact hifresh b' h2
+      rw [hb1, hb2]
+    · have h1' : j ∈ s.blocked b := by
+        by_cases hbb : b = b₀
+        · subst hbb
+          rw [hpark] at h1
+          rcases List.mem_cons.mp h1 with rfl | h1m
+          · exact absurd rfl hji
+          · exact h1m
+        · rw [hsame b hbb] at h1; exact h1
+      have h2' : j ∈ s.blocked b' := by
+        by_cases hbb : b' = b₀
+        · subst hbb
+          rw [hpark] at h2
+          rcases List.mem_cons.mp h2 with rfl | h2m
+          · exact absurd rfl hji
+          · exact h2m
+        · rw [hsame b' hbb] at h2; exact h2
+      exact hone b b' j h1' h2'
+
+/-- `BlockInv` transfers along a recycle of `b₀` (of either kind): its list is
+cleared and exactly its members are woken — by uniqueness they appear in no
+other list, so the disabled clause survives everywhere else. -/
+theorem State.BlockInv.wake {s s' : State} (hbi : s.BlockInv)
+    {b₀ : NamedBarrier ⊕ SharedBarrier}
+    (hclear : s'.blocked b₀ = [])
+    (hsame : ∀ b, b ≠ b₀ → s'.blocked b = s.blocked b)
+    (hE : ∀ j, s'.E j = updateMapOn s.E (s.blocked b₀) true j) : s'.BlockInv := by
+  obtain ⟨hnd, hdis, hone⟩ := hbi
+  refine ⟨fun b => ?_, fun b j hj => ?_, fun b b' j h1 h2 => ?_⟩
+  · by_cases hbb : b = b₀
+    · subst hbb; rw [hclear]; exact List.nodup_nil
+    · rw [hsame b hbb]; exact hnd b
+  · by_cases hbb : b = b₀
+    · subst hbb; rw [hclear] at hj; simp at hj
+    · rw [hsame b hbb] at hj
+      have hnotb₀ : j ∉ s.blocked b₀ := fun hmem => hbb (hone b b₀ j hj hmem)
+      rw [hE j, updateMapOn_apply, if_neg hnotb₀]
+      exact hdis b j hj
+  · by_cases hbb : b = b₀
+    · subst hbb; rw [hclear] at h1; simp at h1
+    · by_cases hbb' : b' = b₀
+      · subst hbb'; rw [hclear] at h2; simp at h2
+      · rw [hsame b hbb] at h1; rw [hsame b' hbb'] at h2; exact hone b b' j h1 h2
+
 /-- `BlockInv` is preserved by every step. The interesting cases: a `sync_nb` or
 `wait_mb` parks an *enabled* thread (fresh in every blocking list by the
 blocked-⇒-disabled clause, keeping `Nodup` and uniqueness), and the two recycle
@@ -296,7 +414,101 @@ survives everywhere else. -/
 theorem blockInv_step {C C' : Config} (hstep : CTAStep C C')
     (hC : ∀ s, C.state? = some s → s.BlockInv) :
     ∀ s', C'.state? = some s' → s'.BlockInv := by
-  sorry
+  intro s' hs'
+  cases hstep with
+  | @interleave s s'' T i P' hi hbar hmbar hth =>
+    have hbi := hC s rfl
+    simp only [WeftCommon.Config.state?, Option.some.injEq] at hs'; subst hs'
+    generalize hpi : T.prog i = Pi at hth
+    cases hth with
+    | read_noop => exact hbi
+    | write_noop => exact hbi
+    | mb_wait_pass he hb0 hnep => exact hbi
+    | @arrive_configure _ _ nb₀ n _ he hb0 =>
+      refine hbi.congr (fun b => ?_) (fun j => rfl)
+      cases b with
+      | inl nb =>
+        by_cases hbb : nb = nb₀
+        · subst hbb
+          simp [State.blocked, Function.update_self, hb0, NamedBarrierState.unconfigured]
+        · simp [State.blocked, Function.update_of_ne hbb]
+      | inr sb => rfl
+    | @arrive_register _ _ nb₀ n _ I A he hb0 hpos hlt =>
+      refine hbi.congr (fun b => ?_) (fun j => rfl)
+      cases b with
+      | inl nb =>
+        by_cases hbb : nb = nb₀
+        · subst hbb; simp [State.blocked, Function.update_self, hb0]
+        · simp [State.blocked, Function.update_of_ne hbb]
+      | inr sb => rfl
+    | @mb_init _ _ sb₀ n _ he hb0 =>
+      refine hbi.congr (fun b => ?_) (fun j => rfl)
+      cases b with
+      | inl nb => rfl
+      | inr sb =>
+        by_cases hbb : sb = sb₀
+        · subst hbb
+          simp [State.blocked, Function.update_self, hb0, MBarrierState.uninitialized]
+        · simp [State.blocked, Function.update_of_ne hbb]
+    | @mb_arrive _ _ sb₀ _ I A n ph he hb0 =>
+      refine hbi.congr (fun b => ?_) (fun j => rfl)
+      cases b with
+      | inl nb => rfl
+      | inr sb =>
+        by_cases hbb : sb = sb₀
+        · subst hbb; simp [State.blocked, Function.update_self, hb0]
+        · simp [State.blocked, Function.update_of_ne hbb]
+    | @sync_configure _ _ nb₀ n c he hb0 =>
+      refine hbi.park (b₀ := .inl nb₀) ?_ (fun b hbne => ?_) (fun j => rfl) he
+      · simp [State.blocked, Function.update_self, hb0, NamedBarrierState.unconfigured]
+      · cases b with
+        | inl nb =>
+          have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+          simp [State.blocked, Function.update_of_ne hnn]
+        | inr sb => rfl
+    | @sync_block _ _ nb₀ n c I A he hb0 hpos hlt =>
+      refine hbi.park (b₀ := .inl nb₀) ?_ (fun b hbne => ?_) (fun j => rfl) he
+      · simp [State.blocked, Function.update_self, hb0]
+      · cases b with
+        | inl nb =>
+          have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+          simp [State.blocked, Function.update_of_ne hnn]
+        | inr sb => rfl
+    | @mb_wait_block _ _ sb₀ ph c I A n he hb0 =>
+      refine hbi.park (b₀ := .inr sb₀) ?_ (fun b hbne => ?_) (fun j => rfl) he
+      · simp [State.blocked, Function.update_self, hb0]
+      · cases b with
+        | inl nb => rfl
+        | inr sb =>
+          have hnn : sb ≠ sb₀ := fun h => hbne (by rw [h])
+          simp [State.blocked, Function.update_of_ne hnn]
+  | @recycle s T nb₀ I₀ A₀ n₀ hb hfullr hpark =>
+    have hbi := hC s rfl
+    simp only [WeftCommon.Config.state?, Option.some.injEq] at hs'; subst hs'
+    refine hbi.wake (b₀ := .inl nb₀) ?_ (fun b hbne => ?_) (fun j => ?_)
+    · simp [State.blocked, Function.update_self, NamedBarrierState.unconfigured]
+    · cases b with
+      | inl nb =>
+        have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+        simp [State.blocked, Function.update_of_ne hnn]
+      | inr sb => rfl
+    · simp [State.blocked, hb]
+  | @mb_recycle s T sb₀ I₀ A₀ n₀ ph₀ hb hfullr hpark =>
+    have hbi := hC s rfl
+    simp only [WeftCommon.Config.state?, Option.some.injEq] at hs'; subst hs'
+    refine hbi.wake (b₀ := .inr sb₀) ?_ (fun b hbne => ?_) (fun j => ?_)
+    · simp [State.blocked, Function.update_self]
+    · cases b with
+      | inl nb => rfl
+      | inr sb =>
+        have hnn : sb ≠ sb₀ := fun h => hbne (by rw [h])
+        simp [State.blocked, Function.update_of_ne hnn]
+    · simp [State.blocked, hb]
+  | done hdone hnofull hmbnofull =>
+    simp only [WeftCommon.Config.state?, Option.some.injEq] at hs'; subst hs'
+    exact hC _ rfl
+  | error hbar hmbar hth =>
+    simp [WeftCommon.Config.state?] at hs'
 
 /-- `BlockInv` holds at every configuration of a chain whose head satisfies it. -/
 theorem blockInv_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
@@ -332,6 +544,53 @@ theorem State.EnabledInv.initial : State.initial.EnabledInv := by
   intro i hi
   simp [State.initial] at hi
 
+/-- `EnabledInv` transfers along a step that changes no blocking list and no
+enabledness. -/
+theorem State.EnabledInv.congr {s s' : State} (hei : s.EnabledInv)
+    (hb : ∀ b, s'.blocked b = s.blocked b) (hE : ∀ j, s'.E j = s.E j) :
+    s'.EnabledInv := by
+  intro j hj
+  rw [hE j] at hj
+  obtain ⟨b, hbm⟩ := hei j hj
+  exact ⟨b, by rw [hb b]; exact hbm⟩
+
+/-- `EnabledInv` transfers along a step that parks thread `i` at barrier `b₀`:
+the newly disabled `i` is blocked at `b₀`. -/
+theorem State.EnabledInv.park {s s' : State} (hei : s.EnabledInv) {i : ThreadId}
+    {b₀ : NamedBarrier ⊕ SharedBarrier}
+    (hpark : s'.blocked b₀ = i :: s.blocked b₀)
+    (hsame : ∀ b, b ≠ b₀ → s'.blocked b = s.blocked b)
+    (hE : ∀ j, s'.E j = Function.update s.E i false j) : s'.EnabledInv := by
+  intro j hj
+  rw [hE j] at hj
+  by_cases hji : j = i
+  · subst hji
+    exact ⟨b₀, by rw [hpark]; exact List.mem_cons_self ..⟩
+  · rw [Function.update_of_ne hji] at hj
+    obtain ⟨b, hbm⟩ := hei j hj
+    by_cases hbb : b = b₀
+    · subst hbb
+      exact ⟨b, by rw [hpark]; exact List.mem_cons_of_mem _ hbm⟩
+    · exact ⟨b, by rw [hsame b hbb]; exact hbm⟩
+
+/-- `EnabledInv` transfers along a recycle of `b₀`: a thread still disabled
+afterwards was not woken, so it was not blocked at `b₀` and its blocking
+barrier survives. -/
+theorem State.EnabledInv.wake {s s' : State} (hei : s.EnabledInv)
+    {b₀ : NamedBarrier ⊕ SharedBarrier}
+    (hclear : s'.blocked b₀ = [])
+    (hsame : ∀ b, b ≠ b₀ → s'.blocked b = s.blocked b)
+    (hE : ∀ j, s'.E j = updateMapOn s.E (s.blocked b₀) true j) : s'.EnabledInv := by
+  intro j hj
+  rw [hE j, updateMapOn_apply] at hj
+  split at hj
+  · exact absurd hj (by simp)
+  · rename_i hnmem
+    obtain ⟨b, hbm⟩ := hei j hj
+    by_cases hbb : b = b₀
+    · subst hbb; exact absurd hbm hnmem
+    · exact ⟨b, by rw [hsame b hbb]; exact hbm⟩
+
 /-- `EnabledInv` is preserved by every step: a blocking command that disables
 thread `i` simultaneously adds it to a blocking list; each recycle re-enables
 exactly the threads it removes from its list; every other step touches neither
@@ -339,7 +598,101 @@ the enabled map nor any blocking list relevantly. -/
 theorem enabledInv_step {C C' : Config} (hstep : CTAStep C C')
     (hC : ∀ s, C.state? = some s → s.EnabledInv) :
     ∀ s', C'.state? = some s' → s'.EnabledInv := by
-  sorry
+  intro s' hs'
+  cases hstep with
+  | @interleave s s'' T i P' hi hbar hmbar hth =>
+    have hei := hC s rfl
+    simp only [WeftCommon.Config.state?, Option.some.injEq] at hs'; subst hs'
+    generalize hpi : T.prog i = Pi at hth
+    cases hth with
+    | read_noop => exact hei
+    | write_noop => exact hei
+    | mb_wait_pass he hb0 hnep => exact hei
+    | @arrive_configure _ _ nb₀ n _ he hb0 =>
+      refine hei.congr (fun b => ?_) (fun j => rfl)
+      cases b with
+      | inl nb =>
+        by_cases hbb : nb = nb₀
+        · subst hbb
+          simp [State.blocked, Function.update_self, hb0, NamedBarrierState.unconfigured]
+        · simp [State.blocked, Function.update_of_ne hbb]
+      | inr sb => rfl
+    | @arrive_register _ _ nb₀ n _ I A he hb0 hpos hlt =>
+      refine hei.congr (fun b => ?_) (fun j => rfl)
+      cases b with
+      | inl nb =>
+        by_cases hbb : nb = nb₀
+        · subst hbb; simp [State.blocked, Function.update_self, hb0]
+        · simp [State.blocked, Function.update_of_ne hbb]
+      | inr sb => rfl
+    | @mb_init _ _ sb₀ n _ he hb0 =>
+      refine hei.congr (fun b => ?_) (fun j => rfl)
+      cases b with
+      | inl nb => rfl
+      | inr sb =>
+        by_cases hbb : sb = sb₀
+        · subst hbb
+          simp [State.blocked, Function.update_self, hb0, MBarrierState.uninitialized]
+        · simp [State.blocked, Function.update_of_ne hbb]
+    | @mb_arrive _ _ sb₀ _ I A n ph he hb0 =>
+      refine hei.congr (fun b => ?_) (fun j => rfl)
+      cases b with
+      | inl nb => rfl
+      | inr sb =>
+        by_cases hbb : sb = sb₀
+        · subst hbb; simp [State.blocked, Function.update_self, hb0]
+        · simp [State.blocked, Function.update_of_ne hbb]
+    | @sync_configure _ _ nb₀ n c he hb0 =>
+      refine hei.park (b₀ := .inl nb₀) ?_ (fun b hbne => ?_) (fun j => rfl)
+      · simp [State.blocked, Function.update_self, hb0, NamedBarrierState.unconfigured]
+      · cases b with
+        | inl nb =>
+          have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+          simp [State.blocked, Function.update_of_ne hnn]
+        | inr sb => rfl
+    | @sync_block _ _ nb₀ n c I A he hb0 hpos hlt =>
+      refine hei.park (b₀ := .inl nb₀) ?_ (fun b hbne => ?_) (fun j => rfl)
+      · simp [State.blocked, Function.update_self, hb0]
+      · cases b with
+        | inl nb =>
+          have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+          simp [State.blocked, Function.update_of_ne hnn]
+        | inr sb => rfl
+    | @mb_wait_block _ _ sb₀ ph c I A n he hb0 =>
+      refine hei.park (b₀ := .inr sb₀) ?_ (fun b hbne => ?_) (fun j => rfl)
+      · simp [State.blocked, Function.update_self, hb0]
+      · cases b with
+        | inl nb => rfl
+        | inr sb =>
+          have hnn : sb ≠ sb₀ := fun h => hbne (by rw [h])
+          simp [State.blocked, Function.update_of_ne hnn]
+  | @recycle s T nb₀ I₀ A₀ n₀ hb hfullr hpark =>
+    have hei := hC s rfl
+    simp only [WeftCommon.Config.state?, Option.some.injEq] at hs'; subst hs'
+    refine hei.wake (b₀ := .inl nb₀) ?_ (fun b hbne => ?_) (fun j => ?_)
+    · simp [State.blocked, Function.update_self, NamedBarrierState.unconfigured]
+    · cases b with
+      | inl nb =>
+        have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+        simp [State.blocked, Function.update_of_ne hnn]
+      | inr sb => rfl
+    · simp [State.blocked, hb]
+  | @mb_recycle s T sb₀ I₀ A₀ n₀ ph₀ hb hfullr hpark =>
+    have hei := hC s rfl
+    simp only [WeftCommon.Config.state?, Option.some.injEq] at hs'; subst hs'
+    refine hei.wake (b₀ := .inr sb₀) ?_ (fun b hbne => ?_) (fun j => ?_)
+    · simp [State.blocked, Function.update_self]
+    · cases b with
+      | inl nb => rfl
+      | inr sb =>
+        have hnn : sb ≠ sb₀ := fun h => hbne (by rw [h])
+        simp [State.blocked, Function.update_of_ne hnn]
+    · simp [State.blocked, hb]
+  | done hdone hnofull hmbnofull =>
+    simp only [WeftCommon.Config.state?, Option.some.injEq] at hs'; subst hs'
+    exact hC _ rfl
+  | error hbar hmbar hth =>
+    simp [WeftCommon.Config.state?] at hs'
 
 /-- `EnabledInv` holds at every configuration of a chain whose head satisfies it. -/
 theorem enabledInv_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
@@ -437,7 +790,554 @@ subsuming the fullness-uniqueness argument. Sketch:
 * `done`/`err` — `WF` is `True` there. -/
 theorem CTAStep.WF_preserved {C C' : Config} (hstep : CTAStep C C') (hwf : C.WF) :
     C'.WF := by
-  sorry
+  -- the blocking-invariant conjunct is preserved uniformly via `blockInv_step`
+  have hBIpres : ∀ s', C'.state? = some s' → s'.BlockInv := by
+    apply blockInv_step hstep
+    obtain ⟨ss, TT, hCeq⟩ := hstep.source_run
+    intro s hs
+    rw [hCeq] at hwf hs
+    simp only [WeftCommon.Config.state?, Option.some.injEq] at hs
+    subst hs
+    exact hwf.2.2.2.2.2
+  cases hstep with
+  | @interleave s s'' T i P' hi hbar hmbar hth =>
+    obtain ⟨hcond, hcondn, hmcond, hmcondn, hamof, _⟩ := hwf
+    -- nothing is full before an interleave step (the guards)
+    have hnf : ∀ b, ¬ s.FullBarrier b := by
+      intro b hf
+      cases b with
+      | inl nb =>
+        rcases hbar nb with hu | ⟨I, A, n, heq, hlt⟩
+        · have h : (s.BN nb).isFull = true := hf
+          rw [hu] at h
+          simp [NamedBarrierState.isFull, NamedBarrierState.unconfigured] at h
+        · have h : (s.BN nb).isFull = true := hf
+          rw [heq] at h
+          simp only [NamedBarrierState.isFull, beq_iff_eq] at h
+          omega
+      | inr sb =>
+        rcases hmbar sb with hu | ⟨I, A, n, ph, heq, hlt⟩
+        · have h : (s.BM sb).isFull = true := hf
+          rw [hu] at h
+          simp [MBarrierState.isFull, MBarrierState.uninitialized] at h
+        · have h : (s.BM sb).isFull = true := hf
+          rw [heq] at h
+          simp only [MBarrierState.isFull, beq_iff_eq] at h
+          omega
+    generalize hpi : T.prog i = Pi at hth
+    refine ⟨?_, ?_, ?_, ?_, ?_, hBIpres _ rfl⟩
+    -- ## the configured named-barrier clause
+    · cases hth with
+      | read_noop =>
+        intro nb I A n hB
+        obtain ⟨hle, hpark, hpos⟩ := hcond nb I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | write_noop =>
+        intro nb I A n hB
+        obtain ⟨hle, hpark, hpos⟩ := hcond nb I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | arrive_configure he hb0 =>
+        intro nb I A n hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · simp only [NamedBarrierState.mk.injEq, Option.some.injEq] at hB
+          have hpos := n.pos
+          obtain ⟨rfl, rfl, rfl⟩ := hB
+          exact ⟨by simp; omega, (fun i' hi' => by simp at hi'), by simp⟩
+        · obtain ⟨hle, hpark, hpos⟩ := hcond nb I A n hB
+          refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+          have hne : i' ≠ i := by
+            rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | arrive_register he hb0 hpos hlt =>
+        intro nb I A n hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · rename_i hbq
+          simp only [NamedBarrierState.mk.injEq, Option.some.injEq] at hB
+          obtain ⟨rfl, rfl, rfl⟩ := hB
+          obtain ⟨_, hcpark, _⟩ := hcond _ _ _ _ hb0
+          subst hbq
+          refine ⟨by omega, (fun i' hi' => ?_), by omega⟩
+          have hne : i' ≠ i := by
+            rintro rfl; have := hcpark i' hi'; rw [hpi] at this; simp at this
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hcpark i' hi'
+        · obtain ⟨hle, hpark, hpos'⟩ := hcond nb I A n hB
+          refine ⟨hle, (fun i' hi' => ?_), hpos'⟩
+          have hne : i' ≠ i := by
+            rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | sync_configure he hb0 =>
+        intro nb I A n hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · rename_i hbq
+          simp only [NamedBarrierState.mk.injEq, Option.some.injEq] at hB
+          have hpos := n.pos
+          obtain ⟨rfl, rfl, rfl⟩ := hB
+          subst hbq
+          refine ⟨by simp; omega, (fun i' hi' => ?_), by simp⟩
+          simp only [List.mem_singleton] at hi'; subst hi'
+          simp only [WeftCommon.CTA.set, Function.update_self, List.head?_cons]
+        · obtain ⟨hle, hpark, hpos⟩ := hcond nb I A n hB
+          refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+          by_cases hne : i' = i
+          · subst hne
+            simp only [WeftCommon.CTA.set, Function.update_self]
+            rw [← hpi]; exact hpark _ hi'
+          · simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | sync_block he hb0 hpos hlt =>
+        intro nb I A n hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · rename_i hbq
+          simp only [NamedBarrierState.mk.injEq, Option.some.injEq] at hB
+          obtain ⟨rfl, rfl, rfl⟩ := hB
+          obtain ⟨_, hcpark, _⟩ := hcond _ _ _ _ hb0
+          subst hbq
+          refine ⟨by simp only [List.length_cons]; omega, (fun i' hi' => ?_),
+            by simp only [List.length_cons]; omega⟩
+          rcases List.mem_cons.mp hi' with rfl | hi'
+          · simp only [WeftCommon.CTA.set, Function.update_self, List.head?_cons]
+          · by_cases hne : i' = i
+            · subst hne
+              simp only [WeftCommon.CTA.set, Function.update_self, List.head?_cons]
+            · simp only [WeftCommon.CTA.set, Function.update_of_ne hne]
+              exact hcpark i' hi'
+        · obtain ⟨hle, hpark, hpos'⟩ := hcond nb I A n hB
+          refine ⟨hle, (fun i' hi' => ?_), hpos'⟩
+          by_cases hne : i' = i
+          · subst hne
+            simp only [WeftCommon.CTA.set, Function.update_self]
+            rw [← hpi]; exact hpark _ hi'
+          · simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | mb_init he hb0 =>
+        intro nb I A n hB
+        obtain ⟨hle, hpark, hpos⟩ := hcond nb I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | mb_arrive he hb0 =>
+        intro nb I A n hB
+        obtain ⟨hle, hpark, hpos⟩ := hcond nb I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | mb_wait_block he hb0 =>
+        intro nb I A n hB
+        obtain ⟨hle, hpark, hpos⟩ := hcond nb I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+      | mb_wait_pass he hb0 hnep =>
+        intro nb I A n hB
+        obtain ⟨hle, hpark, hpos⟩ := hcond nb I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpark i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpark i' hi'
+    -- ## the unconfigured named-barrier clause
+    · cases hth with
+      | read_noop => exact hcondn
+      | write_noop => exact hcondn
+      | arrive_configure he hb0 =>
+        intro nb I A hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hcondn nb I A hB
+      | arrive_register he hb0 hpos hlt =>
+        intro nb I A hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hcondn nb I A hB
+      | sync_configure he hb0 =>
+        intro nb I A hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hcondn nb I A hB
+      | sync_block he hb0 hpos hlt =>
+        intro nb I A hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hcondn nb I A hB
+      | mb_init he hb0 => exact hcondn
+      | mb_arrive he hb0 => exact hcondn
+      | mb_wait_block he hb0 => exact hcondn
+      | mb_wait_pass he hb0 hnep => exact hcondn
+    -- ## the initialized mbarrier clause
+    · cases hth with
+      | read_noop =>
+        intro sb I A m ph hB
+        obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+        refine ⟨hle, fun i' hi' => ?_⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpk i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpk i' hi'
+      | write_noop =>
+        intro sb I A m ph hB
+        obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+        refine ⟨hle, fun i' hi' => ?_⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpk i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpk i' hi'
+      | arrive_configure he hb0 =>
+        intro sb I A m ph hB
+        obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+        refine ⟨hle, fun i' hi' => ?_⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpk i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpk i' hi'
+      | arrive_register he hb0 hpos hlt =>
+        intro sb I A m ph hB
+        obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+        refine ⟨hle, fun i' hi' => ?_⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpk i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpk i' hi'
+      | sync_configure he hb0 =>
+        intro sb I A m ph hB
+        obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+        refine ⟨hle, fun i' hi' => ?_⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpk i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpk i' hi'
+      | sync_block he hb0 hpos hlt =>
+        intro sb I A m ph hB
+        obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+        refine ⟨hle, fun i' hi' => ?_⟩
+        have hne : i' ≠ i := by
+          rintro rfl; have := hpk i' hi'; rw [hpi] at this; simp at this
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpk i' hi'
+      | @mb_init _ _ sb₀ n _ he hb0 =>
+        intro sb I A m ph hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · simp only [MBarrierState.mk.injEq, Option.some.injEq] at hB
+          obtain ⟨rfl, rfl, rfl, rfl⟩ := hB
+          exact ⟨Nat.zero_le _, fun i' hi' => by simp at hi'⟩
+        · obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+          refine ⟨hle, fun i' hi' => ?_⟩
+          have hne : i' ≠ i := by
+            rintro rfl; have := hpk i' hi'; rw [hpi] at this; simp at this
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpk i' hi'
+      | @mb_arrive _ _ sb₀ _ I₀ A₀ n₀ ph₀ he hb0 =>
+        intro sb I A m ph hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · rename_i hbq
+          simp only [MBarrierState.mk.injEq, Option.some.injEq] at hB
+          obtain ⟨rfl, rfl, rfl, rfl⟩ := hB
+          obtain ⟨_, hcpk⟩ := hmcond _ _ _ _ _ hb0
+          subst hbq
+          -- the guard bounds the arrivals strictly before the step
+          have hlt : A₀ < (n₀ : Nat) := by
+            rcases hmbar sb with hu | ⟨I', A', n', ph', heq, hlt'⟩
+            · rw [hb0] at hu
+              simp [MBarrierState.uninitialized] at hu
+            · rw [hb0] at heq
+              simp only [MBarrierState.mk.injEq, Option.some.injEq] at heq
+              obtain ⟨-, rfl, rfl, -⟩ := heq
+              exact hlt'
+          refine ⟨by omega, fun i' hi' => ?_⟩
+          have hne : i' ≠ i := by
+            rintro rfl; have := hcpk i' hi'; rw [hpi] at this; simp at this
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hcpk i' hi'
+        · obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+          refine ⟨hle, fun i' hi' => ?_⟩
+          have hne : i' ≠ i := by
+            rintro rfl; have := hpk i' hi'; rw [hpi] at this; simp at this
+          simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpk i' hi'
+      | @mb_wait_block _ _ sb₀ ph₀ c I₀ A₀ n₀ he hb0 =>
+        intro sb I A m ph hB
+        simp only [Function.update_apply] at hB
+        split at hB
+        · rename_i hbq
+          simp only [MBarrierState.mk.injEq, Option.some.injEq] at hB
+          obtain ⟨rfl, rfl, rfl, rfl⟩ := hB
+          obtain ⟨hle₀, hcpk⟩ := hmcond _ _ _ _ _ hb0
+          subst hbq
+          refine ⟨hle₀, fun i' hi' => ?_⟩
+          rcases List.mem_cons.mp hi' with rfl | hi'
+          · simp only [WeftCommon.CTA.set, Function.update_self, List.head?_cons]
+          · by_cases hne : i' = i
+            · subst hne
+              simp only [WeftCommon.CTA.set, Function.update_self, List.head?_cons]
+            · simp only [WeftCommon.CTA.set, Function.update_of_ne hne]
+              exact hcpk i' hi'
+        · obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+          refine ⟨hle, fun i' hi' => ?_⟩
+          by_cases hne : i' = i
+          · subst hne
+            simp only [WeftCommon.CTA.set, Function.update_self]
+            rw [← hpi]; exact hpk _ hi'
+          · simp only [WeftCommon.CTA.set, Function.update_of_ne hne]; exact hpk i' hi'
+      | @mb_wait_pass _ _ sb₀ phc _ I' A' n' ph' he hb0 hnep =>
+        intro sb I A m ph hB
+        obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+        refine ⟨hle, fun i' hi' => ?_⟩
+        have hne : i' ≠ i := by
+          rintro rfl
+          have h := hpk i' hi'
+          rw [hpi] at h
+          simp only [List.head?_cons, Option.some.injEq, Cmd.wait_mb.injEq] at h
+          obtain ⟨heq1, heq2⟩ := h
+          rw [← heq1] at hB
+          rw [hb0] at hB
+          simp only [MBarrierState.mk.injEq, Option.some.injEq] at hB
+          exact hnep (heq2.trans hB.2.2.2.symm)
+        simp only [WeftCommon.CTA.set, Function.update_of_ne hne]
+        exact hpk i' hi'
+    -- ## the uninitialized mbarrier clause
+    · cases hth with
+      | read_noop => exact hmcondn
+      | write_noop => exact hmcondn
+      | arrive_configure he hb0 => exact hmcondn
+      | arrive_register he hb0 hpos hlt => exact hmcondn
+      | sync_configure he hb0 => exact hmcondn
+      | sync_block he hb0 hpos hlt => exact hmcondn
+      | mb_init he hb0 =>
+        intro sb I A ph hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hmcondn sb I A ph hB
+      | mb_arrive he hb0 =>
+        intro sb I A ph hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hmcondn sb I A ph hB
+      | mb_wait_block he hb0 =>
+        intro sb I A ph hB; simp only [Function.update_apply] at hB; split at hB
+        · simp at hB
+        · exact hmcondn sb I A ph hB
+      | mb_wait_pass he hb0 hnep => exact hmcondn
+    -- ## fullness uniqueness: only the touched barrier can be full afterwards
+    · cases hth with
+      | read_noop => exact hamof
+      | write_noop => exact hamof
+      | mb_wait_pass he hb0 hnep => exact hamof
+      | @arrive_configure _ _ nb₀ n _ he hb0 =>
+        refine State.AtMostOneFull.of_unique (b₀ := Sum.inl nb₀) fun b hfb => ?_
+        by_contra hbne
+        refine hnf b ?_
+        cases b with
+        | inl nb =>
+          have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+          have h : (Function.update s.BN nb₀ ⟨[], 1, some n⟩ nb).isFull = true := hfb
+          rw [Function.update_of_ne hnn] at h
+          exact h
+        | inr sb => exact hfb
+      | @arrive_register _ _ nb₀ n _ I A he hb0 hpos hlt =>
+        refine State.AtMostOneFull.of_unique (b₀ := Sum.inl nb₀) fun b hfb => ?_
+        by_contra hbne
+        refine hnf b ?_
+        cases b with
+        | inl nb =>
+          have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+          have h : (Function.update s.BN nb₀ ⟨I, A + 1, some n⟩ nb).isFull = true := hfb
+          rw [Function.update_of_ne hnn] at h
+          exact h
+        | inr sb => exact hfb
+      | @sync_configure _ _ nb₀ n c he hb0 =>
+        refine State.AtMostOneFull.of_unique (b₀ := Sum.inl nb₀) fun b hfb => ?_
+        by_contra hbne
+        refine hnf b ?_
+        cases b with
+        | inl nb =>
+          have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+          have h : (Function.update s.BN nb₀ ⟨[i], 0, some n⟩ nb).isFull = true := hfb
+          rw [Function.update_of_ne hnn] at h
+          exact h
+        | inr sb => exact hfb
+      | @sync_block _ _ nb₀ n c I A he hb0 hpos hlt =>
+        refine State.AtMostOneFull.of_unique (b₀ := Sum.inl nb₀) fun b hfb => ?_
+        by_contra hbne
+        refine hnf b ?_
+        cases b with
+        | inl nb =>
+          have hnn : nb ≠ nb₀ := fun h => hbne (by rw [h])
+          have h : (Function.update s.BN nb₀ ⟨i :: I, A, some n⟩ nb).isFull = true := hfb
+          rw [Function.update_of_ne hnn] at h
+          exact h
+        | inr sb => exact hfb
+      | @mb_init _ _ sb₀ n _ he hb0 =>
+        refine State.AtMostOneFull.of_unique (b₀ := Sum.inr sb₀) fun b hfb => ?_
+        by_contra hbne
+        refine hnf b ?_
+        cases b with
+        | inl nb => exact hfb
+        | inr sb =>
+          have hnn : sb ≠ sb₀ := fun h => hbne (by rw [h])
+          have h : (Function.update s.BM sb₀ ⟨[], 0, some n, false⟩ sb).isFull = true := hfb
+          rw [Function.update_of_ne hnn] at h
+          exact h
+      | @mb_arrive _ _ sb₀ _ I₀ A₀ n₀ ph₀ he hb0 =>
+        refine State.AtMostOneFull.of_unique (b₀ := Sum.inr sb₀) fun b hfb => ?_
+        by_contra hbne
+        refine hnf b ?_
+        cases b with
+        | inl nb => exact hfb
+        | inr sb =>
+          have hnn : sb ≠ sb₀ := fun h => hbne (by rw [h])
+          have h : (Function.update s.BM sb₀ ⟨I₀, A₀ + 1, some n₀, ph₀⟩ sb).isFull
+              = true := hfb
+          rw [Function.update_of_ne hnn] at h
+          exact h
+      | @mb_wait_block _ _ sb₀ ph₀ c I₀ A₀ n₀ he hb0 =>
+        refine State.AtMostOneFull.of_unique (b₀ := Sum.inr sb₀) fun b hfb => ?_
+        by_contra hbne
+        refine hnf b ?_
+        cases b with
+        | inl nb => exact hfb
+        | inr sb =>
+          have hnn : sb ≠ sb₀ := fun h => hbne (by rw [h])
+          have h : (Function.update s.BM sb₀ ⟨i :: I₀, A₀, some n₀, ph₀⟩ sb).isFull
+              = true := hfb
+          rw [Function.update_of_ne hnn] at h
+          exact h
+  | @recycle s T nb₀ I₀ A₀ n₀ hb hfullr hpark =>
+    obtain ⟨hcond, hcondn, hmcond, hmcondn, hamof, _⟩ := hwf
+    refine ⟨?_, ?_, ?_, ?_, ?_, hBIpres _ rfl⟩
+    · intro nb I A n hB
+      by_cases hbb : nb = nb₀
+      · subst hbb
+        simp only [Function.update_self, NamedBarrierState.unconfigured,
+          NamedBarrierState.mk.injEq] at hB
+        exact absurd hB.2.2 (by simp)
+      · simp only [Function.update_of_ne hbb] at hB
+        obtain ⟨hle, hpk, hpos⟩ := hcond nb I A n hB
+        refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+        have hni : i' ∉ I₀ := by
+          intro hmem
+          have h1 := hpark i' hmem
+          have h2 := hpk i' hi'
+          rw [h1] at h2
+          simp only [Option.some.injEq, Cmd.sync_nb.injEq] at h2
+          exact hbb h2.1.symm
+        simp only [WeftCommon.CTA.wake, if_neg hni]; exact hpk i' hi'
+    · intro nb I A hB
+      by_cases hbb : nb = nb₀
+      · subst hbb
+        simp only [Function.update_self, NamedBarrierState.unconfigured,
+          NamedBarrierState.mk.injEq] at hB
+        exact ⟨hB.1.symm, hB.2.1.symm⟩
+      · simp only [Function.update_of_ne hbb] at hB; exact hcondn nb I A hB
+    · intro sb I A m ph hB
+      obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+      refine ⟨hle, fun i' hi' => ?_⟩
+      have hni : i' ∉ I₀ := by
+        intro hmem
+        have h1 := hpark i' hmem
+        have h2 := hpk i' hi'
+        rw [h1] at h2
+        simp at h2
+      simp only [WeftCommon.CTA.wake, if_neg hni]; exact hpk i' hi'
+    · exact hmcondn
+    · refine State.AtMostOneFull.of_none fun x hx => ?_
+      have hfb₀ : s.FullBarrier (.inl nb₀) := by
+        have h : (s.BN nb₀).isFull = true := by
+          rw [hb]
+          simp [NamedBarrierState.isFull, hfullr]
+        exact h
+      have hmem₀ : (Sum.inl nb₀ : NamedBarrier ⊕ SharedBarrier) ∈
+          { b | s.FullBarrier b } := hfb₀
+      cases x with
+      | inl nb =>
+        by_cases hbb : nb = nb₀
+        · subst hbb
+          have h : (Function.update s.BN nb NamedBarrierState.unconfigured nb).isFull
+              = true := hx
+          rw [Function.update_self] at h
+          simp [NamedBarrierState.isFull, NamedBarrierState.unconfigured] at h
+        · have hfs : s.FullBarrier (.inl nb) := by
+            have h : (Function.update s.BN nb₀ NamedBarrierState.unconfigured nb).isFull
+                = true := hx
+            rw [Function.update_of_ne hbb] at h
+            exact h
+          have hmem : (Sum.inl nb : NamedBarrier ⊕ SharedBarrier) ∈
+              { b | s.FullBarrier b } := hfs
+          have := hamof hmem hmem₀
+          simp only [Sum.inl.injEq] at this
+          exact hbb this
+      | inr sb =>
+        have hfs : s.FullBarrier (.inr sb) := hx
+        have hmem : (Sum.inr sb : NamedBarrier ⊕ SharedBarrier) ∈
+            { b | s.FullBarrier b } := hfs
+        exact nomatch (hamof hmem hmem₀)
+  | @mb_recycle s T sb₀ I₀ A₀ n₀ ph₀ hb hfullr hpark =>
+    obtain ⟨hcond, hcondn, hmcond, hmcondn, hamof, _⟩ := hwf
+    refine ⟨?_, ?_, ?_, ?_, ?_, hBIpres _ rfl⟩
+    · intro nb I A n hB
+      obtain ⟨hle, hpk, hpos⟩ := hcond nb I A n hB
+      refine ⟨hle, (fun i' hi' => ?_), hpos⟩
+      have hni : i' ∉ I₀ := by
+        intro hmem
+        have h1 := hpark i' hmem
+        have h2 := hpk i' hi'
+        rw [h1] at h2
+        simp at h2
+      simp only [WeftCommon.CTA.wake, if_neg hni]; exact hpk i' hi'
+    · exact hcondn
+    · intro sb I A m ph hB
+      by_cases hbb : sb = sb₀
+      · subst hbb
+        simp only [Function.update_self, MBarrierState.mk.injEq, Option.some.injEq] at hB
+        obtain ⟨rfl, rfl, rfl, rfl⟩ := hB
+        exact ⟨Nat.zero_le _, fun i' hi' => by simp at hi'⟩
+      · simp only [Function.update_of_ne hbb] at hB
+        obtain ⟨hle, hpk⟩ := hmcond sb I A m ph hB
+        refine ⟨hle, fun i' hi' => ?_⟩
+        have hni : i' ∉ I₀ := by
+          intro hmem
+          have h1 := hpark i' hmem
+          have h2 := hpk i' hi'
+          rw [h1] at h2
+          simp only [Option.some.injEq, Cmd.wait_mb.injEq] at h2
+          exact hbb h2.1.symm
+        simp only [WeftCommon.CTA.wake, if_neg hni]; exact hpk i' hi'
+    · intro sb I A ph hB
+      by_cases hbb : sb = sb₀
+      · subst hbb
+        simp only [Function.update_self, MBarrierState.mk.injEq] at hB
+        exact absurd hB.2.2.1 (by simp)
+      · simp only [Function.update_of_ne hbb] at hB; exact hmcondn sb I A ph hB
+    · refine State.AtMostOneFull.of_none fun x hx => ?_
+      have hfb₀ : s.FullBarrier (.inr sb₀) := by
+        have h : (s.BM sb₀).isFull = true := by
+          rw [hb]
+          simp [MBarrierState.isFull, hfullr]
+        exact h
+      have hmem₀ : (Sum.inr sb₀ : NamedBarrier ⊕ SharedBarrier) ∈
+          { b | s.FullBarrier b } := hfb₀
+      cases x with
+      | inl nb =>
+        have hfs : s.FullBarrier (.inl nb) := hx
+        have hmem : (Sum.inl nb : NamedBarrier ⊕ SharedBarrier) ∈
+            { b | s.FullBarrier b } := hfs
+        exact nomatch (hamof hmem hmem₀)
+      | inr sb =>
+        by_cases hbb : sb = sb₀
+        · subst hbb
+          have h : (Function.update s.BM sb ⟨[], 0, some n₀, !ph₀⟩ sb).isFull
+              = true := hx
+          rw [Function.update_self] at h
+          simp only [MBarrierState.isFull, beq_iff_eq] at h
+          have := n₀.pos
+          omega
+        · have hfs : s.FullBarrier (.inr sb) := by
+            have h : (Function.update s.BM sb₀ ⟨[], 0, some n₀, !ph₀⟩ sb).isFull
+                = true := hx
+            rw [Function.update_of_ne hbb] at h
+            exact h
+          have hmem : (Sum.inr sb : NamedBarrier ⊕ SharedBarrier) ∈
+              { b | s.FullBarrier b } := hfs
+          have := hamof hmem hmem₀
+          simp only [Sum.inr.injEq] at this
+          exact hbb this
+  | done hdone hnofull hmbnofull => trivial
+  | error hbar hmbar hth => trivial
 
 /-- `WF` holds at every configuration of a chain whose head satisfies it. -/
 theorem WF_chain : ∀ {τ : List Config} {C₀ : Config}, List.IsChain CTAStep τ →
