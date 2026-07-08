@@ -502,6 +502,470 @@ theorem Cmd.genValue_of_inl {c : Cmd} {nb : NamedBarrier}
   | arrive_mb sb => simp [Cmd.barrier?] at h
   | wait_mb sb ph => simp [Cmd.barrier?] at h
 
+/-- `recycleCount` over the first `M` steps depends only on the first `M+1`
+configurations: two traces that agree on configurations `0 … M` have the same
+`recycleCount … M`. -/
+theorem recycleCount_prefix_eq (b : NamedBarrier ⊕ SharedBarrier) {τ₁ τ₂ : List Config} :
+    ∀ M, (∀ j, j ≤ M → τ₁[j]? = τ₂[j]?) → recycleCount b τ₁ M = recycleCount b τ₂ M := by
+  intro M
+  induction M with
+  | zero => intro _; simp [recycleCount]
+  | succ M ih =>
+    intro h
+    unfold recycleCount
+    rw [List.range_succ, List.countP_append, List.countP_append]
+    congr 1
+    · have hih := ih (fun j hj => h j (by omega))
+      unfold recycleCount at hih
+      exact hih
+    · have e1 := h M (by omega)
+      have e2 := h (M + 1) (by omega)
+      simp only [List.countP_cons, List.countP_nil, Nat.zero_add, e1, e2]
+
+/-- A step that drops an `init_mb sb n` head has an *uninitialized* `sb` at its
+source: only `mb_init` advances past an `init_mb`. -/
+theorem init_drop_uninitialized {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
+    {sb : SharedBarrier} {n : ℕ+} {rest : Prog}
+    (hC : C.progOf t = Cmd.init_mb sb n :: rest) (hC' : C'.progOf t = rest) :
+    ∃ s T, C = Config.run s T ∧ s.BM sb = MBarrierState.uninitialized := by
+  cases hstep with
+  | @interleave s s' T i P' hi hbar hmbar hth =>
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      by_cases h : t = i
+      · subst h
+        simp only [WeftCommon.CTA.set, Function.update_self] at hC'
+        subst hC'
+        rw [hC] at hth
+        cases hth with
+        | mb_init he hb0 => exact ⟨s, T, rfl, hb0⟩
+      · exfalso
+        simp only [WeftCommon.CTA.set, Function.update_of_ne h] at hC'
+        rw [hC] at hC'
+        simp at hC'
+  | @recycle s T nb₀ I A n₀ hb hfull hpark =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      by_cases h : t ∈ I
+      · have hpk := hpark t h
+        rw [hC] at hpk
+        simp at hpk
+      · simp only [WeftCommon.CTA.wake, if_neg h] at hC'
+        rw [hC] at hC'
+        simp at hC'
+  | @mb_recycle s T sb₀ I A n₀ ph hb hfull hpark =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      by_cases h : t ∈ I
+      · have hpk := hpark t h
+        rw [hC] at hpk
+        simp at hpk
+      · simp only [WeftCommon.CTA.wake, if_neg h] at hC'
+        rw [hC] at hC'
+        simp at hC'
+  | @done s T hdone _ _ =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC
+      have hnil : T.prog t = [] := by
+        by_cases ht : t ∈ T.ids
+        · exact hdone t ht
+        · exact T.nil_outside_ids t ht
+      rw [hnil] at hC
+      simp at hC
+  | @error s T i P' _ _ hth =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      rw [hC] at hC'
+      simp at hC'
+
+/-- A step that drops an `arrive_mb sb` head has an *initialized* `sb` at its
+source: only `mb_arrive` advances past an `arrive_mb`, and it requires
+`count = some n`. -/
+theorem arrive_mb_drop_initialized {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
+    {sb : SharedBarrier} {rest : Prog}
+    (hC : C.progOf t = Cmd.arrive_mb sb :: rest) (hC' : C'.progOf t = rest) :
+    ∃ s T I A n ph, C = Config.run s T ∧ s.BM sb = ⟨I, A, some n, ph⟩ := by
+  cases hstep with
+  | @interleave s s' T i P' hi hbar hmbar hth =>
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      by_cases h : t = i
+      · subst h
+        simp only [WeftCommon.CTA.set, Function.update_self] at hC'
+        subst hC'
+        rw [hC] at hth
+        cases hth with
+        | @mb_arrive _ _ _ _ I A n ph he hb0 => exact ⟨s, T, I, A, n, ph, rfl, hb0⟩
+      · exfalso
+        simp only [WeftCommon.CTA.set, Function.update_of_ne h] at hC'
+        rw [hC] at hC'
+        simp at hC'
+  | @recycle s T nb₀ I A n₀ hb hfull hpark =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      by_cases h : t ∈ I
+      · have hpk := hpark t h
+        rw [hC] at hpk
+        simp at hpk
+      · simp only [WeftCommon.CTA.wake, if_neg h] at hC'
+        rw [hC] at hC'
+        simp at hC'
+  | @mb_recycle s T sb₀ I A n₀ ph hb hfull hpark =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      by_cases h : t ∈ I
+      · have hpk := hpark t h
+        rw [hC] at hpk
+        simp at hpk
+      · simp only [WeftCommon.CTA.wake, if_neg h] at hC'
+        rw [hC] at hC'
+        simp at hC'
+  | @done s T hdone _ _ =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC
+      have hnil : T.prog t = [] := by
+        by_cases ht : t ∈ T.ids
+        · exact hdone t ht
+        · exact T.nil_outside_ids t ht
+      rw [hnil] at hC
+      simp at hC
+  | @error s T i P' _ _ hth =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      rw [hC] at hC'
+      simp at hC'
+
+/-- A step that drops a `wait_mb sb ph` head has an *initialized* `sb` at its
+source: both `mb_wait_pass` and the `mb_recycle` wake require `count = some n`. -/
+theorem wait_mb_drop_initialized {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
+    {sb : SharedBarrier} {ph : Phase} {rest : Prog}
+    (hC : C.progOf t = Cmd.wait_mb sb ph :: rest) (hC' : C'.progOf t = rest) :
+    ∃ s T I A n ph', C = Config.run s T ∧ s.BM sb = ⟨I, A, some n, ph'⟩ := by
+  cases hstep with
+  | @interleave s s' T i P' hi hbar hmbar hth =>
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      by_cases h : t = i
+      · subst h
+        simp only [WeftCommon.CTA.set, Function.update_self] at hC'
+        subst hC'
+        rw [hC] at hth
+        cases hth with
+        | @mb_wait_pass _ _ _ _ _ I A n ph' he hb0 hnep =>
+            exact ⟨s, T, I, A, n, ph', rfl, hb0⟩
+      · exfalso
+        simp only [WeftCommon.CTA.set, Function.update_of_ne h] at hC'
+        rw [hC] at hC'
+        simp at hC'
+  | @recycle s T nb₀ I A n₀ hb hfull hpark =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      by_cases h : t ∈ I
+      · have hpk := hpark t h
+        rw [hC] at hpk
+        simp at hpk
+      · simp only [WeftCommon.CTA.wake, if_neg h] at hC'
+        rw [hC] at hC'
+        simp at hC'
+  | @mb_recycle s T sb₀ I A n₀ ph₀ hb hfull hpark =>
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      by_cases h : t ∈ I
+      · have hpk := hpark t h
+        rw [hC] at hpk
+        simp only [List.head?_cons, Option.some.injEq, Cmd.wait_mb.injEq] at hpk
+        obtain ⟨rfl, rfl⟩ := hpk
+        exact ⟨s, T, I, A, n₀, ph, rfl, hb⟩
+      · exfalso
+        simp only [WeftCommon.CTA.wake, if_neg h] at hC'
+        rw [hC] at hC'
+        simp at hC'
+  | @done s T hdone _ _ =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC
+      have hnil : T.prog t = [] := by
+        by_cases ht : t ∈ T.ids
+        · exact hdone t ht
+        · exact T.nil_outside_ids t ht
+      rw [hnil] at hC
+      simp at hC
+  | @error s T i P' _ _ hth =>
+      exfalso
+      simp only [WeftCommon.Config.progOf] at hC hC'
+      rw [hC] at hC'
+      simp at hC'
+
+/-- An mbarrier's initialization is permanent: `count = some n` persists through
+every step (`mb_recycle` keeps the count; nothing de-initializes). -/
+theorem count_some_persists {C C' : Config} (hstep : CTAStep C C') {sb : SharedBarrier}
+    {s s' : State} (hs : C.state? = some s) (hs' : C'.state? = some s')
+    {n : ℕ+} (hcnt : (s.BM sb).count = some n) : (s'.BM sb).count = some n := by
+  cases hstep with
+  | @interleave s₀ s₁ T i P' hi hbar hmbar hth =>
+      simp only [WeftCommon.Config.state?, Option.some.injEq] at hs hs'
+      subst hs; subst hs'
+      generalize hpi : T.prog i = Pi at hth
+      cases hth with
+      | read_noop => exact hcnt
+      | write_noop => exact hcnt
+      | mb_wait_pass he hb0 hnep => exact hcnt
+      | arrive_configure he hb0 => exact hcnt
+      | arrive_register he hb0 hpos hlt => exact hcnt
+      | sync_configure he hb0 => exact hcnt
+      | sync_block he hb0 hpos hlt => exact hcnt
+      | @mb_init _ _ sb₀ n₃ _ he hb0 =>
+        by_cases hbb : sb = sb₀
+        · subst hbb
+          rw [hb0] at hcnt
+          simp [MBarrierState.uninitialized] at hcnt
+        · change (Function.update s₀.BM sb₀ ⟨[], 0, some n₃, false⟩ sb).count = some n
+          rw [Function.update_of_ne hbb]
+          exact hcnt
+      | @mb_arrive _ _ sb₀ _ I₃ A₃ n₃ ph₃ he hb0 =>
+        by_cases hbb : sb = sb₀
+        · subst hbb
+          change (Function.update s₀.BM sb ⟨I₃, A₃ + 1, some n₃, ph₃⟩ sb).count = some n
+          rw [Function.update_self]
+          rw [hb0] at hcnt
+          exact hcnt
+        · change (Function.update s₀.BM sb₀ ⟨I₃, A₃ + 1, some n₃, ph₃⟩ sb).count = some n
+          rw [Function.update_of_ne hbb]
+          exact hcnt
+      | @mb_wait_block _ _ sb₀ ph₃ _ I₃ A₃ n₃ he hb0 =>
+        by_cases hbb : sb = sb₀
+        · subst hbb
+          change (Function.update s₀.BM sb ⟨i :: I₃, A₃, some n₃, ph₃⟩ sb).count = some n
+          rw [Function.update_self]
+          rw [hb0] at hcnt
+          exact hcnt
+        · change (Function.update s₀.BM sb₀ ⟨i :: I₃, A₃, some n₃, ph₃⟩ sb).count = some n
+          rw [Function.update_of_ne hbb]
+          exact hcnt
+  | @recycle s₀ T nb₀ I A n₃ hb hfull hpark =>
+      simp only [WeftCommon.Config.state?, Option.some.injEq] at hs hs'
+      subst hs; subst hs'
+      exact hcnt
+  | @mb_recycle s₀ T sb₀ I A n₃ ph₃ hb hfull hpark =>
+      simp only [WeftCommon.Config.state?, Option.some.injEq] at hs hs'
+      subst hs; subst hs'
+      by_cases hbb : sb = sb₀
+      · subst hbb
+        change (Function.update s₀.BM sb ⟨[], 0, some n₃, !ph₃⟩ sb).count = some n
+        rw [Function.update_self]
+        rw [hb] at hcnt
+        exact hcnt
+      · change (Function.update s₀.BM sb₀ ⟨[], 0, some n₃, !ph₃⟩ sb).count = some n
+        rw [Function.update_of_ne hbb]
+        exact hcnt
+  | @done s₀ T hdone _ _ =>
+      simp only [WeftCommon.Config.state?, Option.some.injEq] at hs hs'
+      subst hs; subst hs'
+      exact hcnt
+  | @error s₀ T i P' _ _ hth =>
+      exact absurd hs' (by simp [WeftCommon.Config.state?])
+
+/-- An uninitialized mbarrier stays uninitialized unless this very step executes
+an `init_mb sb` — whose drop evidence is returned. -/
+theorem uninit_step {C C' : Config} (hstep : CTAStep C C') {sb : SharedBarrier}
+    {s s' : State} (hs : C.state? = some s) (hs' : C'.state? = some s')
+    (hu : s.BM sb = MBarrierState.uninitialized) :
+    s'.BM sb = MBarrierState.uninitialized ∨
+      ∃ i n rest, C.progOf i = Cmd.init_mb sb n :: rest ∧ C'.progOf i = rest := by
+  cases hstep with
+  | @interleave s₀ s₁ T i P' hi hbar hmbar hth =>
+      simp only [WeftCommon.Config.state?, Option.some.injEq] at hs hs'
+      subst hs; subst hs'
+      generalize hpi : T.prog i = Pi at hth
+      cases hth with
+      | read_noop => exact Or.inl hu
+      | write_noop => exact Or.inl hu
+      | mb_wait_pass he hb0 hnep => exact Or.inl hu
+      | arrive_configure he hb0 => exact Or.inl hu
+      | arrive_register he hb0 hpos hlt => exact Or.inl hu
+      | sync_configure he hb0 => exact Or.inl hu
+      | sync_block he hb0 hpos hlt => exact Or.inl hu
+      | @mb_init _ _ sb₀ n₃ _ he hb0 =>
+        by_cases hbb : sb = sb₀
+        · subst hbb
+          refine Or.inr ⟨i, n₃, P', ?_, ?_⟩
+          · change T.prog i = Cmd.init_mb sb n₃ :: P'
+            exact hpi
+          · change (T.set i hi P').prog i = P'
+            simp [WeftCommon.CTA.set, Function.update_self]
+        · refine Or.inl ?_
+          change (Function.update s₀.BM sb₀ ⟨[], 0, some n₃, false⟩ sb) =
+            MBarrierState.uninitialized
+          rw [Function.update_of_ne hbb]
+          exact hu
+      | @mb_arrive _ _ sb₀ _ I₃ A₃ n₃ ph₃ he hb0 =>
+        by_cases hbb : sb = sb₀
+        · subst hbb
+          rw [hu] at hb0
+          simp [MBarrierState.uninitialized] at hb0
+        · refine Or.inl ?_
+          change (Function.update s₀.BM sb₀ ⟨I₃, A₃ + 1, some n₃, ph₃⟩ sb) =
+            MBarrierState.uninitialized
+          rw [Function.update_of_ne hbb]
+          exact hu
+      | @mb_wait_block _ _ sb₀ ph₃ _ I₃ A₃ n₃ he hb0 =>
+        by_cases hbb : sb = sb₀
+        · subst hbb
+          rw [hu] at hb0
+          simp [MBarrierState.uninitialized] at hb0
+        · refine Or.inl ?_
+          change (Function.update s₀.BM sb₀ ⟨i :: I₃, A₃, some n₃, ph₃⟩ sb) =
+            MBarrierState.uninitialized
+          rw [Function.update_of_ne hbb]
+          exact hu
+  | @recycle s₀ T nb₀ I A n₃ hb hfull hpark =>
+      simp only [WeftCommon.Config.state?, Option.some.injEq] at hs hs'
+      subst hs; subst hs'
+      exact Or.inl hu
+  | @mb_recycle s₀ T sb₀ I A n₃ ph₃ hb hfull hpark =>
+      simp only [WeftCommon.Config.state?, Option.some.injEq] at hs hs'
+      subst hs; subst hs'
+      by_cases hbb : sb = sb₀
+      · subst hbb
+        rw [hu] at hb
+        simp [MBarrierState.uninitialized] at hb
+      · refine Or.inl ?_
+        change (Function.update s₀.BM sb₀ ⟨[], 0, some n₃, !ph₃⟩ sb) =
+          MBarrierState.uninitialized
+        rw [Function.update_of_ne hbb]
+        exact hu
+  | @done s₀ T hdone _ _ =>
+      simp only [WeftCommon.Config.state?, Option.some.injEq] at hs hs'
+      subst hs; subst hs'
+      exact Or.inl hu
+  | @error s₀ T i P' _ _ hth =>
+      exact absurd hs' (by simp [WeftCommon.Config.state?])
+
+/-- The drop evidence at a command's execution time: the source config still
+heads with the command, the target config carries the rest. -/
+theorem time_drop_evidence {C₀ : Config} {τ : List Config} {η : ProgPoint} {m : Nat}
+    {cmd : Cmd} (hm : IsTimeOf C₀ τ η m) (hcmd : η.cmd C₀ = some cmd) :
+    ∃ C C', τ[m - 1]? = some C ∧ τ[m]? = some C' ∧
+      C.progOf η.thread = cmd :: (C'.progOf η.thread) := by
+  obtain ⟨hτ, hidxL, j, C, C', hn, hCj, hCj1, hCeq, hC'eq⟩ := hm
+  subst hn
+  refine ⟨C, C', by rw [show j + 1 - 1 = j by omega]; exact hCj, hCj1, ?_⟩
+  have hhead : (C₀.progOf η.thread)[η.idx]'hidxL = cmd := by
+    have hc := hcmd
+    simp only [ProgPoint.cmd] at hc
+    rw [List.getElem?_eq_getElem hidxL, Option.some.injEq] at hc
+    exact hc
+  rw [hCeq, hC'eq, List.drop_eq_getElem_cons hidxL, hhead]
+
+/-- Two `init_mb` heads cannot drop in one step unless on the same thread: an
+`interleave` advances one thread, and the recycles wake only parked
+`sync_nb`/`wait_mb` heads. -/
+theorem init_head_drop_same_thread {C C' : Config} (hstep : CTAStep C C') {t t' : ThreadId}
+    {sb sb' : SharedBarrier} {n n' : ℕ+} {r r' : Prog}
+    (h1 : C.progOf t = Cmd.init_mb sb n :: r) (h1' : C'.progOf t = r)
+    (h2 : C.progOf t' = Cmd.init_mb sb' n' :: r') (h2' : C'.progOf t' = r') : t = t' := by
+  cases hstep with
+  | @interleave s s₁ T i P' hi hbar hmbar hth =>
+    simp only [WeftCommon.Config.progOf] at h1 h1' h2 h2'
+    by_cases ht : t = i
+    · by_cases ht' : t' = i
+      · rw [ht, ht']
+      · exfalso
+        simp only [WeftCommon.CTA.set, Function.update_of_ne ht'] at h2'
+        rw [h2] at h2'
+        simp at h2'
+    · exfalso
+      simp only [WeftCommon.CTA.set, Function.update_of_ne ht] at h1'
+      rw [h1] at h1'
+      simp at h1'
+  | @recycle s T nb₀ I A n₀ hb hfull hpark =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at h1 h1'
+    by_cases h : t ∈ I
+    · have hpk := hpark t h
+      rw [h1] at hpk
+      simp at hpk
+    · simp only [WeftCommon.CTA.wake, if_neg h] at h1'
+      rw [h1] at h1'
+      simp at h1'
+  | @mb_recycle s T sb₀ I A n₀ ph hb hfull hpark =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at h1 h1'
+    by_cases h : t ∈ I
+    · have hpk := hpark t h
+      rw [h1] at hpk
+      simp at hpk
+    · simp only [WeftCommon.CTA.wake, if_neg h] at h1'
+      rw [h1] at h1'
+      simp at h1'
+  | @done s T hdone _ _ =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at h1
+    have hnil : T.prog t = [] := by
+      by_cases hti : t ∈ T.ids
+      · exact hdone t hti
+      · exact T.nil_outside_ids t hti
+    rw [hnil] at h1
+    simp at h1
+  | @error s T i P' _ _ hth =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at h1 h1'
+    rw [h1] at h1'
+    simp at h1'
+
+/-- The step that drops an `init_mb sb n` head *initializes* `sb`: the target
+state carries `count = some n`. -/
+theorem init_drop_target_initialized {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
+    {sb : SharedBarrier} {n : ℕ+} {rest : Prog}
+    (hC : C.progOf t = Cmd.init_mb sb n :: rest) (hC' : C'.progOf t = rest) :
+    ∃ s' T', C' = Config.run s' T' ∧ (s'.BM sb).count = some n := by
+  cases hstep with
+  | @interleave s s₁ T i P' hi hbar hmbar hth =>
+    simp only [WeftCommon.Config.progOf] at hC hC'
+    by_cases h : t = i
+    · subst h
+      simp only [WeftCommon.CTA.set, Function.update_self] at hC'
+      subst hC'
+      rw [hC] at hth
+      cases hth with
+      | mb_init he hb0 =>
+        refine ⟨_, _, rfl, ?_⟩
+        change (Function.update s.BM sb ⟨[], 0, some n, false⟩ sb).count = some n
+        rw [Function.update_self]
+    · exfalso
+      simp only [WeftCommon.CTA.set, Function.update_of_ne h] at hC'
+      rw [hC] at hC'
+      simp at hC'
+  | @recycle s T nb₀ I A n₀ hb hfull hpark =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at hC hC'
+    by_cases h : t ∈ I
+    · have hpk := hpark t h
+      rw [hC] at hpk
+      simp at hpk
+    · simp only [WeftCommon.CTA.wake, if_neg h] at hC'
+      rw [hC] at hC'
+      simp at hC'
+  | @mb_recycle s T sb₀ I A n₀ ph hb hfull hpark =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at hC hC'
+    by_cases h : t ∈ I
+    · have hpk := hpark t h
+      rw [hC] at hpk
+      simp at hpk
+    · simp only [WeftCommon.CTA.wake, if_neg h] at hC'
+      rw [hC] at hC'
+      simp at hC'
+  | @done s T hdone _ _ =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at hC
+    have hnil : T.prog t = [] := by
+      by_cases hti : t ∈ T.ids
+      · exact hdone t hti
+      · exact T.nil_outside_ids t hti
+    rw [hnil] at hC
+    simp at hC
+  | @error s T i P' _ _ hth =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at hC hC'
+    rw [hC] at hC'
+    simp at hC'
+
 /-- Definition 7 (§4.1) for the mbarrier-extended language: the shared
 `WeftCommon.WellSynchronized` at this language's step relation, barrier
 classifier, and (`ℤ`-valued, §5.2.3-corrected) generation relation. -/
