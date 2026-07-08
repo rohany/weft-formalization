@@ -37,9 +37,11 @@ independent. Algorithm 2 extends Figure 4 with the mbarrier edges and checks:
   generation `g`: if `1 ≤ g`, `w` must have an in-thread predecessor `c3`
   (lines 25–26), and every registrant of `Reg(sb, g−1)` must happen-before
   `c3` (lines 27–28) — a lower bound: generation `g − 1` completes before `w`;
-  and if the next generation has any registrants (`Reg(sb, g+1) ≠ ∅`), `w`
-  must happen-before one of them (lines 29–30) — an upper bound pinning `w`
-  before the completion of `g + 1`.
+  and if the next generation *fills* (`|Reg(sb, g+1)| = n`, with `n` from the
+  barrier's unique initialization), `w` must happen-before one of its
+  registrants (lines 29–30, amended) — an upper bound pinning `w` before the
+  completion of `g + 1`. A partial final generation never recycles, so it
+  forces no ordering and the bound passes vacuously.
 * **initialization ordering** (beyond Algorithm 2 as written) — every
   `init_mb sb _` must happen-before every *use* of `sb` (its `arrive_mb`s and
   `wait_mb`s): using an uninitialized mbarrier is an error, so a schedule that
@@ -177,6 +179,16 @@ def Cmd.usesMBarrier? : Cmd → Option SharedBarrier
   | .wait_mb sb _ => some sb
   | _ => none
 
+/-- The arrival count of `sb`'s initialization: the `n` of the (unique, per
+`CheckWellSynchronized`'s `okUniqueInit`) `init_mb sb n` in `T`, or `none` if
+`sb` is never initialized. Used by the wait upper bound to decide whether a
+next generation *fills* — a partial final generation forces no ordering. -/
+def CTA.initCountOf (T : CTA) (sb : SharedBarrier) : Option ℕ+ :=
+  T.progPoints.findSome? fun ci =>
+    match T.cmdAt ci with
+    | some (.init_mb sb' n) => if sb' = sb then some n else none
+    | _ => none
+
 /-- Step 1 of Algorithm 2 (lines 9–16): build the happens-before relation `R` as
 a finite set of edges, using the generation map `G = pointGen T τ`.
 
@@ -243,7 +255,7 @@ a predecessor-less such `c2` (`c2.idx = 0`) rejects outright (see the module
 doc). The wait checks (lines 23–30) pin each `wait_mb`'s observed generation
 from below (a generation `≥ 1` needs an in-thread predecessor, before which
 every `Reg(sb, g−1)` registrant completes) and from above (the wait precedes
-some next-generation registrant, when any exists). The
+some next-generation registrant, when that generation fills). The
 initialization check (beyond Algorithm 2 as written) requires every use of an
 mbarrier to be ordered after its `init_mb`, and — a temporary restriction —
 each mbarrier to be initialized by at most one `init_mb` in the whole CTA. -/
@@ -289,12 +301,21 @@ def CheckWellSynchronized (T : CTA) (τ : List Config) :
                 decide (c = (⟨w.thread, w.idx - 1⟩ : ProgPoint) ∨
                   (c, (⟨w.thread, w.idx - 1⟩ : ProgPoint)) ∈ hb)
               else true))) &&
-        -- lines 29–30: if the next generation has registrants, `w` must
+        -- lines 29–30 (amended): if the next generation *fills* — exactly `n`
+        -- registrants, with `n` from the unique initialization — `w` must
         -- happen-before one of them (the upper bound; `w` is never a
-        -- registrant, so no reflexivity accommodation is needed).
+        -- registrant, so no reflexivity accommodation is needed). A partial
+        -- final generation forces no ordering: with fewer than `n`
+        -- next-generation arrivals the `(g+2)`-th recycle never occurs, so `w`
+        -- observes `g` regardless of the order.
         (let regNext : List ProgPoint := T.progPoints.filter fun cp =>
             registrantGen T τ cp = some (.inr sb, g + 1)
-         regNext.isEmpty || regNext.any fun cp => decide ((w, cp) ∈ hb))
+         match T.initCountOf sb with
+         | some n =>
+             if regNext.length = (n : Nat) then
+               regNext.any fun cp => decide ((w, cp) ∈ hb)
+             else true
+         | none => true)
     | _, _ => true
   -- Step 5 (beyond Algorithm 2): every use of an mbarrier happens-after its
   -- initialization. An uninitialized `arrive_mb`/`wait_mb` is an error, so a
