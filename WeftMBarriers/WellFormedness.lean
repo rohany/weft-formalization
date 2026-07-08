@@ -203,6 +203,17 @@ theorem noTime_at_last {C₀ Cₙ : Config} {τ : List Config} {t : ThreadId}
     ¬ ∃ m, IsTimeOf C₀ τ (ProgPoint.mk t ((C₀.progOf t).length - (Cₙ.progOf t).length)) m :=
   WeftCommon.noTime_at_last (fun _ _ h t => h.progOf_drop t) hτ hlast hpos hle
 
+/-- A program that has already shrunk strictly past instruction `η` must have
+executed it: evidence at any trace index suffices. -/
+theorem exists_time_of_progOf_lt {C₀ : Config} {τ' : List Config}
+    (hτ : IsCompleteTraceFrom C₀ τ')
+    {η : ProgPoint} (hk : η.idx < (C₀.progOf η.thread).length)
+    {j : Nat} {Cj : Config} (hj : τ'[j]? = some Cj)
+    (hshort : (Cj.progOf η.thread).length < (C₀.progOf η.thread).length - η.idx) :
+    ∃ n, IsTimeOf C₀ τ' η n :=
+  WeftCommon.exists_time_of_progOf_lt (fun _ _ h t => h.progOf_drop t)
+    (fun _ _ h t => h.progOf_length_le_succ t) hτ hk hj hshort
+
 /-- Every command runs in a successful execution: in a complete trace from `C₀` that
 ends in `done`, every valid program point has a time. -/
 theorem exists_time_of_ends_done {C₀ : Config} {τ' : List Config} {sd : State}

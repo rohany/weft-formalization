@@ -310,6 +310,70 @@ theorem exists_time_of_ends_done (hdrop : StepDropsPrefix R) (hle1 : StepShrinks
       by omega] at heq
   exact ⟨Nat.find hex, hτ, hk, Nat.find hex - 1, C, C', by omega, hC, hCC', hCdrop, hC'drop⟩
 
+/-- Generalization of `exists_time_of_ends_done` with an arbitrary evidence
+index: if at *some* position `j` of the trace, thread `i`'s remaining program
+has already shrunk strictly below `|C₀.progOf i| - η.idx`, then instruction `η`
+has executed (its drop transition lies before `j`). The `ends_done` version is
+the special case `j = τ'.length - 1` with the empty final program. -/
+theorem exists_time_of_progOf_lt (hdrop : StepDropsPrefix R) (hle1 : StepShrinksByOne R)
+    {C₀ : Config State Cmd} {τ' : List (Config State Cmd)}
+    (hτ : IsCompleteTraceFrom R C₀ τ')
+    {η : ProgPoint} (hk : η.idx < (C₀.progOf η.thread).length)
+    {j : Nat} {Cj : Config State Cmd} (hj : τ'[j]? = some Cj)
+    (hshort : (Cj.progOf η.thread).length < (C₀.progOf η.thread).length - η.idx) :
+    ∃ n, IsTimeOf R C₀ τ' η n := by
+  have hchain : List.IsChain R τ' := hτ.1.subtrace
+  set i := η.thread with hidef
+  have h0 : τ'[0]? = some C₀ := by
+    have hgen : ∀ l : List (Config State Cmd), l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen]; exact hτ.2
+  have hsuffix : ∀ {j'} {C : Config State Cmd}, τ'[j']? = some C →
+      C.progOf i <:+ C₀.progOf i :=
+    fun {j' C} hCj => progOf_suffix_index_le hdrop hchain i h0 (Nat.zero_le j') hCj
+  have hQj : ((τ'[j]?).map (fun C => (C.progOf i).length)).getD 0
+      < (C₀.progOf i).length - η.idx := by
+    rw [hj]; exact hshort
+  have hex : ∃ j', ((τ'[j']?).map (fun (C : Config State Cmd) => (C.progOf i).length)).getD 0
+      < (C₀.progOf i).length - η.idx := ⟨j, hQj⟩
+  have hQj0 := Nat.find_spec hex
+  have hj0le : Nat.find hex ≤ j := Nat.find_le hQj
+  have hjlt : j < τ'.length := (List.getElem?_eq_some_iff.mp hj).1
+  have hQ0 : ¬ ((τ'[0]?).map (fun C => (C.progOf i).length)).getD 0
+      < (C₀.progOf i).length - η.idx := by
+    rw [h0]; change ¬ (C₀.progOf i).length < (C₀.progOf i).length - η.idx; omega
+  have hj0pos : 0 < Nat.find hex := by
+    rcases Nat.eq_zero_or_pos (Nat.find hex) with h | h
+    · rw [h] at hQj0; exact absurd hQj0 hQ0
+    · exact h
+  have hminj := Nat.find_min hex (show Nat.find hex - 1 < Nat.find hex by omega)
+  have hj0lt : Nat.find hex < τ'.length := by omega
+  obtain ⟨C, hC⟩ : ∃ C, τ'[Nat.find hex - 1]? = some C :=
+    ⟨_, List.getElem?_eq_getElem (show Nat.find hex - 1 < τ'.length by omega)⟩
+  obtain ⟨C', hC'⟩ : ∃ C', τ'[Nat.find hex]? = some C' :=
+    ⟨_, List.getElem?_eq_getElem hj0lt⟩
+  have hCC' : τ'[Nat.find hex - 1 + 1]? = some C' := by
+    rw [show Nat.find hex - 1 + 1 = Nat.find hex by omega]; exact hC'
+  have hub : (C.progOf i).length ≤ (C'.progOf i).length + 1 :=
+    hle1 (chain_step hchain hC hCC') i
+  have e1 : ((τ'[Nat.find hex - 1]?).map (fun C => (C.progOf i).length)).getD 0
+      = (C.progOf i).length := by rw [hC]; rfl
+  have e2 : ((τ'[Nat.find hex]?).map (fun C => (C.progOf i).length)).getD 0
+      = (C'.progOf i).length := by rw [hC']; rfl
+  rw [e1] at hminj
+  rw [e2] at hQj0
+  have hlenC : (C.progOf i).length = (C₀.progOf i).length - η.idx := by omega
+  have hlenC' : (C'.progOf i).length = (C₀.progOf i).length - η.idx - 1 := by omega
+  have hCdrop : C.progOf i = (C₀.progOf i).drop η.idx := by
+    have heq := List.IsSuffix.eq_drop (hsuffix hC)
+    rw [hlenC] at heq
+    rwa [show (C₀.progOf i).length - ((C₀.progOf i).length - η.idx) = η.idx by omega] at heq
+  have hC'drop : C'.progOf i = (C₀.progOf i).drop (η.idx + 1) := by
+    have heq := List.IsSuffix.eq_drop (hsuffix hC')
+    rw [hlenC'] at heq
+    rwa [show (C₀.progOf i).length - ((C₀.progOf i).length - η.idx - 1) = η.idx + 1
+      by omega] at heq
+  exact ⟨Nat.find hex, hτ, hk, Nat.find hex - 1, C, C', by omega, hC, hCC', hCdrop, hC'drop⟩
+
 end StepDiscipline
 
 end WeftCommon
