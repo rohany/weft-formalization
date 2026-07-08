@@ -2945,4 +2945,58 @@ theorem soundAndPrecise_happensBefore_impl {T : CTA} {τ : List Config}
   intro η₁ η₂ hv₁ hv₂
   exact ⟨happensBefore_sound hτ hws, happensBefore_precise hτ hws hv₁ hv₂⟩
 
+/-! ## Correctness of Algorithm 2 (`CheckWellSynchronized`)
+
+The two directions and their assembly, mirroring the named-barrier development
+(its Theorems 1 and 2):
+
+* **soundness** (§5.2.6) — a successful run of the check witnesses
+  well-synchronization: the checked orderings force every schedule to assign
+  each synchronization command its reference generation;
+* **completeness** (§5.2.7) — a failing run witnesses a violation: a failing
+  registrant or wait check exposes a pair the happens-before relation does not
+  order, and a reversing schedule then changes the generation map. -/
+
+/-- **Soundness of Algorithm 2.** If `τ` is a complete trace from `(I, T)` ending
+in `done` (`τ ≡ (I, T) ⤳* (F, done)`) and `CheckWellSynchronized T τ` returns
+`true`, then `T` is well-synchronized.
+
+Note (rohany): This is a top-level theorem.
+-/
+theorem wellSynchronized_of_check {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hcheck : (CheckWellSynchronized T τ).1 = true) :
+    T.WellSynchronized := by
+  sorry
+
+/-- **Completeness of Algorithm 2.** If `τ` is a complete trace from `(I, T)`
+ending in `done` (`τ ≡ (I, T) ⤳* (F, done)`) and `CheckWellSynchronized T τ`
+returns `false`, then `T` is *not* well-synchronized.
+
+Note (rohany): This is a top-level theorem.
+-/
+theorem not_wellSynchronized_of_check_false {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hcheck : (CheckWellSynchronized T τ).1 = false) :
+    ¬ T.WellSynchronized := by
+  sorry
+
+/-- **Correctness of `CheckWellSynchronized`** (soundness and completeness
+combined). For a CTA `T` with a successful trace `τ`, the checker accepts iff
+`T` is well-synchronized. This aggregates soundness
+(`wellSynchronized_of_check`, the `check = true → WS` direction) and
+completeness (`not_wellSynchronized_of_check_false`, the `check = false → ¬WS`
+direction).
+
+Implementation of the top-level `WeftMBarriers.checkWellSynchronized_correct`
+(in `WeftMBarriers.lean`). -/
+theorem checkWellSynchronized_correct_impl {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ) :
+    (CheckWellSynchronized T τ).1 = true ↔ T.WellSynchronized := by
+  refine ⟨wellSynchronized_of_check hτ, fun hws => ?_⟩
+  by_contra hne
+  rw [Bool.not_eq_true] at hne
+  exact not_wellSynchronized_of_check_false hτ hne hws
+
 end WeftMBarriers
+

@@ -41,6 +41,13 @@ theorem soundAndPrecise_happensBefore {T : CTA} {τ : List Config}
             IsTimeOf (Config.run State.initial T) τ' η₂ n₂ → n₁ ≤ n₂) :=
   soundAndPrecise_happensBefore_impl hτ hws
 
+/-- Correctness of the extended well-synchronized algorithm (Algorithm 2),
+stating that it is sound and precise. -/
+theorem checkWellSynchronized_correct {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ) :
+    (CheckWellSynchronized T τ).1 = true ↔ T.WellSynchronized :=
+  checkWellSynchronized_correct_impl hτ
+
 end WellSynchronizationProperties
 
 end WeftMBarriers
