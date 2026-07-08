@@ -80,7 +80,8 @@ that never executes — mirroring `IsGenOf` exactly.
 
 namespace WeftMBarriers
 
-export WeftCommon (transClosureStep transClosure)
+export WeftCommon (transClosureStep transClosure mem_transClosure_imp_transGen
+  mem_transClosure_of_transGen)
 
 /-- The command at program point `η = ⟨i, k⟩`, read from `T`'s static programs:
 command `k` of thread `i`, or `none` if out of range. Agrees with `η.cmd` at the
@@ -767,6 +768,398 @@ theorem initRelation_src_timed {T : CTA} {τ : List Config}
     rcases hcase2 with ⟨m, hm, -⟩ | ⟨hnone, -⟩
     · exact ⟨m, hm⟩
     · exact absurd hnone (by simp)
+
+/-! ## Completeness extraction
+
+Boolean decodes of the four checker conjuncts: a `false` result exhibits a
+concrete failing witness. These support `not_wellSynchronized_of_check_false`.
+-/
+
+/-! ### Proof-side names for the checker's conjuncts
+
+`CheckWellSynchronized` above is a verbatim transcription of Algorithm 2 — its
+four checks are `let`-bound inside the definition, exactly as presented. The
+definitions below are **proof scaffolding only**: definitionally equal copies
+of those `let`-bindings (the `fst_checkWellSynchronized` bridge is `rfl`),
+giving the extraction lemmas names to decompose a failing check by. They are
+not part of the algorithm. -/
+
+/-- Proof-side name for Step 3 (lines 19–22), the registrant check. Not part of
+the algorithm — see the section doc. -/
+def okRegCheck (T : CTA) (τ : List Config) : Bool :=
+  T.progPoints.all fun c1 =>
+    match registrantGen T τ c1 with
+    | some (b, g) =>
+        T.progPoints.all fun c2 =>
+          if registrantGen T τ c2 = some (b, g + 1) then
+            if 1 ≤ c2.idx then
+              decide (c1 = (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∨
+                (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∈
+                  transClosure (initRelation T τ))
+            else
+              false
+          else true
+    | none => true
+
+/-- Proof-side name for Step 4 (lines 23–30), the wait checks. Not part of the
+algorithm — see the section doc. -/
+def okWaitCheck (T : CTA) (τ : List Config) : Bool :=
+  T.progPoints.all fun w =>
+    match T.cmdAt w, pointGen T τ w with
+    | some (.wait_mb sb _), some g =>
+        (decide (g < 1) ||
+          (decide (1 ≤ w.idx) &&
+            (T.progPoints.all fun c =>
+              if registrantGen T τ c = some (.inr sb, g - 1) then
+                decide (c = (⟨w.thread, w.idx - 1⟩ : ProgPoint) ∨
+                  (c, (⟨w.thread, w.idx - 1⟩ : ProgPoint)) ∈
+                    transClosure (initRelation T τ))
+              else true))) &&
+        (let regNext : List ProgPoint := T.progPoints.filter fun cp =>
+            registrantGen T τ cp = some (.inr sb, g + 1)
+         match T.initCountOf sb with
+         | some n =>
+             if regNext.length = (n : Nat) then
+               regNext.any fun cp => decide ((w, cp) ∈ transClosure (initRelation T τ))
+             else true
+         | none => true)
+    | _, _ => true
+
+/-- Proof-side name for Step 5, the initialization-ordering check. Not part of
+the algorithm — see the section doc. -/
+def okInitCheck (T : CTA) (τ : List Config) : Bool :=
+  T.progPoints.all fun ci =>
+    match T.cmdAt ci with
+    | some (.init_mb sb _) =>
+        T.progPoints.all fun u =>
+          if (T.cmdAt u).bind Cmd.usesMBarrier? = some sb then
+            decide ((ci, u) ∈ transClosure (initRelation T τ))
+          else true
+    | _ => true
+
+/-- Proof-side name for the (temporary) unique-initialization check. Not part
+of the algorithm — see the section doc. -/
+def okUniqueInitCheck (T : CTA) (_τ : List Config) : Bool :=
+  T.progPoints.all fun ci =>
+    match T.cmdAt ci with
+    | some (.init_mb sb _) =>
+        T.progPoints.all fun cj =>
+          match T.cmdAt cj with
+          | some (.init_mb sb' _) => if sb = sb' then decide (ci = cj) else true
+          | _ => true
+    | _ => true
+
+/-- The definitional bridge: the algorithm's verdict is the conjunction of the
+four proof-side checks. Holds by `rfl` — the scaffolding definitions are exact
+copies of the algorithm's `let`-bindings. -/
+theorem fst_checkWellSynchronized (T : CTA) (τ : List Config) :
+    (CheckWellSynchronized T τ).1 = (okRegCheck T τ && okWaitCheck T τ
+      && okInitCheck T τ && okUniqueInitCheck T τ) := rfl
+
+/-- `(CheckWellSynchronized T τ).2` is, by definition, the executable closure. -/
+theorem snd_checkWellSynchronized (T : CTA) (τ : List Config) :
+    (CheckWellSynchronized T τ).2 = transClosure (initRelation T τ) := rfl
+
+/-- **`Finset` non-membership ⇒ no `happensBefore`** (uses Pillar A, the
+`transClosure` converse). If `a ≠ b` and the algorithm's relation does not
+contain `(a, b)`, then `a` does not happen-before `b`. -/
+theorem not_happensBefore_of_not_mem {T : CTA} {τ : List Config} {a b : ProgPoint}
+    (hne : a ≠ b) (hnotmem : (a, b) ∉ (CheckWellSynchronized T τ).2) :
+    ¬ happensBefore T τ a b := by
+  intro hhb
+  apply hnotmem
+  rw [snd_checkWellSynchronized]
+  rcases Relation.reflTransGen_iff_eq_or_transGen.mp hhb with heq | htg
+  · exact absurd heq.symm hne
+  · exact mem_transClosure_of_transGen (initRelation T τ) hne htg
+
+/-- A failing check fails in one of its four conjuncts. -/
+theorem check_false_cases {T : CTA} {τ : List Config}
+    (hcheck : (CheckWellSynchronized T τ).1 = false) :
+    okRegCheck T τ = false ∨ okWaitCheck T τ = false ∨
+      okInitCheck T τ = false ∨ okUniqueInitCheck T τ = false := by
+  have h : (okRegCheck T τ && okWaitCheck T τ && okInitCheck T τ
+      && okUniqueInitCheck T τ) = false := hcheck
+  revert h
+  cases okRegCheck T τ <;> cases okWaitCheck T τ <;> cases okInitCheck T τ <;>
+    cases okUniqueInitCheck T τ <;> simp
+
+/-- **Extract a failing pair from `okRegCheck = false`** (mode 1): a registrant
+`c1 ∈ Reg(b, g)` and a registrant `c2 ∈ Reg(b, g+1)` that either has an
+in-thread predecessor `c3` the relation fails to order after `c1` (with
+`c1 ≠ c3`, delivered by the reflexive disjunct), or is a first instruction. -/
+theorem exists_failing_reg_pair {T : CTA} {τ : List Config}
+    (hcheck : okRegCheck T τ = false) :
+    ∃ c1 ∈ T.progPoints, ∃ b g, registrantGen T τ c1 = some (b, g) ∧
+      ∃ c2 ∈ T.progPoints, registrantGen T τ c2 = some (b, g + 1) ∧
+        ((1 ≤ c2.idx ∧
+            c1 ≠ (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) ∧
+            (c1, (⟨c2.thread, c2.idx - 1⟩ : ProgPoint)) ∉ (CheckWellSynchronized T τ).2) ∨
+          c2.idx = 0) := by
+  rw [snd_checkWellSynchronized]
+  simp only [okRegCheck] at hcheck
+  obtain ⟨c1, hc1, hf1⟩ := List.all_eq_false.mp hcheck
+  refine ⟨c1, hc1, ?_⟩
+  obtain ⟨b, g, hreg1⟩ : ∃ b g, registrantGen T τ c1 = some (b, g) := by
+    cases hr : registrantGen T τ c1 with
+    | none => simp [hr] at hf1
+    | some bg =>
+      obtain ⟨b', g'⟩ := bg
+      exact ⟨b', g', rfl⟩
+  refine ⟨b, g, hreg1, ?_⟩
+  simp only [hreg1, Bool.not_eq_true] at hf1
+  obtain ⟨c2, hc2, hf2⟩ := List.all_eq_false.mp hf1
+  refine ⟨c2, hc2, ?_⟩
+  by_cases hr2 : registrantGen T τ c2 = some (b, g + 1)
+  · rw [if_pos hr2] at hf2
+    refine ⟨hr2, ?_⟩
+    by_cases hidx : 1 ≤ c2.idx
+    · rw [if_pos hidx] at hf2
+      simp only [Bool.not_eq_true, decide_eq_false_iff_not, not_or] at hf2
+      exact Or.inl ⟨hidx, hf2.1, hf2.2⟩
+    · exact Or.inr (by omega)
+  · rw [if_neg hr2] at hf2
+    exact absurd hf2 (by simp)
+
+/-- **Extract a failing wait from `okWaitCheck = false`** (mode 2), as a
+three-way disjunction: a first-instruction wait of positive generation
+(lines 25–26); a lower-bound violation — some `Reg(sb, g−1)` registrant not
+ordered before the wait's predecessor (lines 27–28); or an upper-bound
+violation — the next generation fills but the wait precedes none of its
+registrants (lines 29–30, amended). -/
+theorem exists_failing_wait {T : CTA} {τ : List Config}
+    (hcheck : okWaitCheck T τ = false) :
+    ∃ w ∈ T.progPoints, ∃ sb ph g, T.cmdAt w = some (.wait_mb sb ph) ∧
+      pointGen T τ w = some g ∧
+      ((1 ≤ g ∧ w.idx = 0) ∨
+        (1 ≤ g ∧ 1 ≤ w.idx ∧ ∃ c ∈ T.progPoints,
+          registrantGen T τ c = some (.inr sb, g - 1) ∧
+          c ≠ (⟨w.thread, w.idx - 1⟩ : ProgPoint) ∧
+          (c, (⟨w.thread, w.idx - 1⟩ : ProgPoint)) ∉ (CheckWellSynchronized T τ).2) ∨
+        (∃ n, T.initCountOf sb = some n ∧
+          (T.progPoints.filter fun cp =>
+              registrantGen T τ cp = some (.inr sb, g + 1)).length = (n : Nat) ∧
+          ∀ cp ∈ T.progPoints.filter fun cp =>
+              registrantGen T τ cp = some (.inr sb, g + 1),
+            (w, cp) ∉ (CheckWellSynchronized T τ).2)) := by
+  rw [snd_checkWellSynchronized]
+  simp only [okWaitCheck] at hcheck
+  obtain ⟨w, hw, hfw⟩ := List.all_eq_false.mp hcheck
+  refine ⟨w, hw, ?_⟩
+  -- both scrutinees of the outer match must be `some` (else the entry is `true`)
+  obtain ⟨sb, ph, hcmd⟩ : ∃ sb ph, T.cmdAt w = some (.wait_mb sb ph) := by
+    cases hc : T.cmdAt w with
+    | none => simp [hc] at hfw
+    | some cmd =>
+      cases cmd with
+      | wait_mb sb ph => exact ⟨sb, ph, rfl⟩
+      | read g => simp [hc] at hfw
+      | write g => simp [hc] at hfw
+      | arrive_nb nb n => simp [hc] at hfw
+      | sync_nb nb n => simp [hc] at hfw
+      | init_mb sb n => simp [hc] at hfw
+      | arrive_mb sb => simp [hc] at hfw
+  obtain ⟨g, hgen⟩ : ∃ g, pointGen T τ w = some g := by
+    cases hg : pointGen T τ w with
+    | none => simp [hcmd, hg] at hfw
+    | some g => exact ⟨g, rfl⟩
+  refine ⟨sb, ph, g, hcmd, hgen, ?_⟩
+  simp only [hcmd, hgen, Bool.not_eq_true] at hfw
+  rcases Bool.and_eq_false_iff.mp hfw with hA | hB
+  · -- lower half fails
+    rcases Bool.or_eq_false_iff.mp hA with ⟨hg1, hBC⟩
+    have hg1' : 1 ≤ g := by
+      rw [decide_eq_false_iff_not] at hg1
+      omega
+    cases hidx : decide (1 ≤ w.idx) with
+    | false =>
+      rw [decide_eq_false_iff_not] at hidx
+      exact Or.inl ⟨hg1', by omega⟩
+    | true =>
+      rw [hidx, Bool.true_and] at hBC
+      obtain ⟨c, hcmem, hfc⟩ := List.all_eq_false.mp hBC
+      rw [decide_eq_true_eq] at hidx
+      by_cases hrc : registrantGen T τ c = some (.inr sb, g - 1)
+      · rw [if_pos hrc] at hfc
+        simp only [Bool.not_eq_true, decide_eq_false_iff_not, not_or] at hfc
+        exact Or.inr (Or.inl ⟨hg1', hidx, c, hcmem, hrc, hfc.1, hfc.2⟩)
+      · rw [if_neg hrc] at hfc
+        exact absurd hfc (by simp)
+  · -- upper half fails
+    cases hio : T.initCountOf sb with
+    | none => simp [hio] at hB
+    | some n =>
+      simp only [hio] at hB
+      by_cases hlen : (T.progPoints.filter fun cp =>
+          registrantGen T τ cp = some (.inr sb, g + 1)).length = (n : Nat)
+      · rw [if_pos hlen] at hB
+        refine Or.inr (Or.inr ⟨n, rfl, hlen, ?_⟩)
+        intro cp hcp
+        have := List.any_eq_false.mp hB cp hcp
+        simpa using this
+      · rw [if_neg hlen] at hB
+        exact absurd hB (by simp)
+
+/-- **Extract a failing init/use pair from `okInitCheck = false`** (mode 3). -/
+theorem exists_failing_init_pair {T : CTA} {τ : List Config}
+    (hcheck : okInitCheck T τ = false) :
+    ∃ ci ∈ T.progPoints, ∃ sb n, T.cmdAt ci = some (.init_mb sb n) ∧
+      ∃ u ∈ T.progPoints, (T.cmdAt u).bind Cmd.usesMBarrier? = some sb ∧
+        (ci, u) ∉ (CheckWellSynchronized T τ).2 := by
+  rw [snd_checkWellSynchronized]
+  simp only [okInitCheck] at hcheck
+  obtain ⟨ci, hci, hf1⟩ := List.all_eq_false.mp hcheck
+  refine ⟨ci, hci, ?_⟩
+  obtain ⟨sb, n, hcmd⟩ : ∃ sb n, T.cmdAt ci = some (.init_mb sb n) := by
+    cases hc : T.cmdAt ci with
+    | none => simp [hc] at hf1
+    | some cmd =>
+      cases cmd with
+      | init_mb sb n => exact ⟨sb, n, rfl⟩
+      | read g => simp [hc] at hf1
+      | write g => simp [hc] at hf1
+      | arrive_nb nb n => simp [hc] at hf1
+      | sync_nb nb n => simp [hc] at hf1
+      | arrive_mb sb => simp [hc] at hf1
+      | wait_mb sb ph => simp [hc] at hf1
+  refine ⟨sb, n, hcmd, ?_⟩
+  simp only [hcmd, Bool.not_eq_true] at hf1
+  obtain ⟨u, hu, hf2⟩ := List.all_eq_false.mp hf1
+  by_cases huse : (T.cmdAt u).bind Cmd.usesMBarrier? = some sb
+  · rw [if_pos huse] at hf2
+    simp only [Bool.not_eq_true, decide_eq_false_iff_not] at hf2
+    exact ⟨u, hu, huse, hf2⟩
+  · rw [if_neg huse] at hf2
+    exact absurd hf2 (by simp)
+
+/-- **Extract duplicate initializations from `okUniqueInitCheck = false`**
+(mode 4): two *distinct* `init_mb` program points for the same mbarrier. -/
+theorem exists_failing_dup_init {T : CTA} {τ : List Config}
+    (hcheck : okUniqueInitCheck T τ = false) :
+    ∃ ci ∈ T.progPoints, ∃ sb n, T.cmdAt ci = some (.init_mb sb n) ∧
+      ∃ cj ∈ T.progPoints, ∃ n', T.cmdAt cj = some (.init_mb sb n') ∧ ci ≠ cj := by
+  simp only [okUniqueInitCheck] at hcheck
+  obtain ⟨ci, hci, hf1⟩ := List.all_eq_false.mp hcheck
+  refine ⟨ci, hci, ?_⟩
+  obtain ⟨sb, n, hcmd⟩ : ∃ sb n, T.cmdAt ci = some (.init_mb sb n) := by
+    cases hc : T.cmdAt ci with
+    | none => simp [hc] at hf1
+    | some cmd =>
+      cases cmd with
+      | init_mb sb n => exact ⟨sb, n, rfl⟩
+      | read g => simp [hc] at hf1
+      | write g => simp [hc] at hf1
+      | arrive_nb nb n => simp [hc] at hf1
+      | sync_nb nb n => simp [hc] at hf1
+      | arrive_mb sb => simp [hc] at hf1
+      | wait_mb sb ph => simp [hc] at hf1
+  refine ⟨sb, n, hcmd, ?_⟩
+  simp only [hcmd, Bool.not_eq_true] at hf1
+  obtain ⟨cj, hcj, hf2⟩ := List.all_eq_false.mp hf1
+  obtain ⟨sb', n', hcmd2⟩ : ∃ sb' n', T.cmdAt cj = some (.init_mb sb' n') := by
+    cases hc : T.cmdAt cj with
+    | none => simp [hc] at hf2
+    | some cmd =>
+      cases cmd with
+      | init_mb sb' n' => exact ⟨sb', n', rfl⟩
+      | read g => simp [hc] at hf2
+      | write g => simp [hc] at hf2
+      | arrive_nb nb n => simp [hc] at hf2
+      | sync_nb nb n => simp [hc] at hf2
+      | arrive_mb sb => simp [hc] at hf2
+      | wait_mb sb ph => simp [hc] at hf2
+  simp only [hcmd2] at hf2
+  by_cases hbb : sb = sb'
+  · subst hbb
+    rw [if_pos rfl] at hf2
+    simp only [Bool.not_eq_true, decide_eq_false_iff_not] at hf2
+    exact ⟨cj, hcj, n', hcmd2, hf2⟩
+  · rw [if_neg hbb] at hf2
+    exact absurd hf2 (by simp)
+
+/-- **Only program order enters an `arrive_nb`.** If `c2` is an `arrive_nb` and
+`c1` happens-before `c2`, then either `c1 = c2` or `c1` already happens-before
+`c2`'s in-thread predecessor — every barrier edge of `initRelation` targets a
+`sync_nb` or a `wait_mb`. -/
+theorem happensBefore_arrive_nb {T : CTA} {τ : List Config} {c1 c2 : ProgPoint}
+    {nb : NamedBarrier} {m : ℕ+} (hc2 : T.cmdAt c2 = some (.arrive_nb nb m))
+    (hidx : 1 ≤ c2.idx) (h : happensBefore T τ c1 c2) :
+    c1 = c2 ∨ happensBefore T τ c1 ⟨c2.thread, c2.idx - 1⟩ := by
+  rw [happensBefore] at h
+  rcases Relation.ReflTransGen.cases_tail h with heq | ⟨d, hd, hdc2⟩
+  · exact Or.inl heq.symm
+  · refine Or.inr ?_
+    obtain ⟨_, _, hcase⟩ := initRelation_cases hdc2
+    rcases hcase with hpo | ⟨nb', n, hsync, _, _⟩ | ⟨sb, ph, hwait, _, _⟩
+    · have hdeq : (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) = d := by
+        have h1 : c2.thread = d.thread := by rw [hpo]
+        have h2 : c2.idx = d.idx + 1 := by rw [hpo]
+        obtain ⟨dt, di⟩ := d
+        simp only [ProgPoint.mk.injEq] at h1 h2 ⊢
+        exact ⟨h1, by omega⟩
+      rw [hdeq]
+      exact hd
+    · rw [hc2] at hsync
+      exact absurd hsync (by simp)
+    · rw [hc2] at hwait
+      exact absurd hwait (by simp)
+
+/-- **Only program order enters an `arrive_mb`** — the mbarrier sibling of
+`happensBefore_arrive_nb`. -/
+theorem happensBefore_arrive_mb {T : CTA} {τ : List Config} {c1 c2 : ProgPoint}
+    {sb : SharedBarrier} (hc2 : T.cmdAt c2 = some (.arrive_mb sb))
+    (hidx : 1 ≤ c2.idx) (h : happensBefore T τ c1 c2) :
+    c1 = c2 ∨ happensBefore T τ c1 ⟨c2.thread, c2.idx - 1⟩ := by
+  rw [happensBefore] at h
+  rcases Relation.ReflTransGen.cases_tail h with heq | ⟨d, hd, hdc2⟩
+  · exact Or.inl heq.symm
+  · refine Or.inr ?_
+    obtain ⟨_, _, hcase⟩ := initRelation_cases hdc2
+    rcases hcase with hpo | ⟨nb', n, hsync, _, _⟩ | ⟨sb', ph, hwait, _, _⟩
+    · have hdeq : (⟨c2.thread, c2.idx - 1⟩ : ProgPoint) = d := by
+        have h1 : c2.thread = d.thread := by rw [hpo]
+        have h2 : c2.idx = d.idx + 1 := by rw [hpo]
+        obtain ⟨dt, di⟩ := d
+        simp only [ProgPoint.mk.injEq] at h1 h2 ⊢
+        exact ⟨h1, by omega⟩
+      rw [hdeq]
+      exact hd
+    · rw [hc2] at hsync
+      exact absurd hsync (by simp)
+    · rw [hc2] at hwait
+      exact absurd hwait (by simp)
+
+/-- A configured-and-full named barrier is incompatible with the `interleave`
+guard `hbar` (every named barrier unconfigured or strictly under-full). -/
+theorem interleaveGuard_full_absurd {S : State} {nb : NamedBarrier} {I : List ThreadId}
+    {A : ℕ} {n : ℕ+} (hb : S.BN nb = ⟨I, A, some n⟩) (hfull : I.length + A = (n : Nat))
+    (hbar : ∀ nb', S.BN nb' = NamedBarrierState.unconfigured ∨
+        ∃ I' A' n', S.BN nb' = ⟨I', A', some n'⟩ ∧ I'.length + A' < (n' : Nat)) :
+    False := by
+  rcases hbar nb with h | ⟨I', A', n', hb', hlt⟩
+  · rw [hb] at h
+    simp [NamedBarrierState.unconfigured] at h
+  · rw [hb] at hb'
+    simp only [NamedBarrierState.mk.injEq, Option.some.injEq] at hb'
+    obtain ⟨rfl, rfl, rfl⟩ := hb'
+    omega
+
+/-- An initialized-and-full mbarrier is incompatible with the `interleave`
+guard `hmbar` (every mbarrier uninitialized or strictly under-full in
+arrivals). -/
+theorem interleaveGuard_mbfull_absurd {S : State} {sb : SharedBarrier}
+    {I : List ThreadId} {A : ℕ} {n : ℕ+} {ph : Phase}
+    (hb : S.BM sb = ⟨I, A, some n, ph⟩) (hfull : A = (n : Nat))
+    (hmbar : ∀ sb', S.BM sb' = MBarrierState.uninitialized ∨
+        ∃ I' A' n' ph', S.BM sb' = ⟨I', A', some n', ph'⟩ ∧ A' < (n' : Nat)) :
+    False := by
+  rcases hmbar sb with h | ⟨I', A', n', ph', hb', hlt⟩
+  · rw [hb] at h
+    simp [MBarrierState.uninitialized] at h
+  · rw [hb] at hb'
+    simp only [MBarrierState.mk.injEq, Option.some.injEq] at hb'
+    obtain ⟨rfl, rfl, rfl, rfl⟩ := hb'
+    omega
 
 /-! ## The reversing-schedule construction (preciseness support)
 
