@@ -1,13 +1,7 @@
 # Weft
 
-## GitHub configuration
+A mechanization of the Weft paper, which contains proofs for the core results of the paper.
 
-To set up your new GitHub repository, follow these steps:
-
-* Under your repository name, click **Settings**.
-* In the **Actions** section of the sidebar, click "General".
-* Check the box **Allow GitHub Actions to create and approve pull requests**.
-* Click the **Pages** section of the settings sidebar.
-* In the **Source** dropdown menu, select "GitHub Actions".
-
-After following the steps above, you can remove this section from the README file.
+It additionally contains formalism and proofs about research extensions to Weft:
+* Supporting MBarrier-based synchronization mechanisms
+* Extending the core Weft algorithm to prove race-freedom of programs with loops
