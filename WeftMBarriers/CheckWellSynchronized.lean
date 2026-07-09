@@ -5318,14 +5318,12 @@ the reference trace, then `b` recycled at least `g + 1` times before it, and the
 recycle closing round `g` consumed at least one registration — an op of
 generation `g`. Supplies the checker pair's source `c1` in the "early"
 contradiction. -/
-theorem genFiber_nonempty_of_succ {T : CTA} {τ : List Config}
+theorem genFiber_nonempty_of_recycles {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
-    {b : NamedBarrier ⊕ SharedBarrier} {g : ℕ} {η : ProgPoint}
-    (hη : η ∈ genFiber T τ b ((g + 1 : ℕ) : ℤ)) :
+    {b : NamedBarrier ⊕ SharedBarrier} {g : ℕ}
+    (hrec : g + 1 ≤ recycleCount b τ (τ.length - 1)) :
     ∃ η', η' ∈ genFiber T τ b (g : ℤ) := by
-  obtain ⟨c, m, hcm, hreg, hbar, hm, hptm, hm1, hmlt, hgm⟩ := genFiber_time_data hτ hη
-  obtain ⟨p, hpm, hrc1, hrc2⟩ := recycleCount_hits b τ (show 1 ≤ g + 1 by omega)
-    (show g + 1 ≤ recycleCount b τ (m - 1) by omega)
+  obtain ⟨p, hpm, hrc1, hrc2⟩ := recycleCount_hits b τ (show 1 ≤ g + 1 by omega) hrec
   simp only [Nat.add_sub_cancel] at hrc1
   obtain ⟨C, C', hC, hC', hrecb⟩ := recycle_step_of_count_lt (b := b) (τ := τ)
     (p := p) (by omega)
@@ -5395,6 +5393,18 @@ theorem genFiber_nonempty_of_succ {T : CTA} {τ : List Config}
     have := n.pos
     change 0 < A
     omega
+
+/-- **Lower fibers are inhabited**, membership form: a fiber-`(g+1)` member
+puts `g + 1` recycles before its time. -/
+theorem genFiber_nonempty_of_succ {T : CTA} {τ : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    {b : NamedBarrier ⊕ SharedBarrier} {g : ℕ} {η : ProgPoint}
+    (hη : η ∈ genFiber T τ b ((g + 1 : ℕ) : ℤ)) :
+    ∃ η', η' ∈ genFiber T τ b (g : ℤ) := by
+  obtain ⟨c, m, hcm, hreg, hbar, hm, hptm, hm1, hmlt, hgm⟩ := genFiber_time_data hτ hη
+  refine genFiber_nonempty_of_recycles hτ ?_
+  have := recycleCount_mono b τ (show m - 1 ≤ τ.length - 1 by omega)
+  omega
 
 /-- Arrive-command classifier (top-level, so its `match` auxiliary is shared
 between the census lemma and its consumers). Covers both kinds
@@ -6567,6 +6577,14 @@ structure Conforms (T : CTA) (τ τ' : List Config) : Prop where
   rounds_complete : ∀ (b : NamedBarrier ⊕ SharedBarrier) (g : ℕ),
     g + 1 ≤ recycleCount b τ' (τ'.length - 1) →
     ∀ η ∈ genFiber T τ b (g : ℤ), ∃ m, pointTime T τ' η = some m
+  /-- Clause 5: **closed mbarrier rounds were full** — once `sb` has recycled
+  `g + 1` times in `τ'`, the round-`g` fiber holds exactly the barrier's
+  initialized capacity. Established at each `mb_recycle` by the clause-2m
+  census; consumed by the wait-targeting lemmas' fill conditions. -/
+  rounds_full : ∀ (sb : SharedBarrier) (g : ℕ),
+    g + 1 ≤ recycleCount (.inr sb) τ' (τ'.length - 1) →
+    ∀ n : ℕ+, T.initCountOf sb = some n →
+    (genFiber T τ (.inr sb) (g : ℤ)).length = (n : ℕ)
 
 /-- **The closure lift** (clause 3 for `happensBefore` paths): walking an
 `R`-path backward from an executed endpoint pulls every node on it — in
@@ -6589,7 +6607,7 @@ theorem conforms_init (T : CTA) (τ : List Config) :
     Conforms T τ [Config.run State.initial T] := by
   have hpt : ∀ η, pointTime T [Config.run State.initial T] η = none := by
     intro η; simp [pointTime]
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · -- clause 0: the singleton's last configuration is `run`, not `err`
     intro T'' h
     simp only [List.getLast?_singleton, Option.some.injEq] at h
@@ -6637,6 +6655,13 @@ theorem conforms_init (T : CTA) (τ : List Config) :
     intro b g hgle η hη
     exfalso
     have h0 : recycleCount b [Config.run State.initial T]
+        ([Config.run State.initial T].length - 1) = 0 := by
+      unfold recycleCount; simp
+    omega
+  · -- clause 5: vacuous — nothing has recycled yet
+    intro sb g hgle n hinit
+    exfalso
+    have h0 : recycleCount (.inr sb) [Config.run State.initial T]
         ([Config.run State.initial T].length - 1) = 0 := by
       unfold recycleCount; simp
     omega
@@ -7134,22 +7159,258 @@ theorem conforms_full_fiber_mb {T : CTA} {τ τ' : List Config}
         ((recycleCount (.inr sb) τ (τ.length - 1) : ℕ) : ℤ))
     omega
 
-/-- **The wait-targeting lemma, block flavor** — the `k = g` core for waits: in
-a conforming trace under the guards, a thread whose control sits at
-`wait_mb sb ph` with the barrier's phase *matching* `ph` (about to block, or
-parked) is facing exactly its reference generation: `pointGen T τ η` is the
-open round `r`. Both directions refute via the wait checker: `k < g` through
-the lower bound's `Reg(sb, g−1) ⤳ pred(η)` edges, `k > g` through the upper
-bound's `η ⤳ c⁺ ∈ Reg(sb, g+1)` edge (fill case) or the arrive census (the
-under-filled round `g+1` never closes, so `k ≥ g + 2` is impossible outright).
-TODO(mbarrier soundness, S-D): discharge. -/
+/-- A wait's `some`-generation pins the phase parity: for `η = wait_mb sb ph`
+with `pointGen T τ η = some g` and `0 ≤ g`, the phase after `g` recycles is
+`ph` (a matching wait observed `g` directly; a mismatched one observed `g + 1`
+with the opposite parity). -/
+theorem wait_gen_phase {T : CTA} {τ : List Config} {η : ProgPoint}
+    {sb : SharedBarrier} {ph : Phase}
+    (hcm : T.cmdAt η = some (.wait_mb sb ph)) {g : ℤ}
+    (hpg : pointGen T τ η = some g) (hg0 : 0 ≤ g) :
+    phaseAfter g.toNat = ph := by
+  unfold pointGen at hpg
+  simp only [hcm, Cmd.barrier?] at hpg
+  cases hpt : pointTime T τ η with
+  | none =>
+    rw [hpt] at hpg
+    exact absurd hpg (by simp)
+  | some m =>
+    rw [hpt] at hpg
+    simp only [Option.some.injEq] at hpg
+    set r := recycleCount (.inr sb) τ (m - 1) with hr
+    by_cases hph : phaseAfter r = ph
+    · have hgr : g = (r : ℤ) := by
+        rw [← hpg]
+        simp [Cmd.genValue, hph]
+      have htn : g.toNat = r := by omega
+      rw [htn]
+      exact hph
+    · have hgr : g = (r : ℤ) - 1 := by
+        rw [← hpg]
+        simp [Cmd.genValue, hph]
+      have hr1 : 1 ≤ r := by omega
+      have htn : g.toNat = r - 1 := by omega
+      rw [htn]
+      have hsucc := phaseAfter_succ (r - 1)
+      rw [show r - 1 + 1 = r by omega] at hsucc
+      rw [hsucc] at hph
+      cases h1 : phaseAfter (r - 1) <;> cases h2 : ph <;> simp_all
+
+/-- **The wait-targeting lemma** — the `k = g` core for waits, unified: in a
+conforming trace under the guards, a thread whose control sits at
+`wait_mb sb ph` on an initialized barrier carries the reference generation it
+would observe *right now* (`genValue` at the current open round `r`).
+
+* `r < g` ("early") refutes via the wait check's **lower bound**: every
+  `Reg(sb, g−1)` registrant reaches `pred(η)`, hence executed at τ'-depth
+  `g − 1`, pinning `r = g − 1`; the census then holds the *entire* (full,
+  capacity-`n`) fiber — contradicting the under-full guard.
+* `g + 2 ≤ r` ("late") refutes via the **upper bound**: round `g + 1` closed
+  in `τ'`, so its fiber is full (clause 5) — the fill condition holds — and
+  the upper edge `η ⤳ c⁺ ∈ Reg(sb, g+1)` plus clause 4 force `η` itself to
+  have executed, though its pointer still sits at it.
+* the leftover `g ∈ {r−1, r}` resolves by **phase parity**: a wait's
+  generation determines `phaseAfter` at it, matching `genValue`'s case split
+  at `r`. -/
+theorem conforms_wait_gen {T : CTA} {τ τ' : List Config}
+    (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
+    (hcheck : (CheckWellSynchronized T τ).1 = true)
+    (htr : IsTraceFrom (Config.run State.initial T) τ')
+    (hconf : Conforms T τ τ')
+    {s : State} {Tc : CTA} (hlast : τ'.getLast? = some (Config.run s Tc))
+    (hmguard : ∀ sb', s.BM sb' = MBarrierState.uninitialized ∨
+      ∃ I A n ph, s.BM sb' = ⟨I, A, some n, ph⟩ ∧ A < (n : Nat))
+    {η : ProgPoint} (hmem : η ∈ T.progPoints) {sb : SharedBarrier} {ph : Phase}
+    (hcm : T.cmdAt η = some (.wait_mb sb ph))
+    (hat : pointerAt T η (Config.run s Tc))
+    {I : List ThreadId} {A : Nat} {n : ℕ+} {phb : Phase}
+    (hb : s.BM sb = ⟨I, A, some n, phb⟩) :
+    pointGen T τ η = some ((Cmd.wait_mb sb ph).genValue
+      (recycleCount (.inr sb) τ' (τ'.length - 1))) := by
+  obtain ⟨hokReg, hokWait, hokInit, hokU⟩ := check_true_parts hcheck
+  obtain ⟨sd, hdone⟩ := hτ.2
+  have hidxL : η.idx < (T.prog η.thread).length := ((mem_progPoints_iff T η).mp hmem).2
+  obtain ⟨mτ, hmτ⟩ := exists_time_of_ends_done hτ.1 hdone hidxL
+  have hgτ := pointGen_eq_of_time hcm rfl hmτ
+  set g : ℤ := (Cmd.wait_mb sb ph).genValue (recycleCount (.inr sb) τ (mτ - 1))
+    with hgdef
+  set r : ℕ := recycleCount (.inr sb) τ' (τ'.length - 1) with hrdef
+  have hmτlt : mτ < τ.length := by
+    obtain ⟨-, -, j₀, -, C₂, hj₀, -, hC₂, -, -⟩ := hmτ
+    have := (List.getElem?_eq_some_iff.mp hC₂).1
+    omega
+  have hmτ1 : 1 ≤ mτ := by
+    obtain ⟨-, -, j₀, -, -, hj₀, -, -, -, -⟩ := hmτ
+    omega
+  have hchain' := htr.1
+  have h0' : τ'.head? = some (Config.run State.initial T) := htr.2
+  have h0idx' : τ'[0]? = some (Config.run State.initial T) := by
+    have hgen0 : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen0]; exact h0'
+  have hlastidx : τ'[τ'.length - 1]? = some (Config.run s Tc) := by
+    rw [← List.getLast?_eq_getElem?]; exact hlast
+  have hat' : (Tc.prog η.thread).length = (T.prog η.thread).length - η.idx := hat
+  have hgle : g ≤ (recycleCount (.inr sb) τ (mτ - 1) : ℤ) :=
+    le_of_genValue hgdef.symm
+  have hgm1 : -1 ≤ g := by
+    rw [hgdef]
+    simp only [Cmd.genValue]
+    split <;> omega
+  -- the under-full guard at `sb`
+  have hAn : A < (n : ℕ) := by
+    rcases hmguard sb with hu | ⟨I2, A2, n2, ph2, hcfg, hlt⟩
+    · rw [hb] at hu
+      exact absurd hu (by simp [MBarrierState.uninitialized])
+    · rw [hb] at hcfg
+      simp only [MBarrierState.mk.injEq, Option.some.injEq] at hcfg
+      obtain ⟨-, rfl, rfl, -⟩ := hcfg
+      exact hlt
+  -- the invariant's mbarrier clause and the capacity witness
+  obtain ⟨hcount, harr, hwait, -⟩ := hconf.mstate _ hlast s rfl sb
+  have hinitc : T.initCountOf sb = some n := hcount n (by rw [hb])
+  obtain ⟨mI, CI, stI, hCI, hstI, hcntI⟩ :=
+    exists_count_state_of_initCountOf hτ hinitc
+  -- EARLY: `r < g` is impossible
+  have hearly : ¬ ((r : ℤ) < g) := by
+    intro hlt
+    have hg1' : (1 : ℤ) ≤ g := by omega
+    set gN := g.toNat with hgN
+    have hgNg : (gN : ℤ) = g := Int.toNat_of_nonneg (by omega)
+    have hgN1 : 1 ≤ gN := by omega
+    obtain ⟨hidx1, hlow⟩ := wait_lower_of_check hokWait hmem hcm hgτ hg1'
+    obtain ⟨m3, hptc3⟩ : ∃ m3, pointTime T τ' ⟨η.thread, η.idx - 1⟩ = some m3 := by
+      refine exists_pointTime_of_passed hchain' h0' hlast (by omega) ?_
+      change (Tc.prog η.thread).length + (η.idx - 1 + 1) ≤ (T.prog η.thread).length
+      omega
+    have hτcomplete : (gN - 1) + 1 ≤ recycleCount (.inr sb) τ (τ.length - 1) := by
+      have := recycleCount_mono (.inr sb) τ (show mτ - 1 ≤ τ.length - 1 by omega)
+      omega
+    obtain ⟨c0, hc0⟩ := genFiber_nonempty_of_recycles hτ hτcomplete
+    have hall : ∀ c1 ∈ genFiber T τ (.inr sb) ((gN - 1 : ℕ) : ℤ), ∃ m1, m1 ≤ m3 ∧
+        pointTime T τ' c1 = some m1 ∧
+        recycleCount (.inr sb) τ' (m1 - 1) = gN - 1 := by
+      intro c1 hc1
+      obtain ⟨hc1mem, hc1reg⟩ := mem_genFiber.mp hc1
+      have hc1reg' : registrantGen T τ c1 = some (.inr sb, g - 1) := by
+        rw [show g - 1 = ((gN - 1 : ℕ) : ℤ) by omega]
+        exact hc1reg
+      have hpath := hlow c1 hc1mem hc1reg'
+      obtain ⟨m1, hm1le, hm1⟩ := hconf.happensBefore_sound hpath m3 hptc3
+      refine ⟨m1, hm1le, hm1, ?_⟩
+      have hgen1 : pointGen T τ' c1 = pointGen T τ c1 := hconf.gen_eq c1 hc1mem m1 hm1
+      obtain ⟨c1c, hc1cm, hc1isreg, hc1bar, hc1pg⟩ := registrantGen_some hc1reg
+      have hunf := pointGen_eq_of_pointTime hc1cm hc1bar hm1
+      rw [genValue_of_isRegistrant hc1isreg] at hunf
+      rw [hunf, hc1pg] at hgen1
+      have := Option.some.inj hgen1
+      omega
+    have hrg : r = gN - 1 := by
+      obtain ⟨m1, -, hm1, hrc1⟩ := hall c0 hc0
+      have hm1lt : m1 < τ'.length := (pointTime_spec hchain' h0' hm1).2.1
+      have hmono := recycleCount_mono (.inr sb) τ'
+        (show m1 - 1 ≤ τ'.length - 1 by omega)
+      omega
+    have hfilter : (genFiber T τ (.inr sb) ((gN - 1 : ℕ) : ℤ)).filter (fun η' =>
+        isArriveCmd T η' && (pointTime T τ' η').isSome) =
+        genFiber T τ (.inr sb) ((gN - 1 : ℕ) : ℤ) := by
+      rw [List.filter_eq_self]
+      intro c1 hc1
+      obtain ⟨m1, -, hm1, -⟩ := hall c1 hc1
+      have hcmx := genFiber_mb_arrive hc1
+      simp [isArriveCmd, hcmx, Cmd.isArrive, hm1]
+    have hlen := genFiber_length_mb hτ hτcomplete hCI hstI hcntI
+    have harrA : A = ((genFiber T τ (.inr sb) ((r : ℕ) : ℤ)).filter
+        fun η' => isArriveCmd T η' && (pointTime T τ' η').isSome).length := by
+      rw [hb] at harr
+      exact harr
+    rw [hrg] at harrA
+    rw [hfilter, hlen] at harrA
+    omega
+  -- LATE: `g + 2 ≤ r` is impossible
+  have hlate : ¬ (g + 2 ≤ (r : ℤ)) := by
+    intro hle
+    set g1 := (g + 1).toNat with hg1N
+    have hg1g : (g1 : ℤ) = g + 1 := Int.toNat_of_nonneg (by omega)
+    have hfull := hconf.rounds_full sb g1 (by omega) n hinitc
+    have hfill : (T.progPoints.filter fun cp =>
+        registrantGen T τ cp = some (.inr sb, g + 1)).length = (n : ℕ) := by
+      have h := hfull
+      rw [show ((g1 : ℕ) : ℤ) = g + 1 from hg1g] at h
+      exact h
+    obtain ⟨cp, hcpmem, hcphb⟩ := wait_upper_of_check hokWait hmem hcm hgτ hinitc hfill
+    have hcpF : cp ∈ genFiber T τ (.inr sb) ((g1 : ℕ) : ℤ) := by
+      rw [mem_genFiber]
+      have h := List.mem_filter.mp hcpmem
+      refine ⟨h.1, ?_⟩
+      have h2 := of_decide_eq_true h.2
+      rw [hg1g]
+      exact h2
+    obtain ⟨mc, hmc⟩ := hconf.rounds_complete (.inr sb) g1 (by omega) cp hcpF
+    obtain ⟨mη, -, hmη⟩ := hconf.happensBefore_sound hcphb mc hmc
+    have hnone := pointTime_none_of_pointerAt hchain' h0' hlast hat
+    rw [hnone] at hmη
+    exact absurd hmη (by simp)
+  -- endgame: `g ∈ {r − 1, r}`; parity picks `genValue r`
+  have hgr : g = (r : ℤ) ∨ g = (r : ℤ) - 1 := by omega
+  rcases hgr with hgr | hgr
+  · have hg0 : (0 : ℤ) ≤ g := by omega
+    have hph := wait_gen_phase hcm hgτ hg0
+    have htn : g.toNat = r := by omega
+    rw [htn] at hph
+    rw [hgτ]
+    congr 1
+    simp only [Cmd.genValue, if_pos hph]
+    omega
+  · by_cases hg0 : (0 : ℤ) ≤ g
+    · have hph := wait_gen_phase hcm hgτ hg0
+      have hr1 : 1 ≤ r := by omega
+      have htn : g.toNat = r - 1 := by omega
+      rw [htn] at hph
+      have hsucc := phaseAfter_succ (r - 1)
+      rw [show r - 1 + 1 = r by omega] at hsucc
+      have hphr : ¬ (phaseAfter r = ph) := by
+        rw [hsucc, ← hph]
+        cases phaseAfter (r - 1) <;> simp
+      rw [hgτ]
+      congr 1
+      simp only [Cmd.genValue, if_neg hphr]
+      omega
+    · -- `g = −1`: the wait mismatched at recycle count `0` in `τ`, so `ph = true`
+      have hgm1' : g = -1 := by omega
+      have hr0 : r = 0 := by omega
+      have hpht : ph = true := by
+        have hgv := hgdef
+        by_cases hphm : phaseAfter (recycleCount (.inr sb) τ (mτ - 1)) = ph
+        · exfalso
+          rw [hgm1'] at hgv
+          simp only [Cmd.genValue, if_pos hphm] at hgv
+          omega
+        · rw [hgm1'] at hgv
+          simp only [Cmd.genValue, if_neg hphm] at hgv
+          have hrτ0 : recycleCount (.inr sb) τ (mτ - 1) = 0 := by omega
+          rw [hrτ0] at hphm
+          cases hphc : ph
+          · exfalso
+            apply hphm
+            rw [hphc]
+            rfl
+          · rfl
+      rw [hgτ]
+      congr 1
+      rw [hr0, hpht]
+      simp only [Cmd.genValue]
+      rw [if_neg (by simp [phaseAfter])]
+      omega
+
+/-- **The wait-targeting lemma, block flavor**: the barrier's phase matches
+`ph`, so the wait observes the open round `r` itself. -/
 theorem conforms_wait_gen_block {T : CTA} {τ τ' : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hcheck : (CheckWellSynchronized T τ).1 = true)
     (htr : IsTraceFrom (Config.run State.initial T) τ')
     (hconf : Conforms T τ τ')
     {s : State} {Tc : CTA} (hlast : τ'.getLast? = some (Config.run s Tc))
-    (hguard : ∀ nb', s.BN nb' = NamedBarrierState.unconfigured ∨
+    (_hguard : ∀ nb', s.BN nb' = NamedBarrierState.unconfigured ∨
       ∃ I A n, s.BN nb' = ⟨I, A, some n⟩ ∧ I.length + A < (n : Nat))
     (hmguard : ∀ sb', s.BM sb' = MBarrierState.uninitialized ∨
       ∃ I A n ph, s.BM sb' = ⟨I, A, some n, ph⟩ ∧ A < (n : Nat))
@@ -7160,20 +7421,29 @@ theorem conforms_wait_gen_block {T : CTA} {τ τ' : List Config}
     (hb : s.BM sb = ⟨I, A, some n, ph⟩) :
     pointGen T τ η =
       some ((recycleCount (.inr sb) τ' (τ'.length - 1) : ℕ) : ℤ) := by
-  sorry
+  have hcore := conforms_wait_gen hτ hcheck htr hconf hlast hmguard hmem hcm hat hb
+  have h0idx' : τ'[0]? = some (Config.run State.initial T) := by
+    have hgen0 : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen0]; exact htr.2
+  have hlastidx : τ'[τ'.length - 1]? = some (Config.run s Tc) := by
+    rw [← List.getLast?_eq_getElem?]; exact hlast
+  have hphm : phaseAfter (recycleCount (.inr sb) τ' (τ'.length - 1)) = ph := by
+    have hph := phase_eq_phaseAfter htr.1 h0idx' sb (τ'.length - 1) _ s hlastidx rfl
+    rw [hb] at hph
+    exact hph.symm
+  rw [hcore]
+  congr 1
+  simp [Cmd.genValue, hphm]
 
-/-- **The wait-targeting lemma, pass flavor**: with the barrier's phase
-*mismatching* `ph` (the wait's round has already completed — it passes,
-observing generation `r − 1`), the wait's reference generation is `r − 1`.
-`k < g` and `k > g` refute through the same lower/upper-bound engines, shifted
-by one. TODO(mbarrier soundness, S-D): discharge. -/
+/-- **The wait-targeting lemma, pass flavor**: the barrier's phase mismatches
+`ph` — the wait's round already completed — so it observes `r − 1`. -/
 theorem conforms_wait_gen_pass {T : CTA} {τ τ' : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hcheck : (CheckWellSynchronized T τ).1 = true)
     (htr : IsTraceFrom (Config.run State.initial T) τ')
     (hconf : Conforms T τ τ')
     {s : State} {Tc : CTA} (hlast : τ'.getLast? = some (Config.run s Tc))
-    (hguard : ∀ nb', s.BN nb' = NamedBarrierState.unconfigured ∨
+    (_hguard : ∀ nb', s.BN nb' = NamedBarrierState.unconfigured ∨
       ∃ I A n, s.BN nb' = ⟨I, A, some n⟩ ∧ I.length + A < (n : Nat))
     (hmguard : ∀ sb', s.BM sb' = MBarrierState.uninitialized ∨
       ∃ I A n ph, s.BM sb' = ⟨I, A, some n, ph⟩ ∧ A < (n : Nat))
@@ -7184,7 +7454,22 @@ theorem conforms_wait_gen_pass {T : CTA} {τ τ' : List Config}
     (hb : s.BM sb = ⟨I, A, some n, ph'⟩) (hne : ph ≠ ph') :
     pointGen T τ η =
       some (((recycleCount (.inr sb) τ' (τ'.length - 1) : ℕ) : ℤ) - 1) := by
-  sorry
+  have hcore := conforms_wait_gen hτ hcheck htr hconf hlast hmguard hmem hcm hat hb
+  have h0idx' : τ'[0]? = some (Config.run State.initial T) := by
+    have hgen0 : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen0]; exact htr.2
+  have hlastidx : τ'[τ'.length - 1]? = some (Config.run s Tc) := by
+    rw [← List.getLast?_eq_getElem?]; exact hlast
+  have hph'' : ph' = phaseAfter (recycleCount (.inr sb) τ' (τ'.length - 1)) := by
+    have hph := phase_eq_phaseAfter htr.1 h0idx' sb (τ'.length - 1) _ s hlastidx rfl
+    rw [hb] at hph
+    exact hph
+  have hphm : ¬ (phaseAfter (recycleCount (.inr sb) τ' (τ'.length - 1)) = ph) := by
+    intro hcon
+    exact hne (hph'' ▸ hcon).symm
+  rw [hcore]
+  congr 1
+  simp [Cmd.genValue, hphm]
 
 /-- **Theorem 6, induction step** (paper §5.2.6): extending a conforming trace
 by one CTA step preserves conformance. Case analysis on `hstep`:
@@ -7567,7 +7852,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
     | @read_noop _ _ g₀ _ =>
       have hte : s.E t = true := ht_enabled_of_head _ _ hPt
         (by intro bx nx h; cases h) (by intro sx px h; cases h)
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -7654,10 +7939,13 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
     | @write_noop _ _ g₀ _ =>
       have hte : s.E t = true := ht_enabled_of_head _ _ hPt
         (by intro bx nx h; cases h) (by intro sx px h; cases h)
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -7744,6 +8032,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
     | @arrive_configure _ _ ba na _ he hbcfg =>
       set Cn := Config.run
         ({ s with BN := Function.update s.BN ba ⟨[], 1, some na⟩ })
@@ -7789,7 +8080,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         rw [hset]
         have hcclen : (Tc.prog t).length = P'.length + 1 := by rw [hPt]; simp
         omega
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -8001,6 +8292,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
     | @arrive_register _ _ ba na _ I A he hbcfg hpos hlt =>
       set Cn := Config.run
         ({ s with BN := Function.update s.BN ba ⟨I, A + 1, some na⟩ })
@@ -8045,7 +8339,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         rw [hset]
         have hcclen : (Tc.prog t).length = P'.length + 1 := by rw [hPt]; simp
         omega
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -8270,6 +8564,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
     | @sync_configure _ _ ba na cc he hbcfg =>
       set Cn := Config.run
         ({ s with E := Function.update s.E t false,
@@ -8333,7 +8630,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       have hEeq : ∀ i, i ≠ t →
           (Function.update s.E t false) i = s.E i := fun i hi =>
         Function.update_of_ne hi _ _
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -8530,6 +8827,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
     | @sync_block _ _ ba na cc I A he hbcfg hpos hlt =>
       set Cn := Config.run
         ({ s with E := Function.update s.E t false,
@@ -8598,7 +8898,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         have hef := hwf.2.2.2.2.2.2.1 (Sum.inl ba) t hib
         rw [he] at hef
         exact absurd hef (by simp)
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -8804,6 +9104,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
     | @mb_init _ _ ba na _ he hbcfg =>
       set Cn := Config.run
         ({ s with BM := Function.update s.BM ba ⟨[], 0, some na, false⟩ })
@@ -8842,7 +9145,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       -- `ba` is uninitialized here, so no recycle of it ever happened in `τ'`
       have hrc0 : recycleCount (.inr ba) τ' (τ'.length - 1) = 0 :=
         recycleCount_zero_of_count_none hchain hlastidx rfl (by rw [hbcfg]; rfl)
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -9034,6 +9337,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
     | @mb_arrive _ _ ba _ I A na ph he hbcfg =>
       set Cn := Config.run
         ({ s with BM := Function.update s.BM ba ⟨I, A + 1, some na, ph⟩ })
@@ -9078,7 +9384,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         rw [hset]
         have hcclen : (Tc.prog t).length = P'.length + 1 := by rw [hPt]; simp
         omega
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -9284,6 +9590,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
     | @mb_wait_block _ _ ba ph cc I A na he hbcfg =>
       set Cn := Config.run
         ({ s with E := Function.update s.E t false,
@@ -9343,7 +9652,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         have hef := hwf.2.2.2.2.2.2.1 (Sum.inr ba) t hib
         rw [he] at hef
         exact absurd hef (by simp)
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -9521,6 +9830,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
     | @mb_wait_pass _ _ ba ph _ I A na ph' he hbcfg hnep =>
       set Cn := Config.run s (Tc.set t ht P') with hCndef
       have hsuf : (Config.run s Tc).progOf t <:+
@@ -9563,7 +9875,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       have hphase : ¬ (phaseAfter (recycleCount (.inr ba) τ' (τ'.length - 1)) = ph) := by
         intro hcon
         exact hnep (hph''.trans hcon).symm
-      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · intro Te h
         rw [List.getLast?_concat, Option.some.injEq] at h
         exact absurd h (by simp)
@@ -9695,6 +10007,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       · refine hrounds_all ?_
         intro b hrb
         exact absurd hrb (by rw [hnorec b]; simp)
+      · intro sb' g' hgle n₀ hinit
+        rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
   | @recycle s₀ Tc₀ nb I A n hb hfull hpark =>
     set Cn := Config.run
       ({ s with E := updateMapOn s.E I true,
@@ -9858,7 +10173,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         exact ⟨m, pointTime_append_some hm⟩
       · obtain ⟨hI, hpx⟩ := hsyn_park nn hcm
         exact hnewtime η hI hpx hidx
-    refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · intro Te h
       rw [List.getLast?_concat, Option.some.injEq] at h
       exact absurd h (by simp)
@@ -10199,6 +10514,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         omega
       exact ⟨mx, hmxle, hmx⟩
     · exact hrounds_all hround_new
+    · intro sb' g' hgle n₀ hinit
+      rw [hrc_same (.inr sb') (hnorecb (.inr sb') (by simp))] at hgle
+      exact hconf.rounds_full sb' g' hgle n₀ hinit
   | @mb_recycle s₀ Tc₀ sb I A n ph hb hfull hpark =>
     set Cn := Config.run
       ({ s with E := updateMapOn s.E I true,
@@ -10346,7 +10664,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       subst hbb
       obtain ⟨m, hm⟩ := hff η hη
       exact ⟨m, pointTime_append_some hm⟩
-    refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · intro Te h
       rw [List.getLast?_concat, Option.some.injEq] at h
       exact absurd h (by simp)
@@ -10612,6 +10930,63 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
         rw [hcmy] at hyc
         exact absurd (Option.some.inj hyc) (by simp)
     · exact hrounds_all hround_new
+    · intro sb' g' hgle n₀ hinit
+      by_cases hbb : sb' = sb
+      · subst hbb
+        rw [hrc_incr (.inr sb') hrecb] at hgle
+        rcases Nat.lt_or_ge g' (recycleCount (.inr sb') τ' (τ'.length - 1)) with
+          hlt | hge
+        · exact hconf.rounds_full sb' g' (by omega) n₀ hinit
+        · have hgeq : g' = recycleCount (.inr sb') τ' (τ'.length - 1) := by omega
+          subst hgeq
+          obtain ⟨hcount, harr, hwait, -⟩ := hconf.mstate _ hlast s rfl sb'
+          have hinitc : T.initCountOf sb' = some n := hcount n (by rw [hb])
+          have hnn : n₀ = n := by
+            rw [hinitc] at hinit
+            exact (Option.some.inj hinit).symm
+          rw [hnn]
+          obtain ⟨mI, CI, stI, hCI, hstI, hcntI⟩ :=
+            exists_count_state_of_initCountOf hτ hinitc
+          have harrA : A = ((genFiber T τ (.inr sb')
+              ((recycleCount (.inr sb') τ' (τ'.length - 1) : ℕ) : ℤ)).filter
+              fun η => isArriveCmd T η && (pointTime T τ' η).isSome).length := by
+            rw [hb] at harr
+            exact harr
+          by_cases hcomp : recycleCount (.inr sb') τ' (τ'.length - 1) + 1 ≤
+              recycleCount (.inr sb') τ (τ.length - 1)
+          · exact genFiber_length_mb hτ hcomp hCI hstI hcntI
+          · exfalso
+            have hApos : 0 < A := by
+              have := n.pos
+              omega
+            obtain ⟨x₀, hx₀⟩ : ∃ x₀, x₀ ∈ genFiber T τ (.inr sb')
+                ((recycleCount (.inr sb') τ' (τ'.length - 1) : ℕ) : ℤ) := by
+              rcases hF : genFiber T τ (.inr sb')
+                  ((recycleCount (.inr sb') τ' (τ'.length - 1) : ℕ) : ℤ) with
+                _ | ⟨a, l⟩
+              · exfalso
+                rw [hF] at harrA
+                simp at harrA
+                omega
+              · exact ⟨a, List.mem_cons_self ..⟩
+            have hRge : recycleCount (.inr sb') τ' (τ'.length - 1) ≤
+                recycleCount (.inr sb') τ (τ.length - 1) := by
+              obtain ⟨c', mx, -, -, -, -, -, hmx1, hmxlt, hgmx⟩ :=
+                genFiber_time_data hτ hx₀
+              have := recycleCount_mono (.inr sb') τ
+                (show mx - 1 ≤ τ.length - 1 by omega)
+              omega
+            have hreq : recycleCount (.inr sb') τ' (τ'.length - 1) =
+                recycleCount (.inr sb') τ (τ.length - 1) := by omega
+            have hlt' := genFiber_partial_length_lt_mb hτ (sb := sb') hCI hstI hcntI
+            rw [hreq] at harrA
+            have hle := List.length_filter_le (fun η => isArriveCmd T η &&
+              (pointTime T τ' η).isSome) (genFiber T τ (.inr sb')
+                ((recycleCount (.inr sb') τ (τ.length - 1) : ℕ) : ℤ))
+            omega
+      · rw [hrc_same (.inr sb')
+          (hnorecb (.inr sb') (fun h => hbb (Sum.inr.inj h)))] at hgle
+        exact hconf.rounds_full sb' g' hgle n₀ hinit
   | @done s₀ Tc₀ hdone hnofull hmbnofull =>
     have hnonew : ∀ (η : ProgPoint) (m : Nat),
         pointTime T (τ' ++ [Config.done s]) η = some m →
@@ -10654,7 +11029,7 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
       by_cases hi : i ∈ Tc.ids
       · exact hdone i hi
       · exact Tc.nil_outside_ids i hi
-    refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · intro Te h
       rw [List.getLast?_concat, Option.some.injEq] at h
       exact absurd h (by simp)
@@ -10736,6 +11111,9 @@ theorem conforms_snoc {T : CTA} {τ τ' : List Config}
     · refine hrounds_all ?_
       intro b hrb
       exact absurd hrb (by rw [hnorec b]; simp)
+    · intro sb' g' hgle n₀ hinit
+      rw [hrc_same (.inr sb') (hnorec (.inr sb'))] at hgle
+      exact hconf.rounds_full sb' g' hgle n₀ hinit
   | @error s₀ Tc₀ t P' hbar hmbar hth =>
     exfalso
     obtain ⟨hokReg, hokWait, hokInit, hokU⟩ := check_true_parts hcheck
@@ -10963,11 +11341,656 @@ theorem conforms_complete_done {T : CTA} {τ : List Config}
     | err Te => exact absurd hlast (hconf.no_err Te)
     | run s Tc =>
       exfalso
-      -- TODO(mbarrier soundness, S-F): the deadlock analysis — the
-      -- minimal-τ-time parked op (`sync_nb` *or* `wait_mb`, per the paper's
-      -- Theorem 7 note) is missing a fiber member whose thread is parked
-      -- strictly earlier, breaking minimality.
-      sorry
+      -- ## trace facts
+      have hchain : List.IsChain CTAStep σ := hct.subtrace
+      have h0idx : σ[0]? = some (Config.run State.initial T) := by
+        have hgen : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+        rw [hgen]; exact h0
+      have hlastidx : σ[σ.length - 1]? = some (Config.run s Tc) := by
+        rw [← List.getLast?_eq_getElem?]; exact hlast
+      have hreach := reaches_of_chain_getElem hchain h0idx _ _ hlastidx
+      have hwf : (Config.WF (Config.run s Tc)) := WF_of_reaches hreach
+      have hei : s.EnabledInv :=
+        enabledInv_chain hchain h0
+          (fun s₀ hs₀ => by
+            simp only [WeftCommon.Config.state?, Option.some.injEq] at hs₀
+            subst hs₀
+            exact State.EnabledInv.initial)
+          _ (List.mem_of_mem_getLast? hlast) s rfl
+      have hchainτ : List.IsChain CTAStep τ := hτ.1.1.subtrace
+      have h0τ : τ.head? = some (Config.run State.initial T) := hτ.1.2
+      have h0τidx : τ[0]? = some (Config.run State.initial T) := by
+        have hgen : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+        rw [hgen]; exact h0τ
+      obtain ⟨sdτ, hdτ⟩ := hτ.2
+      -- every valid point executes in the successful reference trace
+      have hτtime : ∀ (η : ProgPoint), η.idx < (T.prog η.thread).length →
+          ∃ m, pointTime T τ η = some m := by
+        intro η hidx
+        have hidx' : η.idx < ((Config.run State.initial T).progOf η.thread).length :=
+          hidx
+        obtain ⟨m, hm⟩ := exists_time_of_ends_done hτ.1 hdτ hidx'
+        exact ⟨m, pointTime_eq_of_isTimeOf hm⟩
+      -- ## the stuck configuration: no barrier full, every unfinished thread parked
+      have hguard : ∀ nb, s.BN nb = NamedBarrierState.unconfigured ∨
+          ∃ I A n, s.BN nb = ⟨I, A, some n⟩ ∧ I.length + A < (n : Nat) := by
+        intro nb
+        rcases hsb : s.BN nb with ⟨I, A, cnt⟩
+        cases cnt with
+        | none =>
+          obtain ⟨hI, hA⟩ := hwf.2.1 nb I A hsb
+          left
+          rw [hI, hA]
+          rfl
+        | some n =>
+          right
+          obtain ⟨hle, hpark, -⟩ := hwf.1 nb I A n hsb
+          refine ⟨I, A, n, rfl, ?_⟩
+          rcases Nat.lt_or_ge (I.length + A) (n : Nat) with h | h
+          · exact h
+          · exact absurd ⟨_, CTAStep.recycle hsb (by omega) hpark⟩ hstuck
+      have hmguard : ∀ sb, s.BM sb = MBarrierState.uninitialized ∨
+          ∃ I A n ph, s.BM sb = ⟨I, A, some n, ph⟩ ∧ A < (n : Nat) := by
+        intro sb
+        rcases hsb : s.BM sb with ⟨I, A, cnt, ph⟩
+        cases cnt with
+        | none =>
+          obtain ⟨hI, hA, hph⟩ := hwf.2.2.2.1 sb I A ph hsb
+          left
+          rw [hI, hA, hph]
+          rfl
+        | some n =>
+          right
+          obtain ⟨hle, hpark⟩ := hwf.2.2.1 sb I A n ph hsb
+          refine ⟨I, A, n, ph, rfl, ?_⟩
+          rcases Nat.lt_or_ge A (n : Nat) with h | h
+          · exact h
+          · exact absurd ⟨_, CTAStep.mb_recycle hsb (by omega) hpark⟩ hstuck
+      have hstep_of_enabled : ∀ (i : ThreadId) (c₀ : Cmd) (rest : Prog),
+          Tc.prog i = c₀ :: rest → s.E i = true → False := by
+        intro i c₀ rest hcons he
+        have hi : i ∈ Tc.ids := by
+          by_contra hni
+          rw [Tc.nil_outside_ids i hni] at hcons
+          exact absurd hcons (by simp)
+        apply hstuck
+        cases c₀ with
+        | read g =>
+          exact ⟨_, CTAStep.interleave hi hguard hmguard
+            (by rw [hcons]; exact ThreadStep.read_noop)⟩
+        | write g =>
+          exact ⟨_, CTAStep.interleave hi hguard hmguard
+            (by rw [hcons]; exact ThreadStep.write_noop)⟩
+        | arrive_nb b' n' =>
+          rcases hguard b' with hu | ⟨I', A', m', hcfg, hlt⟩
+          · exact ⟨_, CTAStep.interleave hi hguard hmguard
+              (by rw [hcons]; exact ThreadStep.arrive_configure he hu)⟩
+          · by_cases hmn : m' = n'
+            · subst hmn
+              have hpos : 0 < I'.length + A' := (hwf.1 b' I' A' m' hcfg).2.2
+              exact ⟨_, CTAStep.interleave hi hguard hmguard
+                (by rw [hcons]; exact ThreadStep.arrive_register he hcfg hpos hlt)⟩
+            · exact ⟨_, CTAStep.error hguard hmguard
+                (by rw [hcons]; exact ThreadStep.arrive_err_count he hcfg hmn)⟩
+        | sync_nb b' n' =>
+          rcases hguard b' with hu | ⟨I', A', m', hcfg, hlt⟩
+          · exact ⟨_, CTAStep.interleave hi hguard hmguard
+              (by rw [hcons]; exact ThreadStep.sync_configure he hu)⟩
+          · by_cases hmn : m' = n'
+            · subst hmn
+              have hpos : 0 < I'.length + A' := (hwf.1 b' I' A' m' hcfg).2.2
+              exact ⟨_, CTAStep.interleave hi hguard hmguard
+                (by rw [hcons]; exact ThreadStep.sync_block he hcfg hpos hlt)⟩
+            · exact ⟨_, CTAStep.error hguard hmguard
+                (by rw [hcons]; exact ThreadStep.sync_err_count he hcfg hmn)⟩
+        | init_mb b' n' =>
+          rcases hmguard b' with hu | ⟨I', A', m', ph', hcfg, hlt⟩
+          · exact ⟨_, CTAStep.interleave hi hguard hmguard
+              (by rw [hcons]; exact ThreadStep.mb_init he hu)⟩
+          · exact ⟨_, CTAStep.error hguard hmguard
+              (by rw [hcons]; exact ThreadStep.mb_init_err he hcfg)⟩
+        | arrive_mb b' =>
+          rcases hmguard b' with hu | ⟨I', A', m', ph', hcfg, hlt⟩
+          · exact ⟨_, CTAStep.error hguard hmguard
+              (by rw [hcons]; exact ThreadStep.mb_arrive_err he hu)⟩
+          · exact ⟨_, CTAStep.interleave hi hguard hmguard
+              (by rw [hcons]; exact ThreadStep.mb_arrive he hcfg)⟩
+        | wait_mb b' ph' =>
+          rcases hmguard b' with hu | ⟨I', A', m', ph₂, hcfg, hlt⟩
+          · exact ⟨_, CTAStep.error hguard hmguard
+              (by rw [hcons]; exact ThreadStep.mb_wait_err he hu)⟩
+          · by_cases hph : ph₂ = ph'
+            · subst hph
+              exact ⟨_, CTAStep.interleave hi hguard hmguard
+                (by rw [hcons]; exact ThreadStep.mb_wait_block he hcfg)⟩
+            · exact ⟨_, CTAStep.interleave hi hguard hmguard
+                (by
+                  rw [hcons]
+                  exact ThreadStep.mb_wait_pass he hcfg (fun h => hph h.symm))⟩
+      -- ## program order in the reference trace
+      have hpo : ∀ (x y : ProgPoint), x.thread = y.thread → x.idx < y.idx →
+          ∀ mx my, pointTime T τ x = some mx → pointTime T τ y = some my →
+          mx < my := by
+        intro x y hth hidx mx my hmx hmy
+        by_contra hge
+        obtain ⟨hx1, hxlt, hxidx, C₁, C₂, hC₁, hC₂, hdropx, -⟩ :=
+          pointTime_spec hchainτ h0τ hmx
+        obtain ⟨hy1, hylt, hyidx, D₁, D₂, hD₁, hD₂, hdropy, -⟩ :=
+          pointTime_spec hchainτ h0τ hmy
+        have hsuf := progOf_suffix_index_le hchainτ x.thread hD₁
+          (show my - 1 ≤ mx - 1 by omega) hC₁
+        have hle := suffix_length_le hsuf
+        rw [← hth] at hdropy hyidx
+        rw [hdropx, hdropy] at hle
+        simp only [List.length_drop] at hle
+        omega
+      -- ## a disabled unfinished thread is parked at its head — a `sync_nb`
+      -- fiber member or a `wait_mb` at its reference generation
+      have hparked_point : ∀ (i : ThreadId), Tc.prog i ≠ [] → s.E i = false →
+          ∃ (x : ProgPoint),
+            ((∃ (bx : NamedBarrier) (nx : ℕ+), T.cmdAt x = some (.sync_nb bx nx) ∧
+              x ∈ genFiber T τ (.inl bx)
+                ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)) ∨
+             (∃ (bx : SharedBarrier) (phx : Phase),
+              T.cmdAt x = some (.wait_mb bx phx) ∧
+              pointGen T τ x =
+                some ((recycleCount (.inr bx) σ (σ.length - 1) : ℕ) : ℤ) ∧
+              x.thread ∈ (s.BM bx).waiting)) ∧
+            x ∈ T.progPoints ∧
+            pointerAt T x (Config.run s Tc) ∧ s.E x.thread = false ∧
+            x.thread = i ∧
+            x.idx = (T.prog i).length - (Tc.prog i).length := by
+        intro i hne hE
+        obtain ⟨b_e, hdsy⟩ := hei i hE
+        have hsufi : (Config.run s Tc).progOf i <:+
+            (Config.run State.initial T).progOf i :=
+          progOf_suffix_index_le hchain i h0idx (Nat.zero_le _) hlastidx
+        have hlen_le : (Tc.prog i).length ≤ (T.prog i).length :=
+          suffix_length_le hsufi
+        have hlen_pos : 0 < (Tc.prog i).length := by
+          cases hTt : Tc.prog i with
+          | nil => exact absurd hTt hne
+          | cons a l => simp
+        cases b_e with
+        | inl nb_e =>
+          rcases hsb_e : s.BN nb_e with ⟨I_e, A_e, cnt_e⟩
+          cases cnt_e with
+          | none =>
+            exfalso
+            obtain ⟨hI0, -⟩ := hwf.2.1 nb_e I_e A_e hsb_e
+            have hdsy' : i ∈ I_e := by
+              have h : i ∈ (s.BN nb_e).synced := hdsy
+              rw [hsb_e] at h
+              exact h
+            rw [hI0] at hdsy'
+            simp at hdsy'
+          | some n_e =>
+            obtain ⟨-, -, hsync_e, -⟩ := hconf.state _ hlast s rfl nb_e
+            obtain ⟨x, hxF, hthx, ⟨n_x, hcmx⟩, hpx, hEx⟩ :=
+              (hsync_e i).mp (by
+                have h : i ∈ (s.BN nb_e).synced := hdsy
+                exact h)
+            have hxpts := (mem_genFiber.mp hxF).1
+            have hxidx : x.idx < (T.prog x.thread).length :=
+              ((mem_progPoints_iff T x).mp hxpts).2
+            have hpx' : (Tc.prog x.thread).length =
+                (T.prog x.thread).length - x.idx := hpx
+            rw [hthx] at hpx' hxidx
+            have hxid : x.idx = (T.prog i).length - (Tc.prog i).length := by omega
+            refine ⟨x, Or.inl ⟨nb_e, n_x, hcmx, hxF⟩, hxpts, hpx, ?_, hthx, hxid⟩
+            rw [hthx]
+            exact hE
+        | inr sb_e =>
+          rcases hsb_e : s.BM sb_e with ⟨I_e, A_e, cnt_e, ph_e⟩
+          cases cnt_e with
+          | none =>
+            exfalso
+            obtain ⟨hI0, -, -⟩ := hwf.2.2.2.1 sb_e I_e A_e ph_e hsb_e
+            have hdsy' : i ∈ I_e := by
+              have h : i ∈ (s.BM sb_e).waiting := hdsy
+              rw [hsb_e] at h
+              exact h
+            rw [hI0] at hdsy'
+            simp at hdsy'
+          | some n_e =>
+            obtain ⟨-, -, hwait_e, -⟩ := hconf.mstate _ hlast s rfl sb_e
+            obtain ⟨x, hxpts, hthx, ⟨phx, hcmx⟩, hpx, hEx, hgx⟩ :=
+              hwait_e i (by
+                have h : i ∈ (s.BM sb_e).waiting := hdsy
+                exact h)
+            have hxidx : x.idx < (T.prog x.thread).length :=
+              ((mem_progPoints_iff T x).mp hxpts).2
+            have hpx' : (Tc.prog x.thread).length =
+                (T.prog x.thread).length - x.idx := hpx
+            rw [hthx] at hpx' hxidx
+            have hxid : x.idx = (T.prog i).length - (Tc.prog i).length := by omega
+            refine ⟨x, Or.inr ⟨sb_e, phx, hcmx, hgx, ?_⟩, hxpts, hpx, ?_, hthx, hxid⟩
+            · rw [hthx]
+              exact hdsy
+            · rw [hthx]
+              exact hE
+      -- ## the descent: no parked op has a τ-time (strong induction on that time)
+      have hdescend : ∀ (nt : Nat) (u : ProgPoint),
+          ((∃ (bx : NamedBarrier) (nx : ℕ+), T.cmdAt u = some (.sync_nb bx nx) ∧
+            u ∈ genFiber T τ (.inl bx)
+              ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)) ∨
+           (∃ (bx : SharedBarrier) (phx : Phase),
+            T.cmdAt u = some (.wait_mb bx phx) ∧
+            pointGen T τ u =
+              some ((recycleCount (.inr bx) σ (σ.length - 1) : ℕ) : ℤ) ∧
+            u.thread ∈ (s.BM bx).waiting)) →
+          pointerAt T u (Config.run s Tc) → s.E u.thread = false →
+          pointTime T τ u = some nt → False := by
+        intro nt
+        induction nt using Nat.strong_induction_on with
+        | _ nt ih =>
+          intro u hflavor hupt huE htu
+          -- per flavor: a fiber member `d` of the open round with no σ-time,
+          -- and a cap `m_d ≤ nt` on its τ-time
+          obtain ⟨b_u, d, hdF, hdnotd, hd_cap⟩ :
+              ∃ (b_u : NamedBarrier ⊕ SharedBarrier) (d : ProgPoint),
+                d ∈ genFiber T τ b_u
+                  ((recycleCount b_u σ (σ.length - 1) : ℕ) : ℤ) ∧
+                ((isArriveCmd T d && (pointTime T σ d).isSome) = false ∧
+                  ¬ (isSyncCmd T d = true ∧ pointerAt T d (Config.run s Tc) ∧
+                    s.E d.thread = false)) ∧
+                (∀ m_d, pointTime T τ d = some m_d → m_d ≤ nt) := by
+            rcases hflavor with ⟨bx, nx, hcmu, hufib⟩ | ⟨bx, phx, hcmu, hgenu, huW⟩
+            · -- SYNC flavor: the named-barrier pigeonhole
+              obtain ⟨hcount, harr, hsyncb, -⟩ := hconf.state _ hlast s rfl bx
+              have huI : u.thread ∈ (s.BN bx).synced :=
+                (hsyncb u.thread).mpr ⟨u, hufib, rfl, ⟨nx, hcmu⟩, hupt, huE⟩
+              rcases hguard bx with hu | ⟨I, A, n, hcfg, hlt⟩
+              · rw [hu] at huI
+                simp [NamedBarrierState.unconfigured] at huI
+              -- the sync's τ-time is the recycle closing the open round
+              obtain ⟨cu', mu', -, -, -, -, hpt', hmu'1, hmu'lt, hgu⟩ :=
+                genFiber_time_data hτ hufib
+              have hmu'nt : nt = mu' := by
+                rw [htu] at hpt'
+                exact Option.some.inj hpt'
+              subst hmu'nt
+              obtain ⟨C₁, C₂, hC₁, hC₂, hrec⟩ :=
+                pointTime_sync_recycles hchainτ h0τ htu hcmu
+              have hsucc := recycleCount_succ_of_recycle (.inl bx) τ hC₁
+                (by rw [show nt - 1 + 1 = nt by omega]; exact hC₂) hrec
+              rw [show nt - 1 + 1 = nt by omega] at hsucc
+              have hntrc : recycleCount (.inl bx) σ (σ.length - 1) + 1 ≤
+                  recycleCount (.inl bx) τ nt := by
+                omega
+              have hcomplete : recycleCount (.inl bx) σ (σ.length - 1) + 1 ≤
+                  recycleCount (.inl bx) τ (τ.length - 1) := by
+                have hmono := recycleCount_mono (.inl bx) τ
+                  (show nt ≤ τ.length - 1 by omega)
+                omega
+              have hcnt : ∀ η ∈ genFiber T τ (.inl bx)
+                  ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ),
+                  (T.cmdAt η).bind Cmd.count? = some n := fun η hη =>
+                hcount n (by rw [hcfg]) η hη
+              have hlen := genFiber_length hτ hcomplete hufib (hcnt u hufib)
+              have harrA : A = ((genFiber T τ (.inl bx)
+                  ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                    fun η => isArriveCmd T η && (pointTime T σ η).isSome).length := by
+                have h := harr
+                rw [hcfg] at h
+                exact h
+              have hsplitF : (genFiber T τ (.inl bx)
+                  ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).length =
+                  ((genFiber T τ (.inl bx)
+                    ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                    fun η => isArriveCmd T η && (pointTime T σ η).isSome).length +
+                  ((genFiber T τ (.inl bx)
+                    ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                    fun η =>
+                      !(isArriveCmd T η && (pointTime T σ η).isSome)).length := by
+                rw [← List.countP_eq_length_filter, ← List.countP_eq_length_filter,
+                  List.length_eq_countP_add_countP
+                    (p := fun η => isArriveCmd T η && (pointTime T σ η).isSome)]
+                congr 1
+                refine List.countP_congr fun x hx => ?_
+                cases hpx : (isArriveCmd T x && (pointTime T σ x).isSome) <;>
+                  simp_all
+              by_cases hex_d : ∃ d ∈ (genFiber T τ (.inl bx)
+                  ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                    fun η => !(isArriveCmd T η && (pointTime T σ η).isSome),
+                  ¬(isSyncCmd T d = true ∧ pointerAt T d (Config.run s Tc) ∧
+                    s.E d.thread = false)
+              case neg =>
+                exfalso
+                have hallp : ∀ x ∈ (genFiber T τ (.inl bx)
+                    ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                      fun η => !(isArriveCmd T η && (pointTime T σ η).isSome),
+                    isSyncCmd T x = true ∧ pointerAt T x (Config.run s Tc) ∧
+                      s.E x.thread = false := by
+                  intro x hx
+                  by_contra hnx
+                  exact hex_d ⟨x, hx, hnx⟩
+                have hmapsub : ∀ a ∈ ((genFiber T τ (.inl bx)
+                    ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                      fun η => !(isArriveCmd T η && (pointTime T σ η).isSome)).map
+                        ProgPoint.thread, a ∈ I := by
+                  intro a ha
+                  obtain ⟨x, hx, rfl⟩ := List.mem_map.mp ha
+                  obtain ⟨hxsy, hxpt, hxE⟩ := hallp x hx
+                  have hxF := (List.mem_filter.mp hx).1
+                  obtain ⟨n_x, hcmx⟩ : ∃ n_x : ℕ+,
+                      T.cmdAt x = some (.sync_nb bx n_x) := by
+                    rcases genFiber_nb_cases hxF with ⟨n_x, hcm⟩ | ⟨n_x, hcm⟩
+                    · exfalso
+                      simp [isSyncCmd, hcm] at hxsy
+                    · exact ⟨n_x, hcm⟩
+                  have hmem : x.thread ∈ (s.BN bx).synced :=
+                    (hsyncb x.thread).mpr ⟨x, hxF, rfl, ⟨n_x, hcmx⟩, hxpt, hxE⟩
+                  rw [hcfg] at hmem
+                  exact hmem
+                have hmapnodup : (((genFiber T τ (.inl bx)
+                    ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                      fun η => !(isArriveCmd T η && (pointTime T σ η).isSome)).map
+                        ProgPoint.thread).Nodup := by
+                  refine List.Nodup.map_on ?_
+                    (List.Nodup.filter _ (genFiber_nodup T τ (.inl bx) _))
+                  intro x hx y hy hxy
+                  obtain ⟨-, hxpt, -⟩ := hallp x hx
+                  obtain ⟨-, hypt, -⟩ := hallp y hy
+                  have hxidx : x.idx < (T.prog x.thread).length :=
+                    ((mem_progPoints_iff T x).mp
+                      (mem_genFiber.mp (List.mem_filter.mp hx).1).1).2
+                  have hyidx : y.idx < (T.prog y.thread).length :=
+                    ((mem_progPoints_iff T y).mp
+                      (mem_genFiber.mp (List.mem_filter.mp hy).1).1).2
+                  have hxpt' : (Tc.prog x.thread).length =
+                      (T.prog x.thread).length - x.idx := hxpt
+                  have hypt' : (Tc.prog y.thread).length =
+                      (T.prog y.thread).length - y.idx := hypt
+                  rw [hxy] at hxpt' hxidx
+                  have hid : x.idx = y.idx := by omega
+                  have hxeta : x = ⟨x.thread, x.idx⟩ := rfl
+                  have hyeta : y = ⟨y.thread, y.idx⟩ := rfl
+                  rw [hxeta, hyeta, hxy, hid]
+                have hcard1 : (((genFiber T τ (.inl bx)
+                    ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                      fun η => !(isArriveCmd T η && (pointTime T σ η).isSome)).map
+                        ProgPoint.thread).toFinset.card =
+                    ((genFiber T τ (.inl bx)
+                      ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                      fun η =>
+                        !(isArriveCmd T η && (pointTime T σ η).isSome)).length := by
+                  rw [List.toFinset_card_of_nodup hmapnodup, List.length_map]
+                have hcard2 : (((genFiber T τ (.inl bx)
+                    ((recycleCount (.inl bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                      fun η => !(isArriveCmd T η && (pointTime T σ η).isSome)).map
+                        ProgPoint.thread).toFinset ⊆ I.toFinset := by
+                  intro a ha
+                  rw [List.mem_toFinset] at ha ⊢
+                  exact hmapsub a ha
+                have hcard3 := Finset.card_le_card hcard2
+                have hcard4 := List.toFinset_card_le I
+                omega
+              case pos =>
+                obtain ⟨d, hdF2, hdnp⟩ := hex_d
+                have hdF := (List.mem_filter.mp hdF2).1
+                have hdcen : (isArriveCmd T d && (pointTime T σ d).isSome) = false := by
+                  have h := (List.mem_filter.mp hdF2).2
+                  cases hbo : (isArriveCmd T d && (pointTime T σ d).isSome) with
+                  | false => rfl
+                  | true => rw [hbo] at h; simp at h
+                refine ⟨.inl bx, d, hdF, ⟨hdcen, hdnp⟩, ?_⟩
+                intro m_d hmd
+                obtain ⟨cd', md', -, -, -, -, hptd', -, -, hgd⟩ :=
+                  genFiber_time_data hτ hdF
+                have hmdeq : md' = m_d := by
+                  rw [hmd] at hptd'
+                  exact (Option.some.inj hptd').symm
+                subst hmdeq
+                by_contra hgt
+                have hmono := recycleCount_mono (.inl bx) τ
+                  (show nt ≤ md' - 1 by omega)
+                omega
+            · -- WAIT flavor: the mbarrier pigeonhole
+              obtain ⟨hcount, harr, hwaitb, -⟩ := hconf.mstate _ hlast s rfl bx
+              rcases hmguard bx with hu | ⟨I, A, n, ph, hcfg, hlt⟩
+              · exfalso
+                obtain ⟨hI0, -, -⟩ := hwf.2.2.2.1 bx _ _ _ (by rw [hu]; rfl)
+                have hW : u.thread ∈ ([] : List ThreadId) := by
+                  have h := huW
+                  rw [hu] at h
+                  exact h
+                simp at hW
+              have hinitc : T.initCountOf bx = some n := hcount n (by rw [hcfg])
+              obtain ⟨mI, CI, stI, hCI, hstI, hcntI⟩ :=
+                exists_count_state_of_initCountOf hτ hinitc
+              -- the wait's τ-time closes (or already saw closed) the open round
+              have hnt1 : 1 ≤ nt := (pointTime_spec hchainτ h0τ htu).1
+              have hntlt : nt < τ.length := (pointTime_spec hchainτ h0τ htu).2.1
+              have hpgu := pointGen_eq_of_time hcmu rfl
+                (isTimeOf_of_pointTime hτ.1 htu)
+              have hgv : (Cmd.wait_mb bx phx).genValue
+                  (recycleCount (.inr bx) τ (nt - 1)) =
+                  ((recycleCount (.inr bx) σ (σ.length - 1) : ℕ) : ℤ) := by
+                rw [hgenu] at hpgu
+                exact (Option.some.inj hpgu).symm
+              have hnt_rc : recycleCount (.inr bx) σ (σ.length - 1) + 1 ≤
+                  recycleCount (.inr bx) τ nt := by
+                by_cases hphm : phaseAfter (recycleCount (.inr bx) τ (nt - 1)) = phx
+                · have hrτσ : recycleCount (.inr bx) τ (nt - 1) =
+                      recycleCount (.inr bx) σ (σ.length - 1) := by
+                    simp only [Cmd.genValue, if_pos hphm] at hgv
+                    omega
+                  rcases wait_time_recycles_or_pass
+                      (isTimeOf_of_pointTime hτ.1 htu) hcmu with
+                    ⟨C₁, C₂, hC₁, hC₂, hrec⟩ | ⟨s₂, T₂, hC₁, hE₂, hph₂⟩
+                  · have hsucc := recycleCount_succ_of_recycle (.inr bx) τ hC₁
+                      (by rw [show nt - 1 + 1 = nt by omega]; exact hC₂) hrec
+                    rw [show nt - 1 + 1 = nt by omega] at hsucc
+                    omega
+                  · exfalso
+                    have hph := phase_eq_phaseAfter hchainτ h0τidx bx (nt - 1) _ s₂
+                      hC₁ rfl
+                    rw [hph] at hph₂
+                    exact hph₂ hphm
+                · have hrτσ : recycleCount (.inr bx) τ (nt - 1) =
+                      recycleCount (.inr bx) σ (σ.length - 1) + 1 := by
+                    simp only [Cmd.genValue, if_neg hphm] at hgv
+                    omega
+                  have := recycleCount_mono (.inr bx) τ (show nt - 1 ≤ nt by omega)
+                  omega
+              have hcomplete : recycleCount (.inr bx) σ (σ.length - 1) + 1 ≤
+                  recycleCount (.inr bx) τ (τ.length - 1) := by
+                have hmono := recycleCount_mono (.inr bx) τ
+                  (show nt ≤ τ.length - 1 by omega)
+                omega
+              have hlen := genFiber_length_mb hτ hcomplete hCI hstI hcntI
+              have harrA : A = ((genFiber T τ (.inr bx)
+                  ((recycleCount (.inr bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                    fun η => isArriveCmd T η && (pointTime T σ η).isSome).length := by
+                have h := harr
+                rw [hcfg] at h
+                exact h
+              obtain ⟨d, hdF, hdcen⟩ : ∃ d ∈ genFiber T τ (.inr bx)
+                  ((recycleCount (.inr bx) σ (σ.length - 1) : ℕ) : ℤ),
+                  (isArriveCmd T d && (pointTime T σ d).isSome) = false := by
+                by_contra hno
+                push Not at hno
+                have hfe : (genFiber T τ (.inr bx)
+                    ((recycleCount (.inr bx) σ (σ.length - 1) : ℕ) : ℤ)).filter
+                    (fun η => isArriveCmd T η && (pointTime T σ η).isSome) =
+                    genFiber T τ (.inr bx)
+                      ((recycleCount (.inr bx) σ (σ.length - 1) : ℕ) : ℤ) := by
+                  rw [List.filter_eq_self]
+                  intro x hx
+                  have h := hno x hx
+                  cases hb : (isArriveCmd T x && (pointTime T σ x).isSome)
+                  · exact absurd hb h
+                  · rfl
+                rw [hfe, hlen] at harrA
+                omega
+              have hdarr := genFiber_mb_arrive hdF
+              refine ⟨.inr bx, d, hdF, ⟨hdcen, ?_⟩, ?_⟩
+              · rintro ⟨hdsy, -, -⟩
+                simp [isSyncCmd, hdarr] at hdsy
+              · intro m_d hmd
+                obtain ⟨cd', md', -, -, -, -, hptd', -, -, hgd⟩ :=
+                  genFiber_time_data hτ hdF
+                have hmdeq : md' = m_d := by
+                  rw [hmd] at hptd'
+                  exact (Option.some.inj hptd').symm
+                subst hmdeq
+                by_contra hgt
+                have hmono := recycleCount_mono (.inr bx) τ
+                  (show nt ≤ md' - 1 by omega)
+                omega
+          -- ## `d` has no σ-time, so its thread is unfinished, disabled, parked
+          have hdmem := (mem_genFiber.mp hdF).1
+          have hdidx : d.idx < (T.prog d.thread).length :=
+            ((mem_progPoints_iff T d).mp hdmem).2
+          obtain ⟨hdcen, hdnp⟩ := hdnotd
+          have hdtime : pointTime T σ d = none := by
+            rcases hbu : b_u with nbu | sbu
+            · rw [hbu] at hdF
+              rcases genFiber_nb_cases hdF with ⟨n_d, hcmd⟩ | ⟨n_d, hcmd⟩
+              · cases hpt : pointTime T σ d with
+                | none => rfl
+                | some m =>
+                  exfalso
+                  simp [isArriveCmd, hcmd, Cmd.isArrive, hpt] at hdcen
+              · cases hpt : pointTime T σ d with
+                | none => rfl
+                | some m =>
+                  exfalso
+                  -- an executed sync of the *open* round out-runs the recycle count
+                  obtain ⟨C₁, C₂, hC₁, hC₂, hrec⟩ :=
+                    pointTime_sync_recycles hchain h0 hpt hcmd
+                  have hspecd := pointTime_spec hchain h0 hpt
+                  have hsuccd := recycleCount_succ_of_recycle (.inl nbu) σ hC₁
+                    (by rw [show m - 1 + 1 = m by omega]; exact hC₂) hrec
+                  rw [show m - 1 + 1 = m by omega] at hsuccd
+                  obtain ⟨cd', md', hcd', -, -, -, hptd', -, -, hgd⟩ :=
+                    genFiber_time_data hτ hdF
+                  have hgeq := hconf.gen_eq d hdmem m hpt
+                  have hpgd := pointGen_eq_of_pointTime hcd'
+                    (by rw [hcd'] at hcmd; rw [Option.some.inj hcmd]; rfl) hpt
+                  rw [hcd'] at hcmd
+                  obtain rfl := Option.some.inj hcmd
+                  rw [genValue_of_isRegistrant rfl] at hpgd
+                  have hpgτ := pointGen_registrant_eq_of_time hcd' rfl rfl
+                    (isTimeOf_of_pointTime hτ.1 hptd')
+                  rw [hpgd, hpgτ] at hgeq
+                  have hinj := Option.some.inj hgeq
+                  have hmono := recycleCount_mono (.inl nbu) σ
+                    (show m ≤ σ.length - 1 by omega)
+                  omega
+            · rw [hbu] at hdF
+              have hdarr := genFiber_mb_arrive hdF
+              cases hpt : pointTime T σ d with
+              | none => rfl
+              | some m =>
+                exfalso
+                simp [isArriveCmd, hdarr, Cmd.isArrive, hpt] at hdcen
+          have hnpassed : (T.prog d.thread).length - d.idx ≤
+              (Tc.prog d.thread).length := by
+            by_contra hlt'
+            obtain ⟨m, hm⟩ := exists_pointTime_of_passed hchain h0 hlast hdidx
+              (by change (Tc.prog d.thread).length + (d.idx + 1) ≤ _; omega)
+            rw [hdtime] at hm
+            exact absurd hm (by simp)
+          have hdne : Tc.prog d.thread ≠ [] := by
+            intro h0'
+            rw [h0'] at hnpassed
+            simp at hnpassed
+            omega
+          have hdE : s.E d.thread = false := by
+            cases hE : s.E d.thread with
+            | false => rfl
+            | true =>
+              obtain ⟨c₀, rest, hcons⟩ : ∃ c₀ rest,
+                  Tc.prog d.thread = c₀ :: rest := by
+                cases hTt : Tc.prog d.thread with
+                | nil => exact absurd hTt hdne
+                | cons a l => exact ⟨a, l, rfl⟩
+              exact (hstep_of_enabled d.thread c₀ rest hcons hE).elim
+          obtain ⟨e, heflavor, hepts, hept, heE, heth, heidx⟩ :=
+            hparked_point d.thread hdne hdE
+          -- `e ≠ d`: at equality `d` would be a parked sync (excluded) or a
+          -- wait/sync command clash with its fiber kind
+          have hlt_idx : e.idx < d.idx := by
+            have hle_idx : e.idx ≤ d.idx := by
+              rw [heidx]
+              omega
+            rcases Nat.lt_or_ge e.idx d.idx with h | h
+            · exact h
+            · exfalso
+              have hed : e = d := by
+                have heeta : e = ⟨e.thread, e.idx⟩ := rfl
+                have hdeta : d = ⟨d.thread, d.idx⟩ := rfl
+                rw [heeta, hdeta, heth, show e.idx = d.idx by omega]
+              rcases heflavor with ⟨b_e2, n_e2, hcme, heF⟩ | ⟨b_e2, ph_e2, hcme, -, -⟩
+              · rw [hed] at hcme hept
+                exact hdnp ⟨by simp [isSyncCmd, hcme], hept, hdE⟩
+              · rw [hed] at hcme
+                rcases hbu : b_u with nbu | sbu
+                · rw [hbu] at hdF
+                  rcases genFiber_nb_cases hdF with ⟨n_d, hcmd⟩ | ⟨n_d, hcmd⟩ <;>
+                    (rw [hcmd] at hcme; exact absurd (Option.some.inj hcme) (by simp))
+                · rw [hbu] at hdF
+                  have hdarr := genFiber_mb_arrive hdF
+                  rw [hdarr] at hcme
+                  exact absurd (Option.some.inj hcme) (by simp)
+          obtain ⟨m_d, hmd⟩ := hτtime d hdidx
+          have heidx' : e.idx < (T.prog e.thread).length :=
+            ((mem_progPoints_iff T e).mp hepts).2
+          obtain ⟨m_e, hme⟩ := hτtime e heidx'
+          have hlt_time : m_e < m_d := hpo e d heth hlt_idx m_e m_d hme hmd
+          have hle_time : m_d ≤ nt := hd_cap m_d hmd
+          exact ih m_e (by omega) e heflavor hept heE hme
+      -- ## seed the descent: the stuck non-`done` configuration has a parked op
+      have hndone : ¬ CTA.IsDone Tc := by
+        intro hdone
+        refine hstuck ⟨_, CTAStep.done hdone ?_ ?_⟩
+        · intro b I A n hbeq
+          rcases hguard b with hu | ⟨I', A', n', hcfg, hlt⟩
+          · rw [hu] at hbeq
+            exact absurd (congrArg NamedBarrierState.count hbeq)
+              (by simp [NamedBarrierState.unconfigured])
+          · rw [hcfg] at hbeq
+            have hI : I' = I := congrArg NamedBarrierState.synced hbeq
+            have hA : A' = A := congrArg NamedBarrierState.arrived hbeq
+            have hn : (some n' : Option ℕ+) = some n :=
+              congrArg NamedBarrierState.count hbeq
+            obtain rfl := Option.some.inj hn
+            have hIlen : I'.length = I.length := congrArg List.length hI
+            omega
+        · intro sb I A n ph hbeq
+          rcases hmguard sb with hu | ⟨I', A', n', ph', hcfg, hlt⟩
+          · rw [hu] at hbeq
+            exact absurd (congrArg MBarrierState.count hbeq)
+              (by simp [MBarrierState.uninitialized])
+          · rw [hcfg] at hbeq
+            have hA : A' = A := congrArg MBarrierState.arrived hbeq
+            have hn : (some n' : Option ℕ+) = some n :=
+              congrArg MBarrierState.count hbeq
+            obtain rfl := Option.some.inj hn
+            omega
+      obtain ⟨i₀, hi₀ne⟩ : ∃ i, Tc.prog i ≠ [] := by
+        by_contra hall
+        apply hndone
+        intro i hi
+        by_contra hne'
+        exact hall ⟨i, hne'⟩
+      have hE₀ : s.E i₀ = false := by
+        cases hE : s.E i₀ with
+        | false => rfl
+        | true =>
+          obtain ⟨c₀, rest, hcons⟩ : ∃ c₀ rest, Tc.prog i₀ = c₀ :: rest := by
+            cases hTt : Tc.prog i₀ with
+            | nil => exact absurd hTt hi₀ne
+            | cons a l => exact ⟨a, l, rfl⟩
+          exact (hstep_of_enabled i₀ c₀ rest hcons hE).elim
+      obtain ⟨x₀, hflavor₀, hpts₀, hpt₀, hE₀', -, -⟩ :=
+        hparked_point i₀ hi₀ne hE₀
+      have hx₀idx : x₀.idx < (T.prog x₀.thread).length :=
+        ((mem_progPoints_iff T x₀).mp hpts₀).2
+      obtain ⟨n_t, hnt⟩ := hτtime x₀ hx₀idx
+      exact hdescend n_t x₀ hflavor₀ hpt₀ hE₀' hnt
 
 /-! ## Completeness contradiction lemmas
 
@@ -11477,14 +12500,13 @@ theorem unique_init_false {T : CTA} {τ : List Config}
 
 /-- **Mode 3, reachable-err flavor**: the use `u` is `hb`-forced after the
 initialization (through a release edge) but its *predecessor* is not — so a
-schedule reaches `u` before the initialization and errs.
-TODO(mbarrier completeness, Step-5 pred-form): run the ideal
+schedule reaches `u` before the initialization and errs. Run the ideal
 `G = {η | ¬ happensBefore T τ ip η}` to its cut: `pred(u) ∈ G` executes,
 `u ∉ G` (from `hbu`) leaves `u`'s thread control at `u`, enabled, with `sb`
 uninitialized (`ip ∉ G` never ran; the initialization is unique) — after
-draining any pending recycles, the `mb_arrive_err`/`mb_wait_err` production
-fires, giving a complete trace ending `err` in which `u` never executes,
-refuting `hws`. -/
+draining any pending recycle (empty-wake: nothing is blocked at the cut), the
+`mb_arrive_err`/`mb_wait_err` production fires, giving a complete trace ending
+`err`, refuting `hws`. -/
 theorem init_pred_unordered_err_false {T : CTA} {τ : List Config}
     (hτ : IsSuccessfulTraceFrom (Config.run State.initial T) τ)
     (hws : T.WellSynchronized) (huniq : okUniqueInitCheck T τ = true)
@@ -11495,7 +12517,309 @@ theorem init_pred_unordered_err_false {T : CTA} {τ : List Config}
     (hidx1 : 1 ≤ u.idx)
     (hnpred : ¬ happensBefore T τ ip ⟨u.thread, u.idx - 1⟩)
     (hbu : happensBefore T τ ip u) : False := by
-  sorry
+  classical
+  -- run the ideal `G = {η | ¬ hb(ip, η)}` to its clean cut
+  obtain ⟨τ'', p, s_G, T_G, hcomp, hpcfg, hGprog, hbempty⟩ := run_ideal (η₁ := ip) hτ hws
+  have hchain'' := hcomp.1.subtrace
+  have h0idx'' : τ''[0]? = some (Config.run State.initial T) := by
+    have hgen0 : ∀ l : List Config, l[0]? = l.head? := fun l => by cases l <;> rfl
+    rw [hgen0]; exact hcomp.2
+  have hreachG : Relation.ReflTransGen CTAStep (Config.run State.initial T)
+      (Config.run s_G T_G) := reaches_of_chain_getElem hchain'' h0idx'' p _ hpcfg
+  have hwfG := WF_of_reaches hreachG
+  have hamof : s_G.AtMostOneFull := hwfG.2.2.2.2.1
+  -- every thread is enabled at the cut: nothing is blocked anywhere
+  have hEall : ∀ i, s_G.E i = true := by
+    intro i
+    cases hE : s_G.E i with
+    | true => rfl
+    | false =>
+      exfalso
+      have hei : s_G.EnabledInv := by
+        refine enabledInv_chain hchain'' hcomp.2 ?_ _ (List.mem_of_getElem? hpcfg) s_G rfl
+        intro s₀ hs₀
+        simp only [WeftCommon.Config.state?, Option.some.injEq] at hs₀
+        subst hs₀
+        exact State.EnabledInv.initial
+      obtain ⟨b, hib⟩ := hei i hE
+      exact hbempty b i hib
+  -- `ip ∈ F` never runs in the ideal prefix, so `sb`'s count is still `⊥` at the cut
+  have hipidx : ip.idx < (T.prog ip.thread).length := ((mem_progPoints_iff T ip).mp hip).2
+  have hfip : fcut T τ ip ip.thread ≤ ip.idx := fcut_le_of_hb Relation.ReflTransGen.refl hip
+  have hcntG : (s_G.BM sb).count = none := by
+    cases hcnt : (s_G.BM sb).count with
+    | none => rfl
+    | some n₂ =>
+      exfalso
+      obtain ⟨q, i2, ninit, D, D', rest, hq1, hD, hD', hdrop, hdrop'⟩ :=
+        exists_init_drop_of_count_some hchain'' h0idx'' p _ s_G hpcfg rfl hcnt
+      have hsufq : D.progOf i2 <:+ (Config.run State.initial T).progOf i2 :=
+        progOf_suffix_index_le hchain'' i2 h0idx'' (Nat.zero_le q) hD
+      have hcmdq := cmd_at_last hsufq hdrop
+      have hipq : (⟨i2, ((Config.run State.initial T).progOf i2).length -
+          (D.progOf i2).length⟩ : ProgPoint) = ip :=
+        unique_init_of_check huniq (mem_progPoints_of_cmdAt T hcmdq) hip hcmdq hcmdip
+      have hth2 : i2 = ip.thread := congrArg ProgPoint.thread hipq
+      have hidx2 : ((Config.run State.initial T).progOf i2).length -
+          (D.progOf i2).length = ip.idx := congrArg ProgPoint.idx hipq
+      have hlenD_le : (D.progOf i2).length ≤
+          ((Config.run State.initial T).progOf i2).length := suffix_length_le hsufq
+      have hlenD : (D.progOf i2).length = rest.length + 1 := by rw [hdrop]; simp
+      -- past the drop, `i2`'s program is strictly shorter than the cut allows
+      have hsufp : (Config.run s_G T_G).progOf i2 <:+ D'.progOf i2 :=
+        progOf_suffix_index_le hchain'' i2 hD' hq1 hpcfg
+      have hlenp : (T_G.prog i2).length ≤ rest.length := by
+        have := suffix_length_le hsufp
+        rw [hdrop'] at this
+        exact this
+      have hlenG : (T_G.prog i2).length = (T.prog i2).length - fcut T τ ip i2 := by
+        rw [hGprog i2]
+        simp
+      have hTlen : ((Config.run State.initial T).progOf i2).length =
+          (T.prog i2).length := rfl
+      rw [← hth2] at hfip hipidx
+      omega
+  -- hence `sb` is fully pristine at the cut (WF's uninitialized clause)
+  have hMG : s_G.BM sb = MBarrierState.uninitialized := by
+    rcases hsh : s_G.BM sb with ⟨I₀, A₀, c₀, ph₀⟩
+    have hc₀ : c₀ = none := by rw [hsh] at hcntG; exact hcntG
+    subst hc₀
+    obtain ⟨hI₀, hA₀, hph₀⟩ := hwfG.2.2.2.1 sb I₀ A₀ ph₀ hsh
+    subst hI₀; subst hA₀; subst hph₀
+    rfl
+  -- the cut leaves `u`'s control exactly at `u`
+  obtain ⟨huid, hulen⟩ := (mem_progPoints_iff T u).mp hu
+  have hpredmem : (⟨u.thread, u.idx - 1⟩ : ProgPoint) ∈ T.progPoints :=
+    (mem_progPoints_iff T _).mpr
+      ⟨huid, by change u.idx - 1 < (T.prog u.thread).length; omega⟩
+  have hfcutu : fcut T τ ip u.thread = u.idx := by
+    have h1 := fcut_le_of_hb hbu hu
+    have h2 : u.idx - 1 < fcut T τ ip u.thread := lt_fcut_of_not_hb hnpred hpredmem
+    omega
+  -- decode the use command and expose it at the head of `u`'s remaining program
+  obtain ⟨cu, hcu, hcuse⟩ : ∃ cu, T.cmdAt u = some cu ∧
+      cu.usesMBarrier? = some sb := by
+    cases hc : T.cmdAt u with
+    | none => rw [hc] at huse; exact absurd huse (by simp)
+    | some c => rw [hc] at huse; exact ⟨c, rfl, by simpa using huse⟩
+  obtain ⟨hlt0, hget0⟩ := List.getElem?_eq_some_iff.mp
+    (show (T.prog u.thread)[u.idx]? = some cu from hcu)
+  have hheadu : T_G.prog u.thread = cu :: (T.prog u.thread).drop (u.idx + 1) := by
+    rw [hGprog u.thread, hfcutu, List.drop_eq_getElem_cons hlt0, hget0]
+  -- under-fullness certificates at the cut, given a barrier is not full
+  have hnguard : ∀ nb', ¬ s_G.FullBarrier (.inl nb') →
+      s_G.BN nb' = NamedBarrierState.unconfigured ∨
+      ∃ I A m, s_G.BN nb' = ⟨I, A, some m⟩ ∧ I.length + A < (m : Nat) := by
+    intro nb' hnf
+    rcases hb' : s_G.BN nb' with ⟨I', A', c'⟩
+    cases c' with
+    | none =>
+      obtain ⟨hI, hA⟩ := hwfG.2.1 nb' I' A' hb'
+      subst hI; subst hA
+      exact Or.inl rfl
+    | some m' =>
+      refine Or.inr ⟨I', A', m', rfl, ?_⟩
+      have hle := (hwfG.1 nb' I' A' m' hb').1
+      rcases Nat.lt_or_ge (I'.length + A') (m' : Nat) with h | h
+      · exact h
+      · exfalso
+        apply hnf
+        change (s_G.BN nb').isFull = true
+        rw [hb']
+        simp only [NamedBarrierState.isFull, beq_iff_eq]
+        omega
+  have hmguard : ∀ sb', ¬ s_G.FullBarrier (.inr sb') →
+      s_G.BM sb' = MBarrierState.uninitialized ∨
+      ∃ I A m ph, s_G.BM sb' = ⟨I, A, some m, ph⟩ ∧ A < (m : Nat) := by
+    intro sb' hnf
+    rcases hb' : s_G.BM sb' with ⟨I', A', c', ph'⟩
+    cases c' with
+    | none =>
+      obtain ⟨hI, hA, hph⟩ := hwfG.2.2.2.1 sb' I' A' ph' hb'
+      subst hI; subst hA; subst hph
+      exact Or.inl rfl
+    | some m' =>
+      refine Or.inr ⟨I', A', m', ph', rfl, ?_⟩
+      have hle := (hwfG.2.2.1 sb' I' A' m' ph' hb').1
+      rcases Nat.lt_or_ge A' (m' : Nat) with h | h
+      · exact h
+      · exfalso
+        apply hnf
+        change (s_G.BM sb').isFull = true
+        rw [hb']
+        simp only [MBarrierState.isFull, beq_iff_eq]
+        omega
+  -- drain the (at most one) full barrier: reach a config where the error guards
+  -- hold, with `u`'s program, enabledness, and `sb`'s pristine state intact
+  obtain ⟨s₂, T₂, hreach₂, hbar₂, hmbar₂, hprog₂, hE₂, hM₂⟩ :
+      ∃ (s₂ : State) (T₂ : CTA),
+        Relation.ReflTransGen CTAStep (Config.run State.initial T)
+          (Config.run s₂ T₂) ∧
+        (∀ nb', s₂.BN nb' = NamedBarrierState.unconfigured ∨
+          ∃ I A m, s₂.BN nb' = ⟨I, A, some m⟩ ∧ I.length + A < (m : Nat)) ∧
+        (∀ sb', s₂.BM sb' = MBarrierState.uninitialized ∨
+          ∃ I A m ph, s₂.BM sb' = ⟨I, A, some m, ph⟩ ∧ A < (m : Nat)) ∧
+        T₂.prog u.thread = T_G.prog u.thread ∧
+        s₂.E u.thread = true ∧ s₂.BM sb = MBarrierState.uninitialized := by
+    by_cases hfn : ∃ nb', s_G.FullBarrier (.inl nb')
+    · -- a full named barrier: recycle it (empty wake — nothing is blocked)
+      obtain ⟨nb, hfnb⟩ := hfn
+      have hfnb' : (s_G.BN nb).isFull = true := hfnb
+      rcases hbshape : s_G.BN nb with ⟨I, A, c⟩
+      cases c with
+      | none =>
+        rw [hbshape] at hfnb'
+        simp [NamedBarrierState.isFull] at hfnb'
+      | some m =>
+        have hfull : I.length + A = (m : Nat) := by
+          rw [hbshape] at hfnb'
+          simpa [NamedBarrierState.isFull] using hfnb'
+        have hInil : I = [] := by
+          rw [List.eq_nil_iff_forall_not_mem]
+          intro i hi
+          refine hbempty (.inl nb) i ?_
+          change i ∈ (s_G.BN nb).synced
+          rw [hbshape]
+          exact hi
+        subst hInil
+        have hrec : CTAStep (Config.run s_G T_G)
+            (Config.run
+              { s_G with E := updateMapOn s_G.E [] true,
+                         BN := Function.update s_G.BN nb
+                           NamedBarrierState.unconfigured }
+              (T_G.wake [])) :=
+          CTAStep.recycle hbshape hfull (by simp)
+        have hbar' : ∀ nb', Function.update s_G.BN nb NamedBarrierState.unconfigured nb' =
+            NamedBarrierState.unconfigured ∨
+            ∃ I' A' m', Function.update s_G.BN nb NamedBarrierState.unconfigured nb' =
+              ⟨I', A', some m'⟩ ∧ I'.length + A' < (m' : Nat) := by
+          intro nb'
+          by_cases hbb : nb' = nb
+          · subst hbb
+            rw [Function.update_self]
+            exact Or.inl rfl
+          · rw [Function.update_of_ne hbb]
+            refine hnguard nb' fun hf => hbb ?_
+            have hmem : (Sum.inl nb' : NamedBarrier ⊕ SharedBarrier) ∈
+                {b | s_G.FullBarrier b} := hf
+            have hmem₀ : (Sum.inl nb : NamedBarrier ⊕ SharedBarrier) ∈
+                {b | s_G.FullBarrier b} := hfnb
+            simpa using hamof hmem hmem₀
+        have hmbar' : ∀ sb', s_G.BM sb' = MBarrierState.uninitialized ∨
+            ∃ I' A' m' ph', s_G.BM sb' = ⟨I', A', some m', ph'⟩ ∧ A' < (m' : Nat) := by
+          intro sb'
+          refine hmguard sb' fun hf => ?_
+          have hmem : (Sum.inr sb' : NamedBarrier ⊕ SharedBarrier) ∈
+              {b | s_G.FullBarrier b} := hf
+          have hmem₀ : (Sum.inl nb : NamedBarrier ⊕ SharedBarrier) ∈
+              {b | s_G.FullBarrier b} := hfnb
+          simpa using hamof hmem hmem₀
+        have hEu : updateMapOn s_G.E [] true u.thread = true := by
+          rw [updateMapOn_apply, if_neg (by simp)]
+          exact hEall u.thread
+        have hpu : (T_G.wake []).prog u.thread = T_G.prog u.thread := by
+          simp [WeftCommon.CTA.wake]
+        exact ⟨_, _, hreachG.tail hrec, hbar', hmbar', hpu, hEu, hMG⟩
+    · by_cases hfm : ∃ sb', s_G.FullBarrier (.inr sb')
+      · -- a full mbarrier: mb-recycle it (empty wake); it is not `sb` (initialized)
+        obtain ⟨sb₀, hfsb⟩ := hfm
+        have hfsb' : (s_G.BM sb₀).isFull = true := hfsb
+        rcases hbshape : s_G.BM sb₀ with ⟨I, A, c, ph⟩
+        cases c with
+        | none =>
+          rw [hbshape] at hfsb'
+          simp [MBarrierState.isFull] at hfsb'
+        | some m =>
+          have hfull : A = (m : Nat) := by
+            rw [hbshape] at hfsb'
+            simpa [MBarrierState.isFull] using hfsb'
+          have hInil : I = [] := by
+            rw [List.eq_nil_iff_forall_not_mem]
+            intro i hi
+            refine hbempty (.inr sb₀) i ?_
+            change i ∈ (s_G.BM sb₀).waiting
+            rw [hbshape]
+            exact hi
+          subst hInil
+          have hne : sb ≠ sb₀ := by
+            intro h
+            rw [← h, hMG] at hbshape
+            simp [MBarrierState.uninitialized] at hbshape
+          have hrec : CTAStep (Config.run s_G T_G)
+              (Config.run
+                { s_G with E := updateMapOn s_G.E [] true,
+                           BM := Function.update s_G.BM sb₀
+                             ⟨[], 0, some m, !ph⟩ }
+                (T_G.wake [])) :=
+            CTAStep.mb_recycle hbshape hfull (by simp)
+          have hbar' : ∀ nb', s_G.BN nb' = NamedBarrierState.unconfigured ∨
+              ∃ I' A' m', s_G.BN nb' = ⟨I', A', some m'⟩ ∧
+                I'.length + A' < (m' : Nat) := by
+            intro nb'
+            refine hnguard nb' fun hf => ?_
+            have hmem : (Sum.inl nb' : NamedBarrier ⊕ SharedBarrier) ∈
+                {b | s_G.FullBarrier b} := hf
+            have hmem₀ : (Sum.inr sb₀ : NamedBarrier ⊕ SharedBarrier) ∈
+                {b | s_G.FullBarrier b} := hfsb
+            simpa using hamof hmem hmem₀
+          have hmbar' : ∀ sb', Function.update s_G.BM sb₀ ⟨[], 0, some m, !ph⟩ sb' =
+              MBarrierState.uninitialized ∨
+              ∃ I' A' m' ph', Function.update s_G.BM sb₀ ⟨[], 0, some m, !ph⟩ sb' =
+                ⟨I', A', some m', ph'⟩ ∧ A' < (m' : Nat) := by
+            intro sb'
+            by_cases hbb : sb' = sb₀
+            · subst hbb
+              rw [Function.update_self]
+              exact Or.inr ⟨[], 0, m, !ph, rfl, m.pos⟩
+            · rw [Function.update_of_ne hbb]
+              refine hmguard sb' fun hf => hbb ?_
+              have hmem : (Sum.inr sb' : NamedBarrier ⊕ SharedBarrier) ∈
+                  {b | s_G.FullBarrier b} := hf
+              have hmem₀ : (Sum.inr sb₀ : NamedBarrier ⊕ SharedBarrier) ∈
+                  {b | s_G.FullBarrier b} := hfsb
+              simpa using hamof hmem hmem₀
+          have hEu : updateMapOn s_G.E [] true u.thread = true := by
+            rw [updateMapOn_apply, if_neg (by simp)]
+            exact hEall u.thread
+          have hpu : (T_G.wake []).prog u.thread = T_G.prog u.thread := by
+            simp [WeftCommon.CTA.wake]
+          have hMu : Function.update s_G.BM sb₀ ⟨[], 0, some m, !ph⟩ sb =
+              MBarrierState.uninitialized := by
+            rw [Function.update_of_ne hne]
+            exact hMG
+          exact ⟨_, _, hreachG.tail hrec, hbar', hmbar', hpu, hEu, hMu⟩
+      · -- nothing is full: the guards already hold at the cut
+        push Not at hfn hfm
+        exact ⟨s_G, T_G, hreachG,
+          fun nb' => hnguard nb' (hfn nb'), fun sb' => hmguard sb' (hfm sb'),
+          rfl, hEall u.thread, hMG⟩
+  -- fire the error production at `u` and close against well-synchronization
+  have hstepu : ∃ P', ThreadStep (.run s₂ u.thread (T₂.prog u.thread))
+      (.err u.thread P') := by
+    rw [hprog₂, hheadu]
+    cases cu with
+    | arrive_mb sb' =>
+      have hsb' : sb' = sb := by simpa [Cmd.usesMBarrier?] using hcuse
+      subst hsb'
+      exact ⟨_, ThreadStep.mb_arrive_err hE₂ hM₂⟩
+    | wait_mb sb' ph' =>
+      have hsb' : sb' = sb := by simpa [Cmd.usesMBarrier?] using hcuse
+      subst hsb'
+      exact ⟨_, ThreadStep.mb_wait_err hE₂ hM₂⟩
+    | read l => simp [Cmd.usesMBarrier?] at hcuse
+    | write l => simp [Cmd.usesMBarrier?] at hcuse
+    | arrive_nb nb' n' => simp [Cmd.usesMBarrier?] at hcuse
+    | sync_nb nb' n' => simp [Cmd.usesMBarrier?] at hcuse
+    | init_mb sb' n' => simp [Cmd.usesMBarrier?] at hcuse
+  obtain ⟨P', hth⟩ := hstepu
+  have herrstep : CTAStep (Config.run s₂ T₂) (Config.err T₂) :=
+    CTAStep.error hbar₂ hmbar₂ hth
+  obtain ⟨l, hlch, hlhd, hllast⟩ := exists_chain_of_reaches (hreach₂.tail herrstep)
+  have htrace : IsCompleteTraceFrom (Config.run State.initial T) l :=
+    ⟨⟨hlch, Config.err T₂, hllast, Or.inr (Or.inl ⟨T₂, rfl⟩)⟩, hlhd⟩
+  obtain ⟨sd, hd⟩ := CTA.WellSynchronized.completeTrace_ends_done hws htrace
+  rw [hllast] at hd
+  simp at hd
 
 /-- **Mode 3: a use not forced after its (unique) initialization refutes
 well-synchronization.** From `¬ happensBefore (ip, u)`, a reversing schedule
