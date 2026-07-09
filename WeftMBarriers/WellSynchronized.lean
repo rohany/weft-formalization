@@ -1021,6 +1021,61 @@ theorem arrive_mb_head_drop_same_thread {C C' : Config} (hstep : CTAStep C C')
     rw [h1] at h1'
     simp at h1'
 
+/-- Two `arrive_nb` heads cannot drop in one step unless on the same thread —
+the `arrive_nb` sibling of `init_head_drop_same_thread`. -/
+theorem arrive_nb_head_drop_same_thread {C C' : Config} (hstep : CTAStep C C')
+    {t t' : ThreadId} {nb nb' : NamedBarrier} {n n' : ℕ+} {r r' : Prog}
+    (h1 : C.progOf t = Cmd.arrive_nb nb n :: r) (h1' : C'.progOf t = r)
+    (h2 : C.progOf t' = Cmd.arrive_nb nb' n' :: r') (h2' : C'.progOf t' = r') : t = t' := by
+  cases hstep with
+  | @interleave s s₁ T i P' hi hbar hmbar hth =>
+    simp only [WeftCommon.Config.progOf] at h1 h1' h2 h2'
+    by_cases ht : t = i
+    · by_cases ht' : t' = i
+      · rw [ht, ht']
+      · exfalso
+        simp only [WeftCommon.CTA.set, Function.update_of_ne ht'] at h2'
+        rw [h2] at h2'
+        simp at h2'
+    · exfalso
+      simp only [WeftCommon.CTA.set, Function.update_of_ne ht] at h1'
+      rw [h1] at h1'
+      simp at h1'
+  | @recycle s T nb₀ I A n₀ hb hfull hpark =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at h1 h1'
+    by_cases h : t ∈ I
+    · have hpk := hpark t h
+      rw [h1] at hpk
+      simp at hpk
+    · simp only [WeftCommon.CTA.wake, if_neg h] at h1'
+      rw [h1] at h1'
+      simp at h1'
+  | @mb_recycle s T sb₀ I A n₀ ph hb hfull hpark =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at h1 h1'
+    by_cases h : t ∈ I
+    · have hpk := hpark t h
+      rw [h1] at hpk
+      simp at hpk
+    · simp only [WeftCommon.CTA.wake, if_neg h] at h1'
+      rw [h1] at h1'
+      simp at h1'
+  | @done s T hdone _ _ =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at h1
+    have hnil : T.prog t = [] := by
+      by_cases hti : t ∈ T.ids
+      · exact hdone t hti
+      · exact T.nil_outside_ids t hti
+    rw [hnil] at h1
+    simp at h1
+  | @error s T i P' _ _ hth =>
+    exfalso
+    simp only [WeftCommon.Config.progOf] at h1 h1'
+    rw [h1] at h1'
+    simp at h1'
+
 /-- The step that drops an `arrive_mb sb` head increments `sb`'s arrival
 count by exactly one. -/
 theorem arrive_mb_drop_arrived {C C' : Config} (hstep : CTAStep C C') {t : ThreadId}
